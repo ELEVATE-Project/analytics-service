@@ -1,6 +1,12 @@
 import os
 import sys
+import warnings
 from pathlib import Path
+
+# Suppress warnings from transformers, UMAP, and OpenMP
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+os.environ["KMP_WARNINGS"] = "0"
 
 # Add the root directory containing the 'app' module to sys.path to resolve imports correctly
 # And load the parent .env file to ensure settings are loaded properly when run from a subfolder
@@ -53,7 +59,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
-logger = logging.getLogger("thematic_batch_tritopic")
+logger = logging.getLogger("thematic_tritopic")
 
 def is_english(text: str) -> bool:
     """Strictly checks if a string contains only ASCII characters (standard English text), ignoring safe punctuation."""
@@ -68,7 +74,7 @@ def is_english(text: str) -> bool:
         return False
 
 # Semantic matching settings
-CROSS_REF_SIMILARITY_THRESHOLD = 0.55  # Cosine similarity threshold for mapping to approved themes
+CROSS_REF_SIMILARITY_THRESHOLD = 0.65  # Cosine similarity threshold for mapping to approved themes
 
 
 async def migrate_database(conn: asyncpg.Connection):
@@ -178,6 +184,15 @@ async def save_mappings_to_db(conn: asyncpg.Connection, mapped_themes_data: dict
 
 from app.services.llm import openrouter_chat_completion
 
+def estimate_tokens(text: str) -> int:
+    try:
+        import tiktoken
+        encoding = tiktoken.get_encoding("cl100k_base")
+        return len(encoding.encode(text))
+    except Exception:
+        # Fallback to standard character-based heuristic: ~4 chars per token for English
+        return max(1, int(len(text) / 4))
+
 def generate_draft_theme_metadata_llm(cluster_texts: list) -> dict:
     """
     Given a list of representative objectives belonging to a cluster,
@@ -190,7 +205,7 @@ def generate_draft_theme_metadata_llm(cluster_texts: list) -> dict:
     {json.dumps(sample_texts, indent=2)}
 
     Generate a Theme Name, a detailed and comprehensive Theme Definition (2-3 sentences outlining the semantic boundaries of this theme, what it includes, and the context or impact, matching the style and depth of academic definitions), and Keywords.
-    Return ONLY a valid JSON object matching:
+    Return ONLY a valid English-only JSON object matching:
     {{
         "theme_name": "Concise Theme Name",
         "theme_definition": "Detailed, comprehensive semantic definition of 2-3 sentences outlining what the theme captures and includes.",
@@ -199,19 +214,28 @@ def generate_draft_theme_metadata_llm(cluster_texts: list) -> dict:
     Do not wrap in ```json ... ``` code blocks.
     """
     
+    prompt_tokens = estimate_tokens(prompt)
     max_retries = 10
     retry_delay = 60
     
     for attempt in range(1, max_retries + 1):
         try:
             response_text = openrouter_chat_completion(prompt)
+            completion_tokens = estimate_tokens(response_text)
+            
             # clean markdown wrappers
-            if response_text.strip().startswith("```"):
-                lines = response_text.strip().splitlines()
+            cleaned_text = response_text
+            if cleaned_text.strip().startswith("```"):
+                lines = cleaned_text.strip().splitlines()
                 if lines[0].startswith("```json") or lines[0].startswith("```"):
                     lines = lines[1:-1]
-                response_text = "\n".join(lines).strip()
-            return json.loads(response_text)
+                cleaned_text = "\n".join(lines).strip()
+            
+            result = json.loads(cleaned_text)
+            result["prompt_tokens"] = prompt_tokens
+            result["completion_tokens"] = completion_tokens
+            result["total_tokens"] = prompt_tokens + completion_tokens
+            return result
         except Exception as e:
             error_str = str(e)
             if "429" in error_str or "rate limit" in error_str.lower():
@@ -225,7 +249,10 @@ def generate_draft_theme_metadata_llm(cluster_texts: list) -> dict:
                 return {
                     "theme_name": "Error Theme",
                     "theme_definition": "Error fallback theme definition",
-                    "keywords": ["error"]
+                    "keywords": ["error"],
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": 0,
+                    "total_tokens": prompt_tokens
                 }
 # =========================================================================
 
@@ -303,7 +330,46 @@ async def generate_pm_review_csv(conn: asyncpg.Connection, output_path: Path):
                 for stmt in statements[1:]:
                     writer.writerow(["", "", "", "", "", "", stmt])
 
-    logger.info(f"Successfully generated PM review CSV file at: {output_path.resolve()}")
+import sys
+import io
+from contextlib import contextmanager
+
+class CleanStdoutRedirector(io.TextIOBase):
+    def __init__(self, original_stdout, logger_func):
+        self.original_stdout = original_stdout
+        self.logger_func = logger_func
+        self.buffer = ""
+
+    def write(self, s):
+        self.buffer += s
+        while "\n" in self.buffer:
+            line, self.buffer = self.buffer.split("\n", 1)
+            line_lower = line.lower()
+            if "iteration" in line_lower or "ari" in line_lower or "converged" in line_lower or "fitting complete" in line_lower or "fitting model" in line_lower:
+                cleaned = line.strip()
+                if "iteration" in line_lower and "/" in line_lower:
+                    self.logger_func(f"TriTopic {cleaned}")
+                elif "ari vs previous" in line_lower:
+                    self.logger_func(f"TriTopic {cleaned}")
+                elif "converged" in line_lower:
+                    self.logger_func(f"TriTopic {cleaned}")
+                elif "fitting complete" in line_lower:
+                    self.logger_func(f"TriTopic {cleaned}")
+                else:
+                    self.logger_func(cleaned)
+        return len(s)
+
+    def flush(self):
+        pass
+
+@contextmanager
+def clean_tritopic_print():
+    original_stdout = sys.stdout
+    sys.stdout = CleanStdoutRedirector(original_stdout, logger.info)
+    try:
+        yield
+    finally:
+        sys.stdout = original_stdout
 
 
 async def main_async():
@@ -480,12 +546,18 @@ async def main_async():
                 use_dim_reduction=len(unmapped_texts) >= 15,
                 use_lexical_view=True,
                 use_iterative_refinement=True,
-                n_consensus_runs=10,
+                resolution=0.75,
+                n_consensus_runs=15,
+                max_iterations=8,
+                convergence_threshold=0.95,
                 min_cluster_size=2,
-                verbose=True
+                verbose=True,
+                knn_backend="exact"
             )
             tritopic_model = TriTopic(tritopic_cfg)
-            tritopic_model.fit(unmapped_texts, embeddings=unmapped_embeddings)
+            
+            with clean_tritopic_print():
+                tritopic_model.fit(unmapped_texts, embeddings=unmapped_embeddings)
             
             # Map TriTopic local cluster labels to candidate themes
             # Filter out outliers (marked as -1)
@@ -506,16 +578,26 @@ async def main_async():
                 topic_info_obj = tritopic_model.get_topic(local_id)
                 keywords = topic_info_obj.keywords[:5]
 
-                # Average similarity within the cluster as the confidence score
-                score = 0.85
+                # # Average similarity within the cluster as the confidence score
+                # score = 0.85
+                # Calculate average similarity of cluster members to the cluster centroid
+                cluster_embs = objectives_embeddings[cluster_member_indices]
+                cluster_centroid = np.mean(cluster_embs, axis=0).reshape(1, -1)
+                member_similarities = cosine_similarity(cluster_embs, cluster_centroid)
+                score = float(np.mean(member_similarities))
 
                 # Generate metadata (LLM call is used only if cluster size > 10)
+                p_tokens, c_tokens, t_tokens = 0, 0, 0
                 if len(cluster_texts) > 10:
                     logger.info(f"Generating theme name & definition via LLM for Candidate Theme (Cluster {local_id + 1}) with {len(cluster_texts)} objectives...")
                     llm_meta = generate_draft_theme_metadata_llm(cluster_texts)
                     theme_name = llm_meta.get("theme_name", f"Candidate Theme (Cluster {local_id + 1})")
                     theme_def = llm_meta.get("theme_definition", f"Locally clustered theme containing {len(cluster_texts)} objectives. Sample text: '{cluster_texts[0]}'")
                     keywords = llm_meta.get("keywords", keywords)
+                    p_tokens = llm_meta.get("prompt_tokens", 0)
+                    c_tokens = llm_meta.get("completion_tokens", 0)
+                    t_tokens = llm_meta.get("total_tokens", 0)
+                    logger.info(f"LLM generated theme '{theme_name}' using {p_tokens} prompt tokens and {c_tokens} completion tokens (Total: {t_tokens}).")
                 else:
                     theme_name = f"Candidate Theme (Cluster {local_id + 1})"
                     theme_def = f"Locally clustered theme containing {len(cluster_texts)} objectives. Sample text: '{cluster_texts[0]}'"
@@ -528,11 +610,155 @@ async def main_async():
                     "keywords": keywords,
                     "examples": examples,
                     "confidence_score": score,
+                    "prompt_tokens": p_tokens,
+                    "completion_tokens": c_tokens,
+                    "total_tokens": t_tokens,
                     "mappings": [
-                        {"story_id": item["id"], "score": score}
-                        for item in cluster_objectives
+                        {"story_id": item["id"], "score": float(member_similarities[j][0])}
+                        for j, item in enumerate(cluster_objectives)
                     ]
                 })
+
+                # Update the label in the model's topic metadata so that visualizations pick it up!
+                # Truncate long names for chart readability (full name is preserved in CSV/DB)
+                short_label = (theme_name[:37] + "...") if len(theme_name) > 40 else theme_name
+                for t in tritopic_model.topics_:
+                    if t.topic_id == local_id:
+                        t.label = short_label
+
+            # Generate HTML visualizations if draft_themes were created
+            if draft_themes:
+                logger.info("Generating interactive Plotly visualizations...")
+                viz_dir = Path(args.output).resolve().parent / (Path(args.output).stem + "_visualizations")
+                viz_dir.mkdir(parents=True, exist_ok=True)
+                
+                # 1. 2D Document Map
+                try:
+                    fig_doc = tritopic_model.visualize(width=1000, height=700)
+                    fig_doc.update_layout(
+                        margin=dict(l=60, r=60, t=80, b=60),
+                    )
+                    fig_doc.write_html(str(viz_dir / "document_map.html"))
+                    fig_doc.write_json(str(viz_dir / "document_map.json"))
+                    logger.info(f"Saved 2D Document Map to {viz_dir / 'document_map.html'}")
+                except Exception as e:
+                    logger.error(f"Failed to generate 2D Document Map: {e}")
+                    
+                # 2. Horizontal Keyword Bars
+                try:
+                    n_topics = len(unique_labels)
+                    # Scale height: ~300px per topic, capped at 8000px to avoid Plotly crashes
+                    # Reduce n_keywords for large topic counts to keep the chart manageable
+                    n_kw = 8 if n_topics > 15 else 15
+                    kw_height = min(max(600, 300 * n_topics), 8000)
+                    fig_topics = tritopic_model.visualize_topics(width=1000, height=kw_height, n_keywords=n_kw)
+                    # Increase left margin for y-axis labels
+                    fig_topics.update_layout(
+                        margin=dict(l=220, r=60, t=80, b=60),
+                    )
+                    # Push subplot titles upward for breathing room
+                    for ann in fig_topics.layout.annotations:
+                        if hasattr(ann, 'y'):
+                            ann.update(yshift=10)
+                    fig_topics.write_html(str(viz_dir / "topics_keywords.html"))
+                    fig_topics.write_json(str(viz_dir / "topics_keywords.json"))
+                    logger.info(f"Saved Topics Keywords (height={kw_height}px, n_topics={n_topics}, n_keywords={n_kw}) to {viz_dir / 'topics_keywords.html'}")
+                except Exception as e:
+                    logger.error(f"Failed to generate Topics Keywords: {e}")
+
+
+                # 3. Hierarchy Dendrogram (custom build with distance annotations)
+                try:
+                    from scipy.cluster.hierarchy import linkage, dendrogram
+                    from scipy.spatial.distance import pdist
+                    import plotly.graph_objects as go
+
+                    valid_topics = [t for t in tritopic_model.topics_ if t.topic_id != -1]
+                    topic_embs = tritopic_model.topic_embeddings_
+                    distances = pdist(topic_embs, metric="cosine")
+                    Z = linkage(distances, method="ward")
+                    labels_dendro = [t.label or f"Topic {t.topic_id}" for t in valid_topics]
+                    dendro = dendrogram(Z, labels=labels_dendro, no_plot=True)
+
+                    fig_hier = go.Figure()
+                    icoord = dendro["icoord"]
+                    dcoord = dendro["dcoord"]
+
+                    # Draw the U-shaped merge lines
+                    for xs, ys in zip(icoord, dcoord):
+                        fig_hier.add_trace(go.Scatter(
+                            x=xs, y=ys,
+                            mode="lines",
+                            line=dict(color="#636EFA", width=2),
+                            showlegend=False,
+                            hoverinfo="skip",
+                        ))
+
+                    # Add distance annotations at each merge point (top of the U)
+                    for xs, ys in zip(icoord, dcoord):
+                        # The merge height is the horizontal segment: ys[1] == ys[2]
+                        merge_height = ys[1]
+                        merge_x = (xs[1] + xs[2]) / 2  # center of horizontal bar
+                        fig_hier.add_annotation(
+                            x=merge_x,
+                            y=merge_height,
+                            text=f"<b>{merge_height:.2f}</b>",
+                            showarrow=False,
+                            font=dict(size=10, color="#333"),
+                            yshift=10,  # shift above the line
+                            bgcolor="rgba(255,255,255,0.8)",
+                            borderpad=2,
+                        )
+
+                    fig_hier.update_layout(
+                        title=dict(text="Topic Hierarchy", font=dict(size=16)),
+                        width=1000,
+                        height=700,
+                        margin=dict(l=80, r=80, t=80, b=280),
+                        xaxis=dict(
+                            ticktext=dendro["ivl"],
+                            tickvals=list(range(5, len(dendro["ivl"]) * 10, 10)),
+                        tickangle=-35,
+                        tickfont=dict(size=11),
+                        automargin=True,
+                        ),
+                        yaxis=dict(title="Distance"),
+                        template="plotly_white",
+                    )
+                    fig_hier.write_html(str(viz_dir / "hierarchy_tree.html"))
+                    fig_hier.write_json(str(viz_dir / "hierarchy_tree.json"))
+                    logger.info(f"Saved Hierarchy Tree (with distance annotations) to {viz_dir / 'hierarchy_tree.html'}")
+                except Exception as e:
+                    logger.error(f"Failed to generate Hierarchy Tree: {e}")
+
+                # 4. Cosine Similarity Heatmap
+                try:
+                    from tritopic.visualization.plotter import TopicVisualizer
+                    visualizer = TopicVisualizer()
+                    fig_sim = visualizer.plot_topic_similarity(
+                        topic_embeddings=tritopic_model.topic_embeddings_,
+                        topics=tritopic_model.topics_,
+                        width=900,
+                        height=900
+                    )
+                    # Increase margins for long axis labels on both axes
+                    fig_sim.update_layout(
+                        margin=dict(l=250, r=60, t=80, b=250),
+                    )
+                    fig_sim.update_xaxes(
+                        tickangle=-35,
+                        tickfont=dict(size=11),
+                        automargin=True,
+                    )
+                    fig_sim.update_yaxes(
+                        tickfont=dict(size=11),
+                        automargin=True,
+                    )
+                    fig_sim.write_html(str(viz_dir / "topic_similarity.html"))
+                    fig_sim.write_json(str(viz_dir / "topic_similarity.json"))
+                    logger.info(f"Saved Topic Similarity Heatmap to {viz_dir / 'topic_similarity.html'}")
+                except Exception as e:
+                    logger.error(f"Failed to generate Topic Similarity Heatmap: {e}")
 
         # 7. Save results back to Postgres database
         all_statements_dict = {item["id"]: item["objective"] for item in raw_objectives}
@@ -551,6 +777,10 @@ async def main_async():
             elif size in cluster_counts:
                 cluster_counts[size] += 1
 
+        total_prompt_tokens = sum(dt.get("prompt_tokens", 0) for dt in draft_themes)
+        total_completion_tokens = sum(dt.get("completion_tokens", 0) for dt in draft_themes)
+        total_llm_tokens = total_prompt_tokens + total_completion_tokens
+
         logger.info("=========================================")
         logger.info("           OVERVIEW STATISTICS           ")
         logger.info("=========================================")
@@ -565,6 +795,10 @@ async def main_async():
         logger.info("-----------------------------------------")
         for size in range(1, 11):
             logger.info(f"Number of clusters with count = {size:2d}:       {cluster_counts[size]}")
+        logger.info("-----------------------------------------")
+        logger.info(f"Total LLM Prompt Tokens:                 {total_prompt_tokens}")
+        logger.info(f"Total LLM Completion Tokens:             {total_completion_tokens}")
+        logger.info(f"Total LLM Tokens Used:                   {total_llm_tokens}")
         logger.info("=========================================")
 
         # 9. Generate PM review CSV automatically
@@ -572,6 +806,35 @@ async def main_async():
         if not output_path.is_absolute():
             output_path = Path(__file__).resolve().parent / output_path
         await generate_pm_review_csv(conn, output_path)
+
+        # 10. Save run metadata JSON to viz_dir for the Streamlit dashboard
+        import json as _json
+        from datetime import datetime as _dt
+        draft_mapped_count = sum(len(dt["mappings"]) for dt in draft_themes)
+        run_meta = {
+            "run_timestamp":            _dt.now().isoformat(timespec="seconds"),
+            "similarity_threshold":     CROSS_REF_SIMILARITY_THRESHOLD,
+            "total_objectives_in_csv":  total_csv_rows_in_file,
+            "total_objectives_processed": total_csv_rows_processed,
+            "skipped_non_english":      skipped_non_english_count,
+            "skipped_empty":            empty_objectives_count,
+            "mapped_to_approved_themes": mapped_count,
+            "unmapped_after_approved":  unmapped_count,
+            "draft_clusters_identified": len(draft_themes),
+            "clusters_gt_10":           clusters_gt_10,
+            "mapped_to_draft_themes":   draft_mapped_count,
+            "total_mapped":             mapped_count + draft_mapped_count,
+            "llm_prompt_tokens":        total_prompt_tokens,
+            "llm_completion_tokens":    total_completion_tokens,
+            "llm_total_tokens":         total_llm_tokens,
+        }
+        try:
+            meta_path = viz_dir / "run_meta.json"
+            with open(str(meta_path), "w") as _f:
+                _json.dump(run_meta, _f, indent=2)
+            logger.info(f"Saved run metadata to {meta_path}")
+        except Exception as e:
+            logger.warning(f"Could not save run_meta.json: {e}")
 
     finally:
         await conn.close()
