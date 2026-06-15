@@ -1,0 +1,75 @@
+INSERT INTO themes (id, name, definitions, keywords, examples, status)
+VALUES
+(
+  '550e8400-e29b-41d4-a716-446655440001'::UUID,
+  'Poverty and Economic Barriers',
+  'This theme captures insights where families link irregular school attendance or dropouts to financial hardship. It includes responses describing how poverty forces children to prioritize work over education, how households depend on children''s income for survival, and how limited resources—such as inability to afford uniforms, books, or transport—become barriers to schooling.',
+  'Poor,no money,lack of money,financial constraints,child labour,economic constraint,unemployment,financial difficulties',
+  'Due to economic constraints, families force girls to engage in domestic work or labour, which hinders their education|Due to poor financial condition, the girl is not able to study|Poverty in the society is another challenge that affects education|Financial constraints and poverty were major challenges for some families in educating their daughters|Unemployment in the family is a significant problem that affects children''s education|Financial difficulties greatly affect a child''s education',
+  'approved'
+),
+(
+  '550e8400-e29b-41d4-a716-446655440002'::UUID,
+  'Legal Document linked Barriers',
+  'This theme includes responses where children are unable to enroll in school due to missing or incomplete legal documents such as Aadhaar cards, birth certificates, or identity proofs. It captures how lack of proper documentation creates administrative hurdles that keep children out of the education system.',
+  'No Aadhar card,no birth certificate,lack of Aadhar card,no ID,no legal document,enrollment barriers due to no Aadhar card',
+  'Aadhar cards of children have not been made, due to which they are not getting admission in school|Due to lack of Aadhar cards, schools in the community are facing challenges in enrolling children|Children are not getting admission due to lack of Aadhaar card, which is affecting their education',
+  'approved'
+),
+(
+  '550e8400-e29b-41d4-a716-446655440003'::UUID,
+  'Early Marriage',
+  'This theme captures responses where child marriage or early marriage prevents girls from continuing their education. It includes situations where early marriage leads to school dropout, limits learning opportunities, or shifts responsibilities toward household duties instead of schooling.',
+  'Child marriage,marriage,early marriage',
+  'Child marriage is a prevalent issue in the community|Child marriage is prevalent which causes girls to drop out of school before completing their education',
+  'approved'
+),
+(
+  '550e8400-e29b-41d4-a716-446655440004'::UUID,
+  'Distance and Accessibility Issues',
+  'This theme captures challenges that prevent children from attending school due to physical and environmental conditions. It includes long distances to school, poor road or transport infrastructure, and difficulties caused by weather or seasonal factors (such as heavy rains, heat, or floods). These conditions make daily travel to school inconvenient, unreliable, or physically demanding for children.',
+  'school is far,distance of school,no bus,lack of transportation,no road,roads are bad,no school in village,rain,hot,heat,sun,has to walk a lot,long distances,no clean roads',
+  'The school is very far from the village|If the school is far away, children cannot go there|The child is unable to reach school due to rain|There is no school in the village, the school is very far from the village, due to this the girls leave their studies midway|The transportation system is a significant problem, making it difficult for children to reach school on time|There is a lack of buses for children and teachers to come to class|Children are not able to go to school because the school is far away and the roads are bad so they cannot go to study|The child is unable to go to school because of the heat|Sun, heat, rain and rain create hindrance in studies',
+  'approved'
+),
+(
+  '550e8400-e29b-41d4-a716-446655440005'::UUID,
+  'Parental Attitudes and Socio-Cultural Barriers',
+  'This theme captures responses where parental beliefs, family mindsets, and cultural norms discourage girls from attending school. It includes attitudes such as prioritizing domestic roles for girls, believing education is unnecessary for them, concerns about dowry increasing with higher education, or long-standing traditions that limit girls'' mobility and learning opportunities. These socio-cultural factors collectively shape decisions that keep girls out of school.',
+  'Discrimination,cultural beliefs,social pressure,not allowed,marriage,dowry,take care of siblings,girls do not need to study,girls run away,speak foul language',
+  'Cultural beliefs that girls do not need education because they will only get married and stay at home are a major challenge|Gender discrimination is a significant issue in the community, affecting the education and empowerment of girls|Purdah system is prevalent in Muslim community, due to which we do not send teenage girls out|The community believes that educating girls will increase the demand for dowry|Social discrimination based on caste or gender also leads to low participation|Social pressure was identified as another challenge that can prevent girls from pursuing their education|Girls leave their studies and run away. Due to this fear, parents are unable to provide higher education to their daughters|Parents are afraid that their daughters might get exposed to foul language and hence do not allow them to go to school|Girls are not allowed to study for fear of going astray or running away',
+  'approved'
+),
+(
+  '550e8400-e29b-41d4-a716-446655440006'::UUID,
+  'School Infrastructure and Facility Issues',
+  'This theme captures responses highlighting gaps in school facilities and infrastructure gaps. It includes issues such as inadequate classrooms, lack of basic amenities, insufficient learning resources, as well as delays, inconsistencies, or limited access to government schemes. Together, these systemic gaps reduce the attractiveness and effectiveness of schooling for children and families.',
+  'No clean water,toilets,mid day meal,scholarships,playgrounds,classrooms,pads,hygiene,books,uniforms,government schemes,sanitation,infrastructure,clean,cleanliness,no library,shortage of books,basic facilities',
+  'Our school children are not given books on time|The benefits of government schemes are not being received, due to which children are not going to school|Children did not get uniforms|Sanitary pads are not provided in school|Mid day meals are not provided properly to the children in the school|Lack of toilets in schools|Girls face significant barriers to accessing education due to poor infrastructure and lack of resources|Lack of school infrastructure, including poor classrooms, sanitation facilities, water, and transportation, hinders the learning environment|There is no water in the toilet|There is no fan facility in my school|Drinking water is a challenge in schools|There are not enough playgrounds for sports children|The environment around the school is not clean, which affects the health and well-being of children|The library lacks sufficient books for students',
+  'approved'
+),
+(
+  '550e8400-e29b-41d4-a716-446655440007'::UUID,
+  'Teacher Capacity and Quality Issues',
+  'This theme covers responses highlighting challenges related to insufficient teachers or concerns about teaching quality. It includes issues such as vacant positions, irregular teacher attendance, overburdened staff, and gaps in subject knowledge or pedagogy. These factors affect the learning environment and reduce children''s motivation to attend school regularly.',
+  'Shortage,quality issue,teacher not on time,dont pay attention,slow learning progress,academic progress,lack in academics,Lack of english education',
+  'There is a shortage of teachers in the school, due to which subject-wise studies are not done|The work of the teacher is not being done properly in our school|Attendance of teachers is a problem|Teachers do not come to school on time|Teachers do not pay attention to them|The quality of teachers is a major concern|The community lacks education, training and management of teachers, which affects the quality of teaching|Lack of language-specific teachers in school|Children''s learning progress is a challenge|There is a lack of English medium education in government schools',
+  'approved'
+),
+(
+  '550e8400-e29b-41d4-a716-446655440008'::UUID,
+  'Safety Concerns',
+  'This theme includes responses where children''s school attendance is affected by worries related to their overall safety and security. It covers issues such as unsafe routes, harassment, or any situation that makes families feel that the environment around schooling is not secure enough for children to travel or attend regularly.',
+  'Harassment,molestation,eve-teasing,tease,violence,environment around house,house surroundings',
+  'The presence of stray dogs on the streets as children walk to school raises concerns about their safety|Violence against women is a significant issue|It is a challenge for parents in the village to protect their girls from molestation|Seeing the atmosphere of the village, there is a fear in the minds of parents that someone might tease their daughter|Musahar children face harassment from other children in school because of their caste, which causes them to develop fear and reluctance to go to school|The school premises do not have a boundary wall, which poses a security threat|Girls are harassed on their way to school due to which they are afraid and are refusing to go to school|The community raised concerns about the environment around the house',
+  'approved'
+),
+(
+  '550e8400-e29b-41d4-a716-446655440009'::UUID,
+  'Substance Abuse and Addiction',
+  'This theme captures responses where children''s education is affected by alcohol or drug use within the family or community, as well as issues like gambling or addiction to online games. These problems create unstable home environments, distract children from studies, and contribute to irregular attendance or dropout.',
+  'Addiction,Addicted,Alcohol,Drugs,Alcoholism,online games,mobile phones,Gambling',
+  'Gambling addiction in children|Children''s education is affected by alcohol|Drug addiction is a significant challenge that is affecting the education of children in the community|The father is an alcoholic, so the daughter is being forced to study|Alcohol addiction in a household member is a problem|Children use mobile phones more often|Children are increasingly playing online games using mobile phones',
+  'approved'
+)
+ON CONFLICT (name) DO NOTHING;
