@@ -17,8 +17,8 @@ def openrouter_chat_completion(prompt: str) -> str:
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY environment variable is not set")
 
-    # Log the raw prompt to the terminal console for easy visibility
-    logger.info(f"\n=================== [LLM CALL] RAW PROMPT SENT TO MODEL '{model}' ===================\n{prompt}\n=================================================================================")
+    # Log the raw prompt to the terminal console under DEBUG level to avoid cluttering standard logs
+    logger.debug(f"\n=================== [LLM CALL] RAW PROMPT SENT TO MODEL '{model}' ===================\n{prompt}\n=================================================================================")
 
     request_body = {
         "model": model,

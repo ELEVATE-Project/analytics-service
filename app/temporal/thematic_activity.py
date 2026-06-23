@@ -120,7 +120,7 @@ async def _classify_single_statement(
     }
     result = {
         "statement": statement,
-        "content_quality": None,
+        "category_type": None,
         "theme_id": None,
         "similarity_score": None,
         "confidence_score": None,
@@ -134,7 +134,7 @@ async def _classify_single_statement(
     diagnostics["word_count_check"]["word_count"] = word_count
     logger.info(f"[Thematic Pipeline] Step 2: Checking word-count threshold (words={word_count}, minimum={settings.MINIMUM_THEME_WORD_COUNT})")
     if word_count < settings.MINIMUM_THEME_WORD_COUNT or _is_garbage_or_spam(statement):
-        result["content_quality"] = "Unknown/Unclear"
+        result["category_type"] = "Unknown/Unclear"
         await insert_analysis_result(
             conn,
             submission_id=submission_id,
@@ -143,7 +143,7 @@ async def _classify_single_statement(
             analysis_type="theme",
             statements=statement,
             statement_type=statement_type,
-            content_quality="Unknown/Unclear",
+            category_type="Unknown/Unclear",
         )
         logger.info(f"[Thematic Pipeline] -> FAILED word-count/garbage gate. Marked Unknown/Unclear.")
         return result
@@ -156,7 +156,7 @@ async def _classify_single_statement(
     flagged = is_flagged(statement)
     diagnostics["safety_check"]["is_flagged"] = flagged
     if flagged:
-        result["content_quality"] = "Flagged"
+        result["category_type"] = "Flagged"
         await insert_analysis_result(
             conn,
             submission_id=submission_id,
@@ -165,7 +165,7 @@ async def _classify_single_statement(
             analysis_type="theme",
             statements=statement,
             statement_type=statement_type,
-            content_quality="Flagged",
+            category_type="Flagged",
         )
         logger.info(f"[Thematic Pipeline] -> FAILED safety check. Statement contains flagged content.")
         return result
@@ -185,7 +185,7 @@ async def _classify_single_statement(
     if best_similarity >= settings.SIMILARITY_SCORE_THRESHOLD and best_theme_id:
         diagnostics["local_embedding_compare"]["passed"] = True
         # Local match is strong enough — Standard
-        result["content_quality"] = "Standard"
+        result["category_type"] = "Standard"
         result["theme_id"] = best_theme_id
         await insert_analysis_result(
             conn,
@@ -195,7 +195,7 @@ async def _classify_single_statement(
             analysis_type="theme",
             statements=statement,
             statement_type=statement_type,
-            content_quality="Standard",
+            category_type="Standard",
             similarity_score=best_similarity,
         )
         theme_name = theme_id_to_info.get(best_theme_id, {}).get("name", "?")
@@ -291,10 +291,10 @@ async def _classify_single_statement(
             status="success",
         )
 
-        # --- Step 9: Finalize content_quality ---
+        # --- Step 9: Finalize category_type ---
         if llm_confidence is not None and llm_confidence >= settings.LLM_CONFIDENCE_SCORE_THRESHOLD and llm_theme_id:
             diagnostics["llm_fallback"]["passed"] = True
-            result["content_quality"] = "Standard"
+            result["category_type"] = "Standard"
             result["theme_id"] = llm_theme_id
             await insert_analysis_result(
                 conn,
@@ -304,7 +304,7 @@ async def _classify_single_statement(
                 analysis_type="theme",
                 statements=statement,
                 statement_type=statement_type,
-                content_quality="Standard",
+                category_type="Standard",
                 confidence_score=llm_confidence,
                 similarity_score=best_similarity,
                 justification=llm_justification,
@@ -312,7 +312,7 @@ async def _classify_single_statement(
             logger.info(f"LLM match: '{statement[:60]}...' → {llm_theme_name} (conf={llm_confidence:.2f})")
         else:
             # Others — vague, multi-theme, off-taxonomy, low confidence
-            result["content_quality"] = "Others"
+            result["category_type"] = "Others"
             await insert_analysis_result(
                 conn,
                 submission_id=submission_id,
@@ -321,7 +321,7 @@ async def _classify_single_statement(
                 analysis_type="theme",
                 statements=statement,
                 statement_type=statement_type,
-                content_quality="Others",
+                category_type="Others",
                 confidence_score=llm_confidence,
                 similarity_score=best_similarity,
                 justification=llm_justification,
@@ -332,7 +332,7 @@ async def _classify_single_statement(
         logger.error(f"LLM fallback failed for statement: {e}")
         diagnostics["llm_fallback"]["error"] = str(e)
         # Fall through to Others on LLM failure
-        result["content_quality"] = "Others"
+        result["category_type"] = "Others"
         await insert_analysis_result(
             conn,
             submission_id=submission_id,
@@ -341,7 +341,7 @@ async def _classify_single_statement(
             analysis_type="theme",
             statements=statement,
             statement_type=statement_type,
-            content_quality="Others",
+            category_type="Others",
             similarity_score=best_similarity,
         )
 
@@ -351,7 +351,7 @@ async def _classify_single_statement(
 @activity.defn
 async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Temporal activity that performs content-quality-gated thematic classification.
+    Temporal activity that performs category-type-gated thematic classification.
 
     Pipeline:
       Step 1:  Read column config, extract text
@@ -363,7 +363,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
       Step 6:  Local embedding classification
       Step 7:  Build LLM prompt (if similarity below threshold)
       Step 8:  Call LLM, parse confidence
-      Step 9:  Finalize content_quality (Standard / Others)
+      Step 9:  Finalize category_type (Standard / Others)
     """
     submission_id = params["submission_id"]
     tenant_code = params["tenant_code"]
@@ -438,7 +438,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
         # Summary
         quality_counts = {}
         for r in all_results:
-            q = r.get("content_quality", "unknown")
+            q = r.get("category_type", "unknown")
             quality_counts[q] = quality_counts.get(q, 0) + 1
 
         return {

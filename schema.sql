@@ -174,9 +174,9 @@ CREATE TABLE themes (
     definitions             TEXT,
     keywords                TEXT,
     examples                TEXT,
-    status                  TEXT, -- 'Approved', 'Rejected', 'Merged', 'Draft'
-    total_objective_count   INTEGER DEFAULT 0, --newly added can be removed 
-    original_statement_text TEXT[] DEFAULT '{}' --newly added can be removed 
+    status                  TEXT -- 'Approved', 'Rejected', 'Merged', 'Draft'
+    -- total_objective_count   INTEGER DEFAULT 0, --newly added can be removed 
+    -- original_statement_text TEXT[] DEFAULT '{}' --newly added can be removed 
 );
 
 -- =========================================================================
@@ -195,7 +195,7 @@ CREATE TABLE analysis_results (
     confidence_score        FLOAT,
     justification           TEXT,
     multi_theme_mapped      BOOLEAN NOT NULL DEFAULT FALSE,
-    content_quality         TEXT,            -- 'Standard', 'Others', 'Unknown/Unclear', 'Flagged'
+    category_type           TEXT,            -- 'Standard', 'Others', 'Unknown/Unclear', 'Flagged'
     similarity_score        FLOAT,           -- Cosine similarity from local embedding match
     meta_data               JSONB,
     

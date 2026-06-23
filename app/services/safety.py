@@ -54,7 +54,7 @@ def check_abusive_language(text: str) -> bool:
 def is_flagged(text: str) -> bool:
     """
     Main safety check entry point.
-    Returns True if the statement should be marked content_quality = 'Flagged'.
+    Returns True if the statement should be marked category_type = 'Flagged'.
     Short-circuits: runs the cheap keyword check first; only runs regex PII if keyword didn't flag.
     """
     if check_abusive_language(text):

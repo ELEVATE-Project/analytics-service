@@ -39,7 +39,7 @@ class Database:
 
             # Dynamic migrations — add new columns to existing tables if they don't exist
             await conn.execute(
-                "ALTER TABLE analysis_results ADD COLUMN IF NOT EXISTS content_quality TEXT;"
+                "ALTER TABLE analysis_results ADD COLUMN IF NOT EXISTS category_type TEXT;"
             )
             await conn.execute(
                 "ALTER TABLE analysis_results ADD COLUMN IF NOT EXISTS similarity_score FLOAT;"

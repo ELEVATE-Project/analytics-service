@@ -376,7 +376,7 @@ async def insert_analysis_result(
     statement_type: str,
     confidence_score: Optional[float] = None,
     justification: Optional[str] = None,
-    content_quality: Optional[str] = None,
+    category_type: Optional[str] = None,
     similarity_score: Optional[float] = None,
     multi_theme_mapped: bool = False,
     meta_data: Optional[Dict[str, Any]] = None
@@ -391,7 +391,7 @@ async def insert_analysis_result(
         """
         INSERT INTO analysis_results (
             submission_id, tenant_code, theme_id, analysis_type, statements,
-            statement_type, confidence_score, justification, content_quality,
+            statement_type, confidence_score, justification, category_type,
             similarity_score, multi_theme_mapped, meta_data
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
@@ -404,7 +404,7 @@ async def insert_analysis_result(
         statement_type,
         confidence_score,
         justification,
-        content_quality,
+        category_type,
         similarity_score,
         multi_theme_mapped,
         meta_json
