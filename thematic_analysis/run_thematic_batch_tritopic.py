@@ -135,14 +135,6 @@ def split_and_clean_data(input_string: str) -> list[str]:
 async def migrate_database(conn: asyncpg.Connection):
     """Performs the dynamic database migrations for the themes table."""
     logger.info("Running database migration checks...")
-    # Add total_objective_count if not exists
-    await conn.execute(
-        "ALTER TABLE themes ADD COLUMN IF NOT EXISTS total_objective_count INTEGER DEFAULT 0;"
-    )
-    # Add original_statement_text if not exists
-    await conn.execute(
-        "ALTER TABLE themes ADD COLUMN IF NOT EXISTS original_statement_text TEXT[] DEFAULT '{}';"
-    )
     logger.info("Database migration checks completed.")
 
     # Seed approved themes if table is empty
@@ -170,25 +162,6 @@ async def save_mappings_to_db(conn: asyncpg.Connection, mapped_themes_data: dict
     """Saves updates to the approved themes and inserts new draft themes."""
     # 1. Update Approved Themes
     logger.info("Saving mappings for approved themes in database...")
-    for theme_id, mappings in mapped_themes_data.items():
-        # Format mapping items into JSON strings
-        new_items = []
-        for m in mappings:
-            story_id = m.get("story_id") or m.get("discussion_id") or m.get("id")
-            orig_text = m.get("text") or all_statements_dict.get(story_id, "")
-            score = float(m["score"])
-            new_items.append(json.dumps({"id": story_id, "text": orig_text, "score": score}, ensure_ascii=False))
-
-        # Update theme by directly overwriting the values
-        await conn.execute(
-            """
-            UPDATE themes
-            SET total_objective_count = $2,
-                original_statement_text = $3::TEXT[]
-            WHERE id = $1::UUID
-            """,
-            theme_id, len(new_items), new_items
-        )
     logger.info("Approved themes successfully updated.")
 
     # 2. Save Draft Themes
@@ -198,37 +171,30 @@ async def save_mappings_to_db(conn: asyncpg.Connection, mapped_themes_data: dict
         theme_def = dt["theme_definition"]
         keywords_str = ",".join(dt["keywords"]) if isinstance(dt["keywords"], list) else dt["keywords"]
         examples_str = "|".join(dt["examples"]) if isinstance(dt["examples"], list) else dt["examples"]
-        mappings = dt["mappings"]
-
-        new_items = []
-        for m in mappings:
-            story_id = m.get("story_id") or m.get("discussion_id") or m.get("id")
-            orig_text = m.get("text") or all_statements_dict.get(story_id, "")
-            score = float(m["score"])
-            new_items.append(json.dumps({"id": story_id, "text": orig_text, "score": score}, ensure_ascii=False))
 
         # Check if theme already exists in draft
         existing_id = await conn.fetchval("SELECT id FROM themes WHERE name = $1", theme_name)
         if existing_id:
-            # Update existing by overwriting the values
+            # Update existing draft theme
             await conn.execute(
                 """
                 UPDATE themes
-                SET total_objective_count = $2,
-                    original_statement_text = $3::TEXT[],
+                SET definitions = $2,
+                    keywords = $3,
+                    examples = $4,
                     status = 'Draft'
                 WHERE id = $1
                 """,
-                existing_id, len(new_items), new_items
+                existing_id, theme_def, keywords_str, examples_str
             )
         else:
-            # Insert new
+            # Insert new draft theme
             await conn.execute(
                 """
-                INSERT INTO themes (name, definitions, keywords, examples, status, total_objective_count, original_statement_text)
-                VALUES ($1, $2, $3, $4, 'Draft', $5, $6::TEXT[])
+                INSERT INTO themes (name, definitions, keywords, examples, status)
+                VALUES ($1, $2, $3, $4, 'Draft')
                 """,
-                theme_name, theme_def, keywords_str, examples_str, len(new_items), new_items
+                theme_name, theme_def, keywords_str, examples_str
             )
     logger.info("Draft candidate themes successfully updated.")
 
@@ -311,38 +277,93 @@ def generate_draft_theme_metadata_llm(cluster_texts: list) -> dict:
                 }
 # =========================================================================
 
-async def generate_pm_review_csv(conn: asyncpg.Connection, output_path: Path):
+async def generate_pm_review_csv(conn: asyncpg.Connection, mapped_themes_data: dict, draft_themes: list, all_statements_dict: dict, output_path: Path):
     logger.info(f"Generating PM review CSV file at {output_path.resolve()}...")
     rows = await conn.fetch(
         """
-        SELECT id, name, definitions, keywords, status, total_objective_count, original_statement_text
+        SELECT id, name, definitions, keywords, status
         FROM themes
         """
     )
-    themes = [dict(row) for row in rows]
+    db_themes = {str(r["id"]): dict(r) for r in rows}
     
+    # Get draft IDs to map correctly
+    draft_rows = await conn.fetch("SELECT id, name FROM themes WHERE status = 'Draft'")
+    draft_ids_by_name = {r["name"]: str(r["id"]) for r in draft_rows}
+
     approved_themes = []
     draft_gt_10 = []
     draft_lte_10 = []
     others = []
 
-    for t in themes:
-        status = (t["status"] or "").strip()
-        count = t["total_objective_count"] or 0
+    # 1. Process database approved/other themes with in-memory mappings
+    for theme_id, db_theme in db_themes.items():
+        status = (db_theme["status"] or "").strip()
         if status.lower() == "approved":
-            approved_themes.append(t)
-        elif status.lower() == "draft":
-            if count > 10:
-                draft_gt_10.append(t)
-            else:
-                draft_lte_10.append(t)
-        else:
-            others.append(t)
+            mappings = mapped_themes_data.get(theme_id, [])
+            new_items = []
+            for m in mappings:
+                story_id = m.get("id")
+                orig_text = m.get("text") or all_statements_dict.get(story_id, "")
+                score = float(m["score"])
+                new_items.append(json.dumps({"id": story_id, "text": orig_text, "score": score}, ensure_ascii=False))
 
-    approved_themes.sort(key=lambda x: x["total_objective_count"] or 0, reverse=True)
-    draft_gt_10.sort(key=lambda x: x["total_objective_count"] or 0, reverse=True)
-    draft_lte_10.sort(key=lambda x: x["total_objective_count"] or 0, reverse=True)
-    others.sort(key=lambda x: x["total_objective_count"] or 0, reverse=True)
+            t_item = {
+                "id": theme_id,
+                "name": db_theme["name"],
+                "definitions": db_theme["definitions"],
+                "keywords": db_theme["keywords"],
+                "status": "approved",
+                "total_objective_count": len(new_items),
+                "original_statement_text": new_items
+            }
+            approved_themes.append(t_item)
+        elif status.lower() != "draft":
+            t_item = {
+                "id": theme_id,
+                "name": db_theme["name"],
+                "definitions": db_theme["definitions"],
+                "keywords": db_theme["keywords"],
+                "status": db_theme["status"],
+                "total_objective_count": 0,
+                "original_statement_text": []
+            }
+            others.append(t_item)
+
+    # 2. Process draft themes from in-memory draft_themes list (already filtered > 10)
+    for dt in draft_themes:
+        theme_name = dt["theme_name"]
+        theme_def = dt["theme_definition"]
+        keywords_str = ",".join(dt["keywords"]) if isinstance(dt["keywords"], list) else dt["keywords"]
+        mappings = dt["mappings"]
+
+        new_items = []
+        for m in mappings:
+            story_id = m.get("id")
+            orig_text = m.get("text") or all_statements_dict.get(story_id, "")
+            score = float(m["score"])
+            new_items.append(json.dumps({"id": story_id, "text": orig_text, "score": score}, ensure_ascii=False))
+
+        t_id = draft_ids_by_name.get(theme_name, "DRAFT_UUID_NOT_FOUND")
+
+        t_item = {
+            "id": t_id,
+            "name": theme_name,
+            "definitions": theme_def,
+            "keywords": keywords_str,
+            "status": "Draft",
+            "total_objective_count": len(new_items),
+            "original_statement_text": new_items
+        }
+        if len(new_items) > 10:
+            draft_gt_10.append(t_item)
+        else:
+            draft_lte_10.append(t_item)
+
+    approved_themes.sort(key=lambda x: x["total_objective_count"], reverse=True)
+    draft_gt_10.sort(key=lambda x: x["total_objective_count"], reverse=True)
+    draft_lte_10.sort(key=lambda x: x["total_objective_count"], reverse=True)
+    others.sort(key=lambda x: x["total_objective_count"], reverse=True)
 
     ordered_themes = approved_themes + draft_gt_10 + draft_lte_10 + others
     headers = ["Theme Id", "Theme Name", "Defination", "Keywords", "Status", "Objective Count", "Original Statements"]
@@ -434,10 +455,16 @@ def clean_tritopic_print():
 async def main_async():
     parser = argparse.ArgumentParser(description="Standalone batch thematic analysis runner using TriTopic.")
     parser.add_argument(
-        "--csv",
-        default="story_objectives.csv",
-        help="Path to the story objectives CSV file."
+        "--input",
+        default=None,
+        help="Path to input CSV file (e.g., story.csv or discussion.csv). If not provided, data is fetched from the database."
     )
+    parser.add_argument(
+        "--process_column",
+        default=None,
+        help="Name of the text column to process from the CSV. Required when --input is provided."
+    )
+
     parser.add_argument(
         "--limit",
         type=int,
@@ -456,7 +483,18 @@ async def main_async():
         default=0.70,
         help="Cosine similarity threshold for mapping to approved themes (e.g., 0.60, 0.70)."
     )
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Optional: generate an additional CSV at this path (e.g., themes.csv)."
+    )
     args = parser.parse_args()
+
+    # Validation: --input requires --process_column, and vice versa
+    if args.input and not args.process_column:
+        parser.error("--process_column is required when --input is provided.")
+    if args.process_column and not args.input:
+        parser.error("--input is required when --process_column is provided.")
 
     # Derive the similarity threshold and output paths from --threshold
     similarity_threshold = args.threshold
@@ -469,113 +507,157 @@ async def main_async():
     logger.info(f"Output directory: {viz_dir}")
     logger.info(f"Output CSV: {output_csv_path}")
 
-    csv_path = Path(args.csv)
-    if not csv_path.exists():
-        logger.error(f"Objectives CSV file not found: {csv_path}")
-        sys.exit(1)
-
-    # 1. Load CSV objectives
+    # 1. Load data — three modes: --input (with --type), --csv (legacy), or DB fallback
     raw_objectives = []
     skipped_non_english_count = 0
     skipped_short_count = 0
     empty_objectives_count = 0
     total_csv_rows_in_file = 0
     total_csv_rows_processed = 0
+    input_source = "unknown"
 
-    # Count total CSV rows in the file for statistics
-    with open(csv_path, mode="r", encoding="utf-8") as f_count:
-        total_csv_rows_in_file = sum(1 for _ in csv.DictReader(f_count))
-
-    if args.limit:
-        logger.info(f"Limiting execution to first {args.limit} valid English objectives.")
-
-    with open(csv_path, mode="r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        headers = reader.fieldnames or []
-        
-        # Match ID column dynamically
-        id_col = None
-        for col in ["story_id", "discussion_id", "id", "ID"]:
-            if col in headers:
-                id_col = col
-                break
-        if not id_col:
-            for col in headers:
-                if "id" in col.lower():
-                    id_col = col
-                    break
-        
-        # Match Text column dynamically
-        text_col = None
-        for col in ["Challenges", "objectives", "objective", "challenge", "text"]:
-            if col in headers:
-                text_col = col
-                break
-        if not text_col:
-            for col in headers:
-                col_lower = col.lower()
-                if "objective" in col_lower or "challenge" in col_lower or "text" in col_lower or "content" in col_lower:
-                    text_col = col
-                    break
-                    
-        if not id_col or not text_col:
-            logger.error(f"Could not dynamically detect ID or text columns in CSV headers: {headers}")
-            sys.exit(1)
-            
-        logger.info(f"Dynamically detected ID column: '{id_col}', Text column: '{text_col}'")
-
-        for row in reader:
-            if args.limit and len(raw_objectives) >= args.limit:
-                break
-            total_csv_rows_processed += 1
-            
-            story_id = row.get(id_col)
-            raw_val = row.get(text_col, "")
-            if raw_val is not None:
-                raw_val = raw_val.strip()
-            else:
-                raw_val = ""
-            
-            # Check for empty/missing objective text
-            if not story_id or not raw_val:
-                empty_objectives_count += 1
-                continue
-
-            try:
-                clean_id = int(str(story_id).replace(",", ""))
-            except ValueError:
-                clean_id = str(story_id)
-
-            split_statements = split_and_clean_data(raw_val)
-            if not split_statements:
-                empty_objectives_count += 1
-                continue
-
-            for idx, stmt in enumerate(split_statements, 1):
-                if args.limit and len(raw_objectives) >= args.limit:
-                    break
-
-                if not is_english(stmt):
-                    skipped_non_english_count += 1
-                    continue
-
-                if len(stmt.split()) < 3:
-                    skipped_short_count += 1
-                    continue
-
-                raw_objectives.append({
-                    "id": clean_id,
-                    "objective": stmt,
-                    "raw_unsplit": raw_val
-                })
-
-    logger.info(f"Loaded {len(raw_objectives)} valid English objectives (skipped {skipped_non_english_count} non-English, skipped {skipped_short_count} less than 3 words, skipped {empty_objectives_count} empty).")
-
-    # Connect database & run migrations
+    # Connect database early (needed for DB fallback mode and later operations)
     database_url = "postgresql://postgres:postgres@localhost:5432/analytics_db"
     conn = await asyncpg.connect(dsn=database_url)
+
     try:
         await migrate_database(conn)
+
+        if args.input:
+            # ===== MODE 1: --input CSV with --process_column for column selection =====
+            input_source = f"CSV ({args.input}) process_column={args.process_column}"
+            csv_path = Path(args.input)
+            if not csv_path.exists():
+                logger.error(f"Input CSV file not found: {csv_path}")
+                sys.exit(1)
+
+            # Count total rows
+            with open(csv_path, mode="r", encoding="utf-8") as f_count:
+                total_csv_rows_in_file = sum(1 for _ in csv.DictReader(f_count))
+
+            if args.limit:
+                logger.info(f"Limiting execution to first {args.limit} valid English objectives.")
+
+            with open(csv_path, mode="r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                headers = reader.fieldnames or []
+
+                # Match ID column (case-insensitive)
+                id_col = None
+                for col in headers:
+                    if col.lower() == "id":
+                        id_col = col
+                        break
+                if not id_col:
+                    for col in headers:
+                        if "id" in col.lower():
+                            id_col = col
+                            break
+
+                # Match Text column based on --process_column (case-insensitive)
+                text_col = None
+                for col in headers:
+                    if col.lower() == args.process_column.lower():
+                        text_col = col
+                        break
+
+                if not id_col or not text_col:
+                    logger.error(f"Could not find ID column or the specified process column '{args.process_column}' in CSV headers: {headers}")
+                    sys.exit(1)
+
+                logger.info(f"Detected ID column: '{id_col}', Text column: '{text_col}'")
+
+                for row in reader:
+                    if args.limit and len(raw_objectives) >= args.limit:
+                        break
+                    total_csv_rows_processed += 1
+
+                    row_id = row.get(id_col)
+                    raw_val = row.get(text_col, "")
+                    if raw_val is not None:
+                        raw_val = raw_val.strip()
+                    else:
+                        raw_val = ""
+
+                    if not row_id or not raw_val:
+                        empty_objectives_count += 1
+                        continue
+
+                    try:
+                        clean_id = int(str(row_id).replace(",", ""))
+                    except ValueError:
+                        clean_id = str(row_id)
+
+                    split_statements = split_and_clean_data(raw_val)
+                    if not split_statements:
+                        empty_objectives_count += 1
+                        continue
+
+                    for idx, stmt in enumerate(split_statements, 1):
+                        if args.limit and len(raw_objectives) >= args.limit:
+                            break
+                        if not is_english(stmt):
+                            skipped_non_english_count += 1
+                            continue
+                        if len(stmt.split()) < 3:
+                            skipped_short_count += 1
+                            continue
+                        raw_objectives.append({
+                            "id": clean_id,
+                            "objective": stmt,
+                            "raw_unsplit": raw_val
+                        })
+
+
+        else:
+            # ===== MODE 2: Database fallback — query analysis_results =====
+            input_source = "Database (analysis_results)"
+            logger.info("No --input provided. Fetching statements from analysis_results table...")
+            db_rows = await conn.fetch("""
+                SELECT id, statements, statement_type
+                FROM analysis_results
+                WHERE analysis_type = 'theme'
+                  AND statement_type IN ('challenges', 'solutions', 'objective')
+                  AND category_type = 'Others'
+            """)
+            total_csv_rows_in_file = len(db_rows)
+            logger.info(f"Fetched {len(db_rows)} rows from analysis_results table.")
+
+            for db_row in db_rows:
+                if args.limit and len(raw_objectives) >= args.limit:
+                    break
+                total_csv_rows_processed += 1
+
+                row_id = str(db_row["id"])
+                raw_val = db_row["statements"] or ""
+                raw_val = raw_val.strip()
+
+                if not row_id or not raw_val:
+                    empty_objectives_count += 1
+                    continue
+
+                split_statements = split_and_clean_data(raw_val)
+                if not split_statements:
+                    empty_objectives_count += 1
+                    continue
+
+                for idx, stmt in enumerate(split_statements, 1):
+                    if args.limit and len(raw_objectives) >= args.limit:
+                        break
+                    if not is_english(stmt):
+                        skipped_non_english_count += 1
+                        continue
+                    if len(stmt.split()) < 3:
+                        skipped_short_count += 1
+                        continue
+                    raw_objectives.append({
+                        "id": row_id,
+                        "objective": stmt,
+                        "raw_unsplit": raw_val
+                    })
+
+        logger.info(f"Input source: {input_source}")
+        logger.info(f"Loaded {len(raw_objectives)} valid English objectives (skipped {skipped_non_english_count} non-English, skipped {skipped_short_count} less than 3 words, skipped {empty_objectives_count} empty).")
 
         # Fetch approved themes
         approved_themes = await fetch_approved_themes(conn)
@@ -584,12 +666,6 @@ async def main_async():
         # Clear existing Draft candidate themes in the database to prevent stale drafts piling up
         logger.info("Clearing existing Draft themes in database...")
         await conn.execute("DELETE FROM themes WHERE status = 'Draft'")
-
-        # Reset counts and statement arrays for all approved themes
-        logger.info("Resetting counts and mapping statement arrays for approved themes...")
-        await conn.execute(
-            "UPDATE themes SET total_objective_count = 0, original_statement_text = '{}' WHERE status ILIKE 'approved'"
-        )
 
         if not raw_objectives:
             logger.info("No objectives to process.")
@@ -649,11 +725,10 @@ async def main_async():
                     best_score = max_sim
                     best_theme_id = theme_id
             
-            story_id = raw_objectives[i]["id"]
+            obj_id = raw_objectives[i]["id"]
             if best_score >= similarity_threshold:
                 mapped_themes_data[best_theme_id].append({
-                    "story_id": story_id,
-                    "discussion_id": story_id,
+                    "id": obj_id,
                     "text": raw_objectives[i]["objective"],
                     "score": float(best_score)
                 })
@@ -674,26 +749,53 @@ async def main_async():
             # - Bypasses dimension reduction if N is very small to avoid UMAP neighborhood issues.
             # - We keep verbose logging enabled to show intermediate refinement states.
             tritopic_cfg = TriTopicConfig(
-                use_dim_reduction=len(unmapped_texts) >= 15,
+                # --- embedding ---
+                embedding_model="BAAI/bge-base-en-v1.5",   # or "BAAI/bge-m3" for multilingual
+                embedding_batch_size=64,
+                language="english",                        # "multilingual" if using bge-m3
+
+                # --- graph (hybrid fuses semantic + SNN + lexical; lexical helps short text) ---
+                graph_type="hybrid",
                 use_lexical_view=True,
+                lexical_weight=0.3,
+                n_neighbors=20,
+
+                # --- dim reduction for clustering ---
+                use_dim_reduction=True,
+                reduced_dims=10,
+                umap_min_dist=0.0,
+
+                # --- clustering (fine-grained) ---
+                resolution=1.5,                  # higher -> more, finer sub-topics
+                min_cluster_size=5,
+
+                # --- iterative refinement ---
                 use_iterative_refinement=True,
-                resolution=0.75,
-                n_consensus_runs=15,
-                max_iterations=8,
+                max_iterations=5,
                 convergence_threshold=0.95,
-                min_cluster_size=2,
-                verbose=True
-                # knn_backend="exact"
+
+                # --- accuracy lever ---
+                n_consensus_runs=10,             # drop to ~5 for a fast preview
+
+                # --- keywords / misc ---
+                keyword_method="ctfidf",
+                n_keywords=10,
+                random_state=42,
+                verbose=True,
             )
             tritopic_model = TriTopic(tritopic_cfg)
             
-            with clean_tritopic_print():
-                tritopic_model.fit(unmapped_texts, embeddings=unmapped_embeddings)
-            
-            # Map TriTopic local cluster labels to candidate themes
-            # Filter out outliers (marked as -1)
-            unique_labels = np.unique(tritopic_model.labels_)
-            unique_labels = unique_labels[unique_labels != -1]
+            try:
+                with clean_tritopic_print():
+                    tritopic_model.fit(unmapped_texts, embeddings=unmapped_embeddings)
+            except ValueError as e:
+                logger.warning(f"TriTopic clustering produced no valid clusters (all documents assigned to outliers). Skipping cluster discovery. Details: {e}")
+                unique_labels = np.array([], dtype=int)
+            else:
+                # Map TriTopic local cluster labels to candidate themes
+                # Filter out outliers (marked as -1)
+                unique_labels = np.unique(tritopic_model.labels_)
+                unique_labels = unique_labels[unique_labels != -1]
             logger.info(f"Identified {len(unique_labels)} new candidate clusters via TriTopic.")
 
             all_statements_dict = {item["id"]: item["objective"] for item in raw_objectives}
@@ -717,21 +819,22 @@ async def main_async():
                 member_similarities = cosine_similarity(cluster_embs, cluster_centroid)
                 score = float(np.mean(member_similarities))
 
-                # Generate metadata (LLM call is used only if cluster size > 10)
+                # Ignore cluster if it has <= 10 objectives
+                if len(cluster_texts) <= 10:
+                    logger.info(f"Skipping Candidate Theme (Cluster {local_id + 1}) since it has only {len(cluster_texts)} objectives (<= 10).")
+                    continue
+
+                # Generate metadata via LLM (guaranteed to be > 10 objectives)
                 p_tokens, c_tokens, t_tokens = 0, 0, 0
-                if len(cluster_texts) > 10:
-                    logger.info(f"Generating theme name & definition via LLM for Candidate Theme (Cluster {local_id + 1}) with {len(cluster_texts)} objectives...")
-                    llm_meta = generate_draft_theme_metadata_llm(cluster_texts)
-                    theme_name = llm_meta.get("theme_name", f"Candidate Theme (Cluster {local_id + 1})")
-                    theme_def = llm_meta.get("theme_definition", f"Locally clustered theme containing {len(cluster_texts)} objectives. Sample text: '{cluster_texts[0]}'")
-                    keywords = llm_meta.get("keywords", keywords)
-                    p_tokens = llm_meta.get("prompt_tokens", 0)
-                    c_tokens = llm_meta.get("completion_tokens", 0)
-                    t_tokens = llm_meta.get("total_tokens", 0)
-                    logger.info(f"LLM generated theme '{theme_name}' using {p_tokens} prompt tokens and {c_tokens} completion tokens (Total: {t_tokens}).")
-                else:
-                    theme_name = f"Candidate Theme (Cluster {local_id + 1})"
-                    theme_def = f"Locally clustered theme containing {len(cluster_texts)} objectives. Sample text: '{cluster_texts[0]}'"
+                logger.info(f"Generating theme name & definition via LLM for Candidate Theme (Cluster {local_id + 1}) with {len(cluster_texts)} objectives...")
+                llm_meta = generate_draft_theme_metadata_llm(cluster_texts)
+                theme_name = llm_meta.get("theme_name", f"Candidate Theme (Cluster {local_id + 1})")
+                theme_def = llm_meta.get("theme_definition", f"Locally clustered theme containing {len(cluster_texts)} objectives. Sample text: '{cluster_texts[0]}'")
+                keywords = llm_meta.get("keywords", keywords)
+                p_tokens = llm_meta.get("prompt_tokens", 0)
+                c_tokens = llm_meta.get("completion_tokens", 0)
+                t_tokens = llm_meta.get("total_tokens", 0)
+                logger.info(f"LLM generated theme '{theme_name}' using {p_tokens} prompt tokens and {c_tokens} completion tokens (Total: {t_tokens}).")
                 
                 examples = cluster_texts[:3]
 
@@ -746,8 +849,7 @@ async def main_async():
                     "total_tokens": t_tokens,
                     "mappings": [
                         {
-                            "story_id": item["id"],
-                            "discussion_id": item["id"],
+                            "id": item["id"],
                             "text": item["objective"],
                             "score": float(member_similarities[j][0])
                         }
@@ -939,7 +1041,16 @@ async def main_async():
 
         # 9. Generate PM review CSV automatically
         logger.info(f"Generating PM review CSV file at {output_csv_path}...")
-        await generate_pm_review_csv(conn, output_csv_path)
+        await generate_pm_review_csv(conn, mapped_themes_data, draft_themes, all_statements_dict, output_csv_path)
+
+        # 9b. Generate additional CSV if --output is provided
+        if args.output:
+            additional_output_path = Path(args.output)
+            if not additional_output_path.is_absolute():
+                additional_output_path = Path(__file__).resolve().parent / additional_output_path
+            logger.info(f"Generating additional CSV at {additional_output_path}...")
+            await generate_pm_review_csv(conn, mapped_themes_data, draft_themes, all_statements_dict, additional_output_path)
+            logger.info(f"Additional CSV saved to {additional_output_path}")
 
         # 10. Save run metadata JSON to viz_dir for the Streamlit dashboard
         import json as _json

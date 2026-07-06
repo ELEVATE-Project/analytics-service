@@ -3,6 +3,7 @@ import pandas as pd
 from pathlib import Path
 import plotly.io as pio
 import streamlit.components.v1 as components
+import re
 
 # Set Page Config
 st.set_page_config(
@@ -59,17 +60,31 @@ st.markdown("Interactive Explorer for Topic Extraction, Semantic Mapping, and Th
 # ─── Base directory ──────────────────────────────────────────────────────────
 base_dir = Path(__file__).resolve().parent
 
+# Scan base_dir for directories matching: <threshold>_review_visualizations
+available_thresholds = []
+pattern = re.compile(r"^(\d+\.\d+)_review_visualizations$")
+for path in base_dir.iterdir():
+    if path.is_dir():
+        match = pattern.match(path.name)
+        if match:
+            available_thresholds.append(match.group(1))
+
+# Sort thresholds descending (e.g. ['0.90', '0.65', '0.60'])
+available_thresholds = sorted(available_thresholds, key=float, reverse=True)
+
+# Fallback in case none found
+if not available_thresholds:
+    available_thresholds = ["0.90", "0.65"]
+
 # ─── Sidebar: Similarity Threshold selector ───────────────────────────────────
 st.sidebar.header("Dashboard Configuration")
 
 threshold = st.sidebar.radio(
     "🎚️ Similarity Threshold",
-    options=["0.90", "0.65"],
+    options=available_thresholds,
     index=0,
     help=(
-        "Controls how strictly a statement must match a theme to be mapped.\n\n"
-        "**0.90** — High precision: only very close matches are included.\n\n"
-        "**0.65** — Broader coverage: more statements mapped, lower strictness."
+        "Controls how strictly a statement must match a theme to be mapped."
     ),
 )
 
@@ -130,12 +145,22 @@ if meta:
     run_label = (run_ts[11:16] + "  " + run_ts[:10]) if run_ts else "—"
     st.caption(f"📅 Last run: **{run_label}** · Threshold: **{meta.get('similarity_threshold', threshold)}**")
 
+    # Calculate total valid objectives with support for backward compatibility
+    total_val_obj = meta.get("total_valid_objectives")
+    if total_val_obj is None:
+        total_val_obj = meta.get("total_mapped")
+        if total_val_obj is None and "mapped_to_approved_themes" in meta and "mapped_to_draft_themes" in meta:
+            total_val_obj = meta["mapped_to_approved_themes"] + meta["mapped_to_draft_themes"]
+    if total_val_obj is None:
+        total_val_obj = "—"
+
     st.markdown("#### 📋 Run Statistics")
-    r1c1, r1c2, r1c3, r1c4 = st.columns(4)
+    r1c1, r1c2, r1c3, r1c4, r1c5 = st.columns(5)
     r1c1.metric("Total CSV Rows",              meta.get("total_objectives_in_csv",     "—"))
     r1c2.metric("Total Rows Processed",        meta.get("total_objectives_processed",  "—"))
-    r1c3.metric("Skipped (Non-English)",       meta.get("skipped_non_english",         "—"))
-    r1c4.metric("Skipped (Empty)",             meta.get("skipped_empty",               "—"))
+    r1c3.metric("Total Valid Objectives",      total_val_obj)
+    r1c4.metric("Skipped (Non-English)",       meta.get("skipped_non_english",         "—"))
+    r1c5.metric("Skipped (Empty)",             meta.get("skipped_empty",               "—"))
 
     r2c1, r2c2, r2c3, r2c4 = st.columns(4)
     r2c1.metric("Mapped to Approved Themes",   meta.get("mapped_to_approved_themes",   "—"))
@@ -201,11 +226,21 @@ with tab_explorer:
             for stmt in statements:
                 parts = str(stmt).split(" | ")
                 if len(parts) >= 2:
-                    rows.append({
-                        "Statement ID":    parts[0].strip(),
-                        "Statement":       parts[1].strip(),
-                        "Similarity Score": float(parts[2].strip()) if len(parts) > 2 else None,
-                    })
+                    stmt_id = parts[0].strip()
+                    for i in range(1, len(parts), 2):
+                        text_part = parts[i].strip()
+                        score_part = parts[i+1].strip() if i+1 < len(parts) else None
+                        
+                        try:
+                            score_val = float(score_part) if score_part else None
+                        except ValueError:
+                            score_val = None
+                            
+                        rows.append({
+                            "Statement ID": stmt_id if i == 1 else "",
+                            "Statement": text_part,
+                            "Similarity Score": score_val
+                        })
                 else:
                     rows.append({"Statement ID": "", "Statement": stmt.strip(), "Similarity Score": None})
 
@@ -222,23 +257,21 @@ with tab_explorer:
                 hide_index=True,
             )
 
-# ── Plotly chart renderer ─────────────────────────────────────────────────────
 def render_plotly_chart(json_filename: str, html_filename: str, chart_height: int = 700):
     """
-    Render a Plotly chart natively (from JSON), falling back to an iframe (HTML)
-    for older exports that don't have a JSON file yet.
+    Render a Plotly chart. Prefers pre-rendered HTML (via iframe) to prevent
+    Plotly version deserialization errors and browser freezes, falling back to JSON.
     """
     json_file = viz_dir / json_filename
     html_file = viz_dir / html_filename
 
-    if json_file.exists():
-        fig = pio.read_json(str(json_file))
-        st.plotly_chart(fig, use_container_width=True, height=chart_height)
-    elif html_file.exists():
-        st.caption("ℹ️ _Re-run the batch script to enable native responsive charts._")
+    if html_file.exists():
         with open(html_file, "r", encoding="utf-8") as f:
             html_markup = f.read()
         components.html(html_markup, height=chart_height, scrolling=True)
+    elif json_file.exists():
+        fig = pio.read_json(str(json_file))
+        st.plotly_chart(fig, use_container_width=True, height=chart_height)
     else:
         st.warning(
             f"Visualization not found in `{viz_dir.name}/`. "
