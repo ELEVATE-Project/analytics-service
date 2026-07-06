@@ -39,10 +39,29 @@ if root_dir:
                             if key:
                                 os.environ[key] = val
 
+# Also load .env from the script's own directory (thematic_analysis/) if it exists
+script_env_path = Path(__file__).resolve().parent / ".env"
+if script_env_path.is_file():
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(script_env_path, override=True)
+    except ImportError:
+        with open(script_env_path, mode="r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    if "=" in line:
+                        key, val = line.split("=", 1)
+                        key = key.strip()
+                        val = val.strip().strip("'\"")
+                        if key:
+                            os.environ[key] = val
+
 import argparse
 import asyncio
 import csv
 import json
+import re
 import logging
 import time
 import asyncpg
@@ -73,8 +92,44 @@ def is_english(text: str) -> bool:
     except UnicodeEncodeError:
         return False
 
+def split_and_clean_data(input_string: str) -> list[str]:
+    """
+    Splits the input string into individual objective statements.
+    Handles three formats:
+      1. Numbered:  '1. Good education | 2. Skilled teachers | 3. ...'
+      2. Pipe-only: 'Statement one. | Statement two. | Statement three.'
+      3. Single:    'Just one objective statement.'
+    Returns a list of cleaned, non-empty strings.
+    """
+    text = input_string.strip()
+    if not text:
+        return []
+
+    # Check if the text contains numbered prefixes like "1. ", "2. "
+    has_numbering = bool(re.search(r'(?:^|[|\s])\d+\.\s', text))
+
+    if has_numbering:
+        # Split on numbering prefixes (e.g. "1. ", "2. ")
+        raw_items = re.split(r'\s*\d+\.\s*', text)
+    elif '|' in text:
+        # Split on pipe separator
+        raw_items = text.split('|')
+    else:
+        # Single statement — return as-is
+        return [text]
+
+    # Clean each item: strip whitespace and trailing/leading pipes
+    cleaned = []
+    for item in raw_items:
+        item_str = item.strip().strip('|').strip()
+        if item_str:
+            cleaned.append(item_str)
+
+    return cleaned if cleaned else [text]
+
 # Semantic matching settings
-CROSS_REF_SIMILARITY_THRESHOLD = 0.65  # Cosine similarity threshold for mapping to approved themes
+# CROSS_REF_SIMILARITY_THRESHOLD is now a CLI argument (--threshold), default 0.70
+
 
 
 async def migrate_database(conn: asyncpg.Connection):
@@ -119,8 +174,8 @@ async def save_mappings_to_db(conn: asyncpg.Connection, mapped_themes_data: dict
         # Format mapping items into JSON strings
         new_items = []
         for m in mappings:
-            story_id = m["story_id"]
-            orig_text = all_statements_dict.get(story_id, "")
+            story_id = m.get("story_id") or m.get("discussion_id") or m.get("id")
+            orig_text = m.get("text") or all_statements_dict.get(story_id, "")
             score = float(m["score"])
             new_items.append(json.dumps({"id": story_id, "text": orig_text, "score": score}, ensure_ascii=False))
 
@@ -141,14 +196,14 @@ async def save_mappings_to_db(conn: asyncpg.Connection, mapped_themes_data: dict
     for dt in draft_themes:
         theme_name = dt["theme_name"]
         theme_def = dt["theme_definition"]
-        keywords_str = ",".join(dt["keywords"])
-        examples_str = "|".join(dt["examples"])
+        keywords_str = ",".join(dt["keywords"]) if isinstance(dt["keywords"], list) else dt["keywords"]
+        examples_str = "|".join(dt["examples"]) if isinstance(dt["examples"], list) else dt["examples"]
         mappings = dt["mappings"]
 
         new_items = []
         for m in mappings:
-            story_id = m["story_id"]
-            orig_text = all_statements_dict.get(story_id, "")
+            story_id = m.get("story_id") or m.get("discussion_id") or m.get("id")
+            orig_text = m.get("text") or all_statements_dict.get(story_id, "")
             score = float(m["score"])
             new_items.append(json.dumps({"id": story_id, "text": orig_text, "score": score}, ensure_ascii=False))
 
@@ -318,7 +373,10 @@ async def generate_pm_review_csv(conn: asyncpg.Connection, output_path: Path):
                     else:
                         s_score_str = str(s_score)
                         
-                    formatted = f"{s_id} | {s_text} | {s_score_str}"
+                    if " | " in s_text:
+                        formatted = f"{s_id} | {s_text}"
+                    else:
+                        formatted = f"{s_id} | {s_text} | {s_score_str}"
                     statements.append(formatted)
                 except Exception:
                     statements.append(str(item))
@@ -372,6 +430,7 @@ def clean_tritopic_print():
         sys.stdout = original_stdout
 
 
+
 async def main_async():
     parser = argparse.ArgumentParser(description="Standalone batch thematic analysis runner using TriTopic.")
     parser.add_argument(
@@ -392,11 +451,23 @@ async def main_async():
         help="Batch size for processing (retained for parameter alignment)."
     )
     parser.add_argument(
-        "--output",
-        default="tritopic_theme_pm_review.csv",
-        help="Path to save the generated PM review CSV file."
+        "--threshold",
+        type=float,
+        default=0.70,
+        help="Cosine similarity threshold for mapping to approved themes (e.g., 0.60, 0.70)."
     )
     args = parser.parse_args()
+
+    # Derive the similarity threshold and output paths from --threshold
+    similarity_threshold = args.threshold
+    threshold_str = f"{similarity_threshold:.2f}"
+    output_base_dir = Path(__file__).resolve().parent  # thematic_analysis directory
+    viz_dir = output_base_dir / f"{threshold_str}_review_visualizations"
+    viz_dir.mkdir(parents=True, exist_ok=True)
+    output_csv_path = viz_dir / "tritopic_review.csv"
+    logger.info(f"Similarity threshold: {similarity_threshold}")
+    logger.info(f"Output directory: {viz_dir}")
+    logger.info(f"Output CSV: {output_csv_path}")
 
     csv_path = Path(args.csv)
     if not csv_path.exists():
@@ -406,6 +477,7 @@ async def main_async():
     # 1. Load CSV objectives
     raw_objectives = []
     skipped_non_english_count = 0
+    skipped_short_count = 0
     empty_objectives_count = 0
     total_csv_rows_in_file = 0
     total_csv_rows_processed = 0
@@ -419,28 +491,85 @@ async def main_async():
 
     with open(csv_path, mode="r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
+        headers = reader.fieldnames or []
+        
+        # Match ID column dynamically
+        id_col = None
+        for col in ["story_id", "discussion_id", "id", "ID"]:
+            if col in headers:
+                id_col = col
+                break
+        if not id_col:
+            for col in headers:
+                if "id" in col.lower():
+                    id_col = col
+                    break
+        
+        # Match Text column dynamically
+        text_col = None
+        for col in ["Challenges", "objectives", "objective", "challenge", "text"]:
+            if col in headers:
+                text_col = col
+                break
+        if not text_col:
+            for col in headers:
+                col_lower = col.lower()
+                if "objective" in col_lower or "challenge" in col_lower or "text" in col_lower or "content" in col_lower:
+                    text_col = col
+                    break
+                    
+        if not id_col or not text_col:
+            logger.error(f"Could not dynamically detect ID or text columns in CSV headers: {headers}")
+            sys.exit(1)
+            
+        logger.info(f"Dynamically detected ID column: '{id_col}', Text column: '{text_col}'")
+
         for row in reader:
             if args.limit and len(raw_objectives) >= args.limit:
                 break
             total_csv_rows_processed += 1
-            story_id = row.get("story_id")
-            objective = row.get("objective", "").strip()
+            
+            story_id = row.get(id_col)
+            raw_val = row.get(text_col, "")
+            if raw_val is not None:
+                raw_val = raw_val.strip()
+            else:
+                raw_val = ""
             
             # Check for empty/missing objective text
-            if not story_id or not objective:
+            if not story_id or not raw_val:
                 empty_objectives_count += 1
                 continue
 
-            if not is_english(objective):
-                skipped_non_english_count += 1
-                continue
             try:
                 clean_id = int(str(story_id).replace(",", ""))
             except ValueError:
                 clean_id = str(story_id)
-            raw_objectives.append({"id": clean_id, "objective": objective})
 
-    logger.info(f"Loaded {len(raw_objectives)} valid English objectives from {csv_path} (skipped {skipped_non_english_count} non-English ones, skipped {empty_objectives_count} empty ones).")
+            split_statements = split_and_clean_data(raw_val)
+            if not split_statements:
+                empty_objectives_count += 1
+                continue
+
+            for idx, stmt in enumerate(split_statements, 1):
+                if args.limit and len(raw_objectives) >= args.limit:
+                    break
+
+                if not is_english(stmt):
+                    skipped_non_english_count += 1
+                    continue
+
+                if len(stmt.split()) < 3:
+                    skipped_short_count += 1
+                    continue
+
+                raw_objectives.append({
+                    "id": clean_id,
+                    "objective": stmt,
+                    "raw_unsplit": raw_val
+                })
+
+    logger.info(f"Loaded {len(raw_objectives)} valid English objectives (skipped {skipped_non_english_count} non-English, skipped {skipped_short_count} less than 3 words, skipped {empty_objectives_count} empty).")
 
     # Connect database & run migrations
     database_url = "postgresql://postgres:postgres@localhost:5432/analytics_db"
@@ -521,10 +650,12 @@ async def main_async():
                     best_theme_id = theme_id
             
             story_id = raw_objectives[i]["id"]
-            if best_score >= CROSS_REF_SIMILARITY_THRESHOLD:
+            if best_score >= similarity_threshold:
                 mapped_themes_data[best_theme_id].append({
                     "story_id": story_id,
-                    "score": best_score
+                    "discussion_id": story_id,
+                    "text": raw_objectives[i]["objective"],
+                    "score": float(best_score)
                 })
             else:
                 unmapped_indices.append(i)
@@ -551,8 +682,8 @@ async def main_async():
                 max_iterations=8,
                 convergence_threshold=0.95,
                 min_cluster_size=2,
-                verbose=True,
-                knn_backend="exact"
+                verbose=True
+                # knn_backend="exact"
             )
             tritopic_model = TriTopic(tritopic_cfg)
             
@@ -614,7 +745,12 @@ async def main_async():
                     "completion_tokens": c_tokens,
                     "total_tokens": t_tokens,
                     "mappings": [
-                        {"story_id": item["id"], "score": float(member_similarities[j][0])}
+                        {
+                            "story_id": item["id"],
+                            "discussion_id": item["id"],
+                            "text": item["objective"],
+                            "score": float(member_similarities[j][0])
+                        }
                         for j, item in enumerate(cluster_objectives)
                     ]
                 })
@@ -629,8 +765,6 @@ async def main_async():
             # Generate HTML visualizations if draft_themes were created
             if draft_themes:
                 logger.info("Generating interactive Plotly visualizations...")
-                viz_dir = Path(args.output).resolve().parent / (Path(args.output).stem + "_visualizations")
-                viz_dir.mkdir(parents=True, exist_ok=True)
                 
                 # 1. 2D Document Map
                 try:
@@ -761,7 +895,7 @@ async def main_async():
                     logger.error(f"Failed to generate Topic Similarity Heatmap: {e}")
 
         # 7. Save results back to Postgres database
-        all_statements_dict = {item["id"]: item["objective"] for item in raw_objectives}
+        all_statements_dict = {item["id"]: item.get("raw_unsplit", item["objective"]) for item in raw_objectives}
         await save_mappings_to_db(conn, mapped_themes_data, draft_themes, all_statements_dict)
 
         # 8. Print overview statistics
@@ -786,7 +920,9 @@ async def main_async():
         logger.info("=========================================")
         logger.info(f"Total CSV rows:                          {total_csv_rows_in_file}")
         logger.info(f"Total CSV rows processed:                {total_csv_rows_processed}")
+        logger.info(f"Total valid objectives/challenges:       {len(raw_objectives)}")
         logger.info(f"Total skipped non-English:               {skipped_non_english_count}")
+        logger.info(f"Total skipped short (<3 words):          {skipped_short_count}")
         logger.info(f"Total empty objectives:                  {empty_objectives_count}")
         logger.info(f"Mapped to approved themes:               {mapped_count}")
         logger.info(f"Unmapped objectives:                     {unmapped_count}")
@@ -802,10 +938,8 @@ async def main_async():
         logger.info("=========================================")
 
         # 9. Generate PM review CSV automatically
-        output_path = Path(args.output)
-        if not output_path.is_absolute():
-            output_path = Path(__file__).resolve().parent / output_path
-        await generate_pm_review_csv(conn, output_path)
+        logger.info(f"Generating PM review CSV file at {output_csv_path}...")
+        await generate_pm_review_csv(conn, output_csv_path)
 
         # 10. Save run metadata JSON to viz_dir for the Streamlit dashboard
         import json as _json
@@ -813,10 +947,11 @@ async def main_async():
         draft_mapped_count = sum(len(dt["mappings"]) for dt in draft_themes)
         run_meta = {
             "run_timestamp":            _dt.now().isoformat(timespec="seconds"),
-            "similarity_threshold":     CROSS_REF_SIMILARITY_THRESHOLD,
+            "similarity_threshold":     similarity_threshold,
             "total_objectives_in_csv":  total_csv_rows_in_file,
             "total_objectives_processed": total_csv_rows_processed,
             "skipped_non_english":      skipped_non_english_count,
+            "skipped_short":            skipped_short_count,
             "skipped_empty":            empty_objectives_count,
             "mapped_to_approved_themes": mapped_count,
             "unmapped_after_approved":  unmapped_count,
