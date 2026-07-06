@@ -12,11 +12,17 @@ Usage
 # Push a single event file (real Kafka):
   python tests/kafka_push.py --file tests/kafka_events/create/create_story.json
 
+# Push all event files in a directory (real Kafka):
+  python tests/kafka_push.py --file tests/kafka_events/create/ --delay 1
+
 # Push all fixture files (real Kafka):
   python tests/kafka_push.py --all
 
 # Push a single event file (mock — no Kafka needed):
   python tests/kafka_push.py --file tests/kafka_events/create/create_story.json --mock
+
+# Push all event files in a directory (mock):
+  python tests/kafka_push.py --file tests/kafka_events/create/ --mock --delay 1
 
 # Push all fixture files (mock):
   python tests/kafka_push.py --all --mock
@@ -155,11 +161,7 @@ def run_single(path: Path, args: argparse.Namespace) -> None:
             sys.exit(1)
 
 
-def run_all(args: argparse.Namespace) -> None:
-    files = collect_fixtures()
-    if not files:
-        sys.exit(1)
-
+def run_file_list(files: list[Path], args: argparse.Namespace) -> None:
     logger.info(f"📂  Found {len(files)} fixture file(s)")
     ok, fail = 0, 0
 
@@ -204,6 +206,13 @@ def run_all(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def run_all(args: argparse.Namespace) -> None:
+    files = collect_fixtures()
+    if not files:
+        sys.exit(1)
+    run_file_list(files, args)
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 def build_parser() -> argparse.ArgumentParser:
@@ -216,7 +225,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     src = parser.add_mutually_exclusive_group(required=True)
     src.add_argument("--file", "-f", metavar="FILE",
-                     help="Path to a single JSON/JSON5 event file.")
+                     help="Path to a single JSON/JSON5 event file or a directory of files.")
     src.add_argument("--all", "-a", action="store_true",
                      help="Push every file under tests/kafka_events/.")
 
@@ -227,7 +236,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--broker", default=None,
                         help="Kafka broker override (default: from .env KAFKA_BOOTSTRAP_SERVERS).")
     parser.add_argument("--delay", type=float, default=0.0, metavar="SECONDS",
-                        help="Seconds between messages when using --all (default: 0).")
+                        help="Seconds between messages when using --all or directory (default: 0).")
     return parser
 
 
@@ -239,9 +248,16 @@ def main() -> None:
         if not path.is_absolute():
             path = PROJECT_ROOT / path
         if not path.exists():
-            logger.error(f"File not found: {path}")
+            logger.error(f"File/Directory not found: {path}")
             sys.exit(1)
-        run_single(path, args)
+        if path.is_dir():
+            files = sorted(path.rglob("*.json"))
+            if not files:
+                logger.error(f"No .json files found under directory: {path}")
+                sys.exit(1)
+            run_file_list(files, args)
+        else:
+            run_single(path, args)
     else:
         run_all(args)
 

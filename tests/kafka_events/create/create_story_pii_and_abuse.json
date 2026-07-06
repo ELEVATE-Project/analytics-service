@@ -1,0 +1,42 @@
+{
+  "submissionId": 4003,
+  "submissionType": "story",
+  "sessionId": "pii_and_abuse_session_12345",
+  "tenantCode": "mitra",
+  "eventType": "create",
+  "eventPublishedAt": "2026-07-06T11:00:00.000Z",
+  "data": {
+    "programInfo": {
+      "id": "8baf962e-7c52-46cd-9787-16e3ee4d4121",
+      "name": "Shiksha Chaupals",
+      "description": "Community level discussion to improve education"
+    },
+    "LeaderCategoryInfo": {
+      "id": "96be72cf-aa0a-4bd3-b363-49271254177a",
+      "name": "Women leader (WL)",
+      "description": "Community level discussion facilitated by women leader"
+    },
+    "title": "Protest by Sunil Kumar against the stupid principal",
+    "userId": "403",
+    "userName": "Ramesh",
+    "organization": "Sahyogi Sanstha",
+    "designation": "Facilitator",
+    "state": "Jharkhand",
+    "district": "Ranchi",
+    "submissionDate": "2026-07-06T11:00:00Z",
+    "imageUrls": [],
+    "pdfUrls": null,
+    "transcriptLink": null,
+    "objective": "Exposing corruption in school management",
+    "challenges": [
+      "The headmaster Sunil Kumar is a thief and an absolute asshole. He stole funds and told parents like Ramesh to go to hell."
+    ],
+    "actionSteps": [
+      "Filed a complaint against Sunil (phone 9988998899). Emailed proof of his stupid actions to authorities."
+    ],
+    "impact": "Sunil was suspended.",
+    "duration": "1 week",
+    "blurb": "Ramesh exposed Sunil's garbage behavior.",
+    "content": "Sunil Kumar, residing in Ranchi, is a corrupt bastard who abused the children. Ramesh Gupta (phone: 9876543210) reported his bullshit activities to the district education officer."
+  }
+}

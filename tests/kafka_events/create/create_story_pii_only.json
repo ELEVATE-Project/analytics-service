@@ -1,0 +1,42 @@
+{
+  "submissionId": 4001,
+  "submissionType": "story",
+  "sessionId": "pii_only_session_12345",
+  "tenantCode": "mitra",
+  "eventType": "create",
+  "eventPublishedAt": "2026-07-06T11:00:00.000Z",
+  "data": {
+    "programInfo": {
+      "id": "8baf962e-7c52-46cd-9787-16e3ee4d4121",
+      "name": "Shiksha Chaupals",
+      "description": "Community level discussion to improve education"
+    },
+    "LeaderCategoryInfo": {
+      "id": "96be72cf-aa0a-4bd3-b363-49271254177a",
+      "name": "Women leader (WL)",
+      "description": "Community level discussion facilitated by women leader"
+    },
+    "title": "Improving attendance in Patna with Rajesh Kumar",
+    "userId": "401",
+    "userName": "Rajesh",
+    "organization": "Sahyogi Sanstha",
+    "designation": "Facilitator",
+    "state": "Bihar",
+    "district": "Patna",
+    "submissionDate": "2026-07-06T11:00:00Z",
+    "imageUrls": [],
+    "pdfUrls": null,
+    "transcriptLink": null,
+    "objective": "Increase class attendance at Government High School",
+    "challenges": [
+      "Many students like Amit Sharma and Priya Singh were absent. Parents' phone numbers like +91 9876543210 were unreachable."
+    ],
+    "actionSteps": [
+      "Rajesh Kumar visited Amit's home at house number 45, Patna. Emailed the report to principal@gshpatna.org."
+    ],
+    "impact": "Priya and Amit started coming to school regularly.",
+    "duration": "1 week",
+    "blurb": "Rajesh visited the homes of Amit and Priya to talk to their parents.",
+    "content": "Rajesh Kumar (email: rajesh@gmail.com, phone: 9988776655) works as a block facilitator. He tracked the absences of Amit Sharma and Priya Singh. He visited their homes in Patna and coordinated with their teacher Mrs. Anita Gupta."
+  }
+}

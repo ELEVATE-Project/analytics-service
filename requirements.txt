@@ -12,4 +12,31 @@ json5>=0.14.0
 streamlit>=1.35.0
 pandas>=2.0.0
 plotly>=5.15.0
+sentence-transformers==3.0.1
+tritopic
+spacy>=3.5.0,<3.8.0
+spacy-huggingface-pipelines>=0.0.4
+presidio-analyzer[transformers]
+presidio-anonymizer
+torch
+langdetect
 
+
+
+# spacy<3.8.0
+# presidio-analyzer
+# # presidio-anonymizer
+# # transformers
+# # torch
+# langdetect
+# "presidio-analyzer[transformers]"
+# torch
+
+# presidio-analyzer
+# presidio-anonymizer
+# spacy
+# transformers
+# torch
+# langdetect
+# https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.7.0/en_core_web_lg-3.7.0-py3-none-any.whl
+# https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.0/en_core_web_sm-3.7.0-py3-none-any.whl

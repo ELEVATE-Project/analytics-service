@@ -7,7 +7,7 @@ from app.config import settings
 from app.database.db import db
 from app.temporal.workflows import ConfigDrivenProcessingWorkflow, BatchProcessingWorkflow
 from app.temporal.activities import (
-    pii_detection_activity,
+    pii_and_abusive_language_detection_activity,
     deface_blur_activity,
     update_status_activity,
     fetch_pending_submissions_activity
@@ -34,7 +34,7 @@ async def start_worker():
     # Define registered activities and workflows
     workflows = [ConfigDrivenProcessingWorkflow, BatchProcessingWorkflow]
     activities = [
-        pii_detection_activity,
+        pii_and_abusive_language_detection_activity,
         thematic_classification_activity,
         deface_blur_activity,
         update_status_activity,

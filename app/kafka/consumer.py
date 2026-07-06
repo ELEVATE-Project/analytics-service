@@ -104,8 +104,27 @@ class IngestionConsumer:
         logger.info(f"Processing event '{event_type}' for submission {submission_id} (tenant: {tenant_code})")
 
         async with db.pool.acquire() as conn:
-            if event_type in ("create", "update"):
-                # Write to database (submissions table and specific detail table)
+            if event_type == "create":
+                # Check for duplicate entry
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM submissions WHERE submission_id = $1 AND tenant_code = $2",
+                    submission_id, tenant_code
+                )
+                if exists:
+                    logger.warning(f"Duplicate entry: Submission {submission_id} under tenant {tenant_code} already exists. Skipping ingestion.")
+                    return
+
+                res = await insert_or_update_submission(conn, event)
+                
+                # Check orchestration mode
+                mode = settings.PROCESSING_MODE.lower().strip()
+                if mode == "real-time":
+                    # Trigger the processing immediately
+                    await self._trigger_realtime_workflow(submission_id, tenant_code, submission_type)
+                else:
+                    logger.info(f"Batch mode enabled. Queued submission {submission_id} in 'pending' status.")
+
+            elif event_type == "update":
                 res = await insert_or_update_submission(conn, event)
                 
                 # Check orchestration mode

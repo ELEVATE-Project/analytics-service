@@ -6,7 +6,7 @@ from temporalio import workflow
 with workflow.unsafe.imports_passed_through():
     from temporalio.common import RetryPolicy
     from app.temporal.activities import (
-        pii_detection_activity,
+        pii_and_abusive_language_detection_activity,
         deface_blur_activity,
         update_status_activity,
         fetch_pending_submissions_activity
@@ -54,9 +54,9 @@ class ConfigDrivenProcessingWorkflow:
 
                 workflow.logger.info(f"Starting workflow step {idx + 1}/{len(process_steps)}: '{step_name}' for submission_id: {submission_id}")
 
-                if step_name == "pii_detection":
+                if step_name == "pii_and_abusive_language_detection":
                     res = await workflow.execute_activity(
-                        pii_detection_activity,
+                        pii_and_abusive_language_detection_activity,
                         {
                             "submission_id": submission_id,
                             "tenant_code": tenant_code,
@@ -68,9 +68,10 @@ class ConfigDrivenProcessingWorkflow:
                     status_val = res.get("status", "success") if isinstance(res, dict) else "success"
                     steps_execution[idx]["status"] = status_val
                     steps_execution[idx]["completed_timestamp"] = workflow.now().isoformat()
-                    completed_steps.append("pii_detection")
-                    process_metadata["pii_detection"] = res
+                    completed_steps.append(step_name)
+                    process_metadata[step_name] = res
                     workflow.logger.info(f"Completed workflow step: '{step_name}' with status: {status_val}")
+
 
                 elif step_name == "thematic_analysis":
                     res = await workflow.execute_activity(

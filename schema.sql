@@ -108,9 +108,12 @@ CREATE TABLE discussion_submissions (
     blur_image_urls     TEXT[] DEFAULT '{}',
     pdf_urls            TEXT[] DEFAULT '{}',
     transcript_link     TEXT,
-    content_masked      BOOLEAN NOT NULL DEFAULT FALSE,
+    pii_masked          BOOLEAN NOT NULL DEFAULT FALSE,
+    pii_masked_at       TEXT[] DEFAULT '{}',
+    abusive_masked_at   TEXT[] DEFAULT '{}',
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+     meta_data           JSONB,
     
     FOREIGN KEY (submission_id, tenant_code) 
         REFERENCES submissions(submission_id, tenant_code) ON DELETE CASCADE
@@ -132,9 +135,12 @@ CREATE TABLE story_submissions (
     blur_image_urls     TEXT[] DEFAULT '{}',
     pdf_urls            TEXT[] DEFAULT '{}',
     transcript_link     TEXT,
-    content_masked      BOOLEAN NOT NULL DEFAULT FALSE,
+    pii_masked          BOOLEAN NOT NULL DEFAULT FALSE,
+    pii_masked_at       TEXT[] DEFAULT '{}',
+    abusive_masked_at   TEXT[] DEFAULT '{}',
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    meta_data           JSONB,
     
     FOREIGN KEY (submission_id, tenant_code) 
         REFERENCES submissions(submission_id, tenant_code) ON DELETE CASCADE
@@ -192,14 +198,14 @@ CREATE TABLE analysis_results (
     statements              TEXT,
     statement_type          TEXT, -- Column/context identifier (e.g. 'challenges', 'solutions', 'objective')
     improvement_environment TEXT,
-    confidence_score        FLOAT,
+    similarity_score        FLOAT, -- Cosine similarity from local embedding match
+    confidence_score        FLOAT, -- Confidence score from local embedding match
     justification           TEXT,
     multi_theme_mapped      BOOLEAN NOT NULL DEFAULT FALSE,
-    category_type           TEXT,            -- 'Standard', 'Others', 'Unknown/Unclear', 'Flagged'
-    similarity_score        FLOAT,           -- Cosine similarity from local embedding match
+    category_type           TEXT, -- 'Standard', 'Others', 'Unknown/Unclear', 'Flagged'
     meta_data               JSONB,
     
-    FOREIGN KEY (submission_id, tenant_code) 
+    FOREIGN KEY (submission_id, tenant_code)    
         REFERENCES submissions(submission_id, tenant_code) ON DELETE CASCADE
 );
 
@@ -323,7 +329,7 @@ CREATE INDEX idx_submission_metrics_code ON submission_metrics (metric_code);
 --     ss.blur_image_urls,
 --     ss.pdf_urls,
 --     ss.transcript_link,
---     ss.content_masked,
+--     ss.pii_masked,
 --     ss.created_at,
 --     ss.updated_at
 -- FROM story_submissions ss
@@ -358,7 +364,7 @@ CREATE INDEX idx_submission_metrics_code ON submission_metrics (metric_code);
 --     ds.blur_image_urls,
 --     ds.pdf_urls,
 --     ds.transcript_link,
---     ds.content_masked,
+--     ds.pii_masked,
 --     ds.created_at,
 --     ds.updated_at
 -- FROM discussion_submissions ds
