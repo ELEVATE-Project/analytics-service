@@ -11,7 +11,6 @@ from app.database.operations import (
     insert_analysis_result,
     get_submission_type_and_payload,
 )
-from app.services.safety import is_flagged
 from app.services.classifier import build_theme_embeddings, classify_statement
 
 logger = logging.getLogger("analytics_service.temporal.activities")
@@ -22,15 +21,48 @@ def _is_garbage_or_spam(text: str) -> bool:
     Detects spam/garbage text patterns beyond the word-count gate.
     Examples: "test test", "aaa aaa aaa", "123 456", repeated single tokens.
     """
-    words = text.strip().split()
+    cleaned_text = text.strip()
+    if not cleaned_text:
+        return True
+
+    # 1. No alphabetic characters at all (English or Indic scripts)
+    if not re.search(r'[a-zA-Z\u0900-\u097F\u0980-\u09FF]', cleaned_text):
+        return True
+
+    # 2. Consecutive repeated characters: 4 or more (e.g., "aaaa", "....", "----")
+    if re.search(r'(.)\1{3,}', cleaned_text):
+        return True
+
+    words = [w.strip().lower() for w in cleaned_text.split() if w.strip()]
     if not words:
         return True
-    # All words are the same (e.g., "test test test")
-    if len(set(w.lower() for w in words)) == 1 and len(words) > 1:
+
+    # 3. Common placeholder words/mashing (case-insensitive)
+    placeholders = {
+        "test", "testing", "demo", "dummy", "asdf", "ghjk", "qwerty", 
+        "placeholder", "abc", "xyz", "nothing", "none", "nil", "n/a", "na"
+    }
+    # If the text matches a placeholder or all words are placeholders
+    if (len(words) == 1 and words[0] in placeholders) or all(w in placeholders for w in words):
         return True
-    # No alphabetic characters at all (e.g., "123 456 789")
-    if not re.search(r'[a-zA-Z\u0900-\u097F\u0980-\u09FF]', text):
+
+    # 4. Keyboard mashes (words of length >= 6 with zero vowels)
+    vowels = set("aeiouy")
+    for w in words:
+        if len(w) >= 6 and re.match(r'^[a-z]+$', w):
+            if not any(char in vowels for char in w):
+                return True
+
+    # 5. Repetitive text spam: if unique words make up less than 30% of total words (for statements with 3+ words)
+    if len(words) >= 3:
+        unique_ratio = len(set(words)) / len(words)
+        if unique_ratio < 0.3:
+            return True
+
+    # 6. All words are the same
+    if len(set(words)) == 1 and len(words) > 1:
         return True
+
     return False
 
 
@@ -91,6 +123,8 @@ async def _classify_single_statement(
     approved_themes: list,
     theme_vectors: dict,
     theme_id_to_info: dict,
+    pii_masked_at: list = None,
+    abusive_masked_at: list = None,
 ) -> Dict[str, Any]:
     """
     Runs the full classification pipeline (Steps 2-9) for a single statement.
@@ -151,9 +185,11 @@ async def _classify_single_statement(
     diagnostics["word_count_check"]["passed"] = True
     logger.info(f"[Thematic Pipeline] -> PASSED word-count/garbage gate.")
 
-    # --- Step 3: Safety check (no LLM) ---
-    logger.info(f"[Thematic Pipeline] Step 3: Checking statement safety (PII and abusive keyword blocks)")
-    flagged = is_flagged(statement)
+    # --- Step 3: Safety check ---
+    logger.info(f"[Thematic Pipeline] Step 3: Checking statement safety (Checking if column {statement_type} was flagged in PII/Abuse activity)")
+    pii_cols = pii_masked_at or []
+    abusive_cols = abusive_masked_at or []
+    flagged = (statement_type in pii_cols) or (statement_type in abusive_cols)
     diagnostics["safety_check"]["is_flagged"] = flagged
     if flagged:
         result["category_type"] = "Flagged"
@@ -167,7 +203,7 @@ async def _classify_single_statement(
             statement_type=statement_type,
             category_type="Flagged",
         )
-        logger.info(f"[Thematic Pipeline] -> FAILED safety check. Statement contains flagged content.")
+        logger.info(f"[Thematic Pipeline] -> FAILED safety check. Column {statement_type} contains PII or abusive content.")
         return result
 
     diagnostics["safety_check"]["passed"] = True
@@ -387,6 +423,9 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
         theme_id_to_info = {str(t["id"]): t for t in approved_themes}
         theme_vectors = build_theme_embeddings(approved_themes) if approved_themes else {}
 
+        pii_masked_at = payload.get("pii_masked_at") or []
+        abusive_masked_at = payload.get("abusive_masked_at") or []
+
         # Clear existing analysis results for this submission's theme analysis
         await conn.execute(
             "DELETE FROM analysis_results WHERE submission_id = $1 AND tenant_code = $2 AND analysis_type = 'theme'",
@@ -432,6 +471,8 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                     approved_themes=approved_themes,
                     theme_vectors=theme_vectors,
                     theme_id_to_info=theme_id_to_info,
+                    pii_masked_at=pii_masked_at,
+                    abusive_masked_at=abusive_masked_at,
                 )
                 all_results.append(res)
 

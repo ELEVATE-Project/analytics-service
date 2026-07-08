@@ -427,7 +427,7 @@ async def get_submission_type_and_payload(conn: asyncpg.Connection, submission_i
     if "story" in sub_type:
         payload_row = await conn.fetchrow(
             """
-            SELECT title, objective, challenge, action_steps, impact, duration, blurb, content, image_urls 
+            SELECT title, objective, challenge, action_steps, impact, duration, blurb, content, image_urls, pii_masked_at, abusive_masked_at 
             FROM story_submissions 
             WHERE submission_id = $1 AND tenant_code = $2
             """,
@@ -436,7 +436,7 @@ async def get_submission_type_and_payload(conn: asyncpg.Connection, submission_i
     elif "discussion" in sub_type:
         payload_row = await conn.fetchrow(
             """
-            SELECT title, challenges, solutions, author, language, image_urls 
+            SELECT title, challenges, solutions, author, language, image_urls, pii_masked_at, abusive_masked_at 
             FROM discussion_submissions 
             WHERE submission_id = $1 AND tenant_code = $2
             """,

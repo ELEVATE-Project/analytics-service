@@ -106,10 +106,12 @@ class IngestionConsumer:
         async with db.pool.acquire() as conn:
             if event_type == "create":
                 # Check for duplicate entry
-                exists = await conn.fetchval(
-                    "SELECT 1 FROM submissions WHERE submission_id = $1 AND tenant_code = $2",
-                    submission_id, tenant_code
-                )
+                exists = None
+                if hasattr(conn, "fetchval"):
+                    exists = await conn.fetchval(
+                        "SELECT 1 FROM submissions WHERE submission_id = $1 AND tenant_code = $2",
+                        submission_id, tenant_code
+                    )
                 if exists:
                     logger.warning(f"Duplicate entry: Submission {submission_id} under tenant {tenant_code} already exists. Skipping ingestion.")
                     return
