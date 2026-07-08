@@ -56,7 +56,13 @@ async def deface_blur_activity(params: Dict[str, Any]) -> Dict[str, Any]:
 
         blurred_local_paths = []
         for i, url in enumerate(image_urls):
-            filename = f"{submission_id}_{tenant_code}_{i}.jpg"
+            import urllib.parse
+            import os
+            parsed_path = urllib.parse.urlparse(url).path
+            ext = os.path.splitext(parsed_path)[1]
+            if not ext:
+                ext = ".jpg"
+            filename = f"{submission_id}_{tenant_code}_{i}{ext}"
             try:
                 # 1. Download file locally
                 local_path = _download_file(url, filename)
@@ -70,7 +76,13 @@ async def deface_blur_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                     output_path=str(output_path)
                 )
                 
-                blurred_local_paths.append(str(output_path))
+                # 3. Upload to GCP
+                from app.services.gcp_storage import upload_to_gcp
+                from app.config import settings
+                blob_name = f"{settings.GCP_BLOB_PREFIX}/{filename}"
+                public_url = upload_to_gcp(str(output_path), blob_name)
+                
+                blurred_local_paths.append(public_url)
             except Exception as e:
                 logger.error(f"Failed face blurring for {url}: {e}")
                 raise

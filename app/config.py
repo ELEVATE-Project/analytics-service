@@ -45,6 +45,21 @@ class Settings(BaseSettings):
     SIMILARITY_SCORE_THRESHOLD: float = Field(default=0.65)
     LLM_CONFIDENCE_SCORE_THRESHOLD: float = Field(default=0.8)
 
+    # GCP Credentials
+    TYPE: str = Field(default="service_account")
+    PROJECT_ID: str = Field(default="")
+    PRIVATE_KEY_ID: str = Field(default="")
+    PRIVATE_KEY: str = Field(default="")
+    CLIENT_EMAIL: str = Field(default="")
+    CLIENT_ID: str = Field(default="")
+    AUTH_URI: str = Field(default="")
+    TOKEN_URI: str = Field(default="")
+    AUTH_PROVIDER_X509_CERT_URL: str = Field(default="")
+    CLIENT_X509_CERT_URL: str = Field(default="")
+    UNIVERSE_DOMAIN: str = Field(default="googleapis.com")
+    BUCKET_NAME: str = Field(default="")
+    GCP_BLOB_PREFIX: str = Field(default="")
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
