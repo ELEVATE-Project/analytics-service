@@ -74,7 +74,7 @@ async def _fetch_approved_themes(conn) -> list:
     return [dict(row) for row in rows]
 
 
-async def _get_theme_classification_prompt(conn) -> dict:
+async def _get_theme_classification_prompt(conn, analysis_type: str) -> dict:
     """
     Fetches the latest active theme_classification prompt version.
     Returns dict with 'id', 'system_prompt', 'user_prompt'.
@@ -84,13 +84,14 @@ async def _get_theme_classification_prompt(conn) -> dict:
         SELECT pv.id, pv.system_prompt, pv.user_prompt
         FROM prompt_version pv
         JOIN prompts p ON p.id = pv.prompt_id
-        WHERE p.analysis_type = 'theme_classification' AND pv.is_active = TRUE
+        WHERE p.analysis_type = $1 AND pv.is_active = TRUE
         ORDER BY pv.created_at DESC
         LIMIT 1
-        """
+        """,
+        analysis_type
     )
     if not row:
-        raise RuntimeError("No active theme_classification prompt version found in the database.")
+        raise RuntimeError(f"No active {analysis_type} prompt version found in the database.")
     return dict(row)
 
 
@@ -125,6 +126,7 @@ async def _classify_single_statement(
     theme_id_to_info: dict,
     pii_masked_at: list = None,
     abusive_masked_at: list = None,
+    analysis_type: str = "thematic_classification",
 ) -> Dict[str, Any]:
     """
     Runs the full classification pipeline (Steps 2-9) for a single statement.
@@ -178,6 +180,7 @@ async def _classify_single_statement(
             statements=statement,
             statement_type=statement_type,
             category_type="Unknown/Unclear",
+            meta_data=diagnostics,
         )
         logger.info(f"[Thematic Pipeline] -> FAILED word-count/garbage gate. Marked Unknown/Unclear.")
         return result
@@ -202,6 +205,7 @@ async def _classify_single_statement(
             statements=statement,
             statement_type=statement_type,
             category_type="Flagged",
+            meta_data=diagnostics,
         )
         logger.info(f"[Thematic Pipeline] -> FAILED safety check. Column {statement_type} contains PII or abusive content.")
         return result
@@ -233,6 +237,7 @@ async def _classify_single_statement(
             statement_type=statement_type,
             category_type="Standard",
             similarity_score=best_similarity,
+            meta_data=diagnostics,
         )
         theme_name = theme_id_to_info.get(best_theme_id, {}).get("name", "?")
         logger.info(f"[Thematic Pipeline] -> SUCCESSFUL local embedding match: '{statement[:50]}...' → {theme_name} (sim={best_similarity:.3f} >= threshold={settings.SIMILARITY_SCORE_THRESHOLD:.3f})")
@@ -244,7 +249,7 @@ async def _classify_single_statement(
     logger.info(f"[Thematic Pipeline] Steps 7-8: Executing LLM fallback via OpenRouter")
     diagnostics["llm_fallback"]["executed"] = True
     try:
-        prompt_data = await _get_theme_classification_prompt(conn)
+        prompt_data = await _get_theme_classification_prompt(conn, analysis_type)
         prompt_version_id = str(prompt_data["id"])
         system_prompt = prompt_data["system_prompt"]
         user_prompt = prompt_data["user_prompt"]
@@ -320,7 +325,7 @@ async def _classify_single_statement(
             submission_id=submission_id,
             tenant_code=tenant_code,
             model_name=settings.OPENROUTER_MODEL,
-            analysis_type="theme_classification",
+            analysis_type=analysis_type,
             prompt_version_id=prompt_version_id,
             prompt_tokens=len(full_prompt.split()),
             completion_tokens=len(response_text.split()),
@@ -344,6 +349,7 @@ async def _classify_single_statement(
                 confidence_score=llm_confidence,
                 similarity_score=best_similarity,
                 justification=llm_justification,
+                meta_data=diagnostics,
             )
             logger.info(f"LLM match: '{statement[:60]}...' → {llm_theme_name} (conf={llm_confidence:.2f})")
         else:
@@ -361,6 +367,7 @@ async def _classify_single_statement(
                 confidence_score=llm_confidence,
                 similarity_score=best_similarity,
                 justification=llm_justification,
+                meta_data=diagnostics,
             )
             logger.info(f"Statement marked Others (low confidence): {statement[:80]}...")
 
@@ -379,6 +386,7 @@ async def _classify_single_statement(
             statement_type=statement_type,
             category_type="Others",
             similarity_score=best_similarity,
+            meta_data=diagnostics,
         )
 
     return result
@@ -404,6 +412,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
     submission_id = params["submission_id"]
     tenant_code = params["tenant_code"]
     target_columns = params["target_columns"]
+    analysis_type = params.get("analysis_type", "thematic_classification")
 
     if not target_columns:
         return {"status": "skipped", "reason": "no columns specified"}
@@ -473,6 +482,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                     theme_id_to_info=theme_id_to_info,
                     pii_masked_at=pii_masked_at,
                     abusive_masked_at=abusive_masked_at,
+                    analysis_type=analysis_type,
                 )
                 all_results.append(res)
 

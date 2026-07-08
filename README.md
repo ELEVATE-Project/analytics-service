@@ -128,7 +128,7 @@ Thematic classification is implemented as a gated, multi-step pipeline inside [t
 5. **Fetch Approved Taxonomies (Step 5)**: Queries the database for all taxonomies/themes currently marked with an `'Approved'` status.
 6. **Local Embedding Match (Step 6)**: Employs a local `SentenceTransformer` (`all-MiniLM-L6-v2`) to encode the statement and calculate cosine similarities against all approved themes.
 7. **Evaluate Local Threshold (Step 7)**: If the highest cosine similarity score $\ge$ `SIMILARITY_SCORE_THRESHOLD` (default 0.65), maps the statement directly to that theme, sets `content_quality = 'Standard'`, saves the rounded score to the database, and skips the LLM call entirely.
-8. **Fallback LLM Request (Step 8)**: If the local embedding match similarity is below the threshold, retrieves the active `theme_classification` prompt template from the database, builds the user prompt by inserting the statement and approved themes lists, and issues an API request to OpenRouter.
+8. **Fallback LLM Request (Step 8)**: If the local embedding match similarity is below the threshold, retrieves the active `thematic_classification` prompt template from the database, builds the user prompt by inserting the statement and approved themes lists, and issues an API request to OpenRouter.
 9. **Assess LLM Confidence & Finalize (Step 9)**: 
    - If the LLM successfully maps the statement with a confidence score $\ge$ `LLM_CONFIDENCE_SCORE_THRESHOLD` (default 0.8), sets `content_quality = 'Standard'` and updates the DB with the mapped theme.
    - If both the local embedding score and the LLM confidence score fall below their respective thresholds, sets `content_quality = 'Others'`.

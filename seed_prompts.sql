@@ -6,7 +6,7 @@
 INSERT INTO prompts (name, analysis_type, created_at, updated_at)
 VALUES
   ('PII and Abusive-Language Detection', 'pii_and_abusive_language_detection', now(), now()),
-  ('Theme Classification', 'theme_classification', now(), now()),
+  ('Theme Classification', 'thematic_classification', now(), now()),
   ('Story Rating', 'story_rating', now(), now())
 ON CONFLICT (name) DO NOTHING;
 

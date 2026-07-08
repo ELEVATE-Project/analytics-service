@@ -32,10 +32,10 @@ class Settings(BaseSettings):
 
     # Scoped Ingestion Pipeline Configuration (JSON strings loaded from env)
     PROCESS_CONFIG_STORY: str = Field(
-        default='[{"name": "pii_detection", "columns": ["objective"]}, {"name": "thematic_analysis", "columns": ["objective"]}]'
+        default='[{"name": "pii_and_abusive_language_detection", "columns": ["objective"]}, {"name": "thematic_classification", "columns": ["objective"]}]'
     )
     PROCESS_CONFIG_DISCUSSION: str = Field(
-        default='[{"name": "pii_detection", "columns": ["challenges"]}, {"name": "thematic_analysis", "columns": ["challenges"]}]'
+        default='[{"name": "pii_and_abusive_language_detection", "columns": ["challenges"]}, {"name": "thematic_classification", "columns": ["challenges"]}]'
     )
 
     # Thematic Classification Configuration

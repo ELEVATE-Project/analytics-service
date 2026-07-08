@@ -7,11 +7,11 @@ from app.config import settings
 from app.database.db import db
 from app.temporal.workflows import ConfigDrivenProcessingWorkflow, BatchProcessingWorkflow
 from app.temporal.activities import (
-    pii_and_abusive_language_detection_activity,
     deface_blur_activity,
     update_status_activity,
     fetch_pending_submissions_activity
 )
+from app.temporal.pii_and_abusive_activity import pii_and_abusive_language_detection_activity
 from app.temporal.thematic_activity import thematic_classification_activity
 
 logger = logging.getLogger("analytics_service.temporal.worker")
