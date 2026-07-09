@@ -58,7 +58,9 @@ class Settings(BaseSettings):
     CLIENT_X509_CERT_URL: str = Field(default="")
     UNIVERSE_DOMAIN: str = Field(default="googleapis.com")
     BUCKET_NAME: str = Field(default="")
-    GCP_BLOB_PREFIX: str = Field(default="")
+    STORY_BLOB: str = Field(default="")
+    DISCUSSION_BLOB: str = Field(default="")
+    MEDIA_BASE_URL: str = Field(default="")
 
     model_config = SettingsConfigDict(
         env_file=".env",
