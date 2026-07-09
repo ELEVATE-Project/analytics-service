@@ -1,0 +1,193 @@
+
+language: en-US
+early_access: false
+enable_free_tier: true
+
+reviews:
+  profile: chill
+
+  request_changes_workflow: true
+  high_level_summary: true
+  changed_files_summary: true
+  estimate_code_review_effort: true
+  sequence_diagrams: true
+  review_status: true
+  collapse_walkthrough: false
+  fail_commit_status: false
+
+  path_filters:
+    - "!**/__pycache__/**"
+    - "!**/.pytest_cache/**"
+    - "!**/.venv/**"
+    - "!**/.mypy_cache/**"
+    - "!**/.ruff_cache/**"
+    - "!thematic_analysis/**"
+    - "!deployment/**"
+    - "!docs/**"
+    - "!logs/**"
+    - "!temp/**"
+    - "!**/*.csv"
+    - "!**/*.png"
+    - "!**/*.jpg"
+    - "!**/*.jpeg"
+    - "!**/*.gif"
+    - "!**/*.svg"
+    - "!**/*.html"
+
+  path_instructions:
+
+    - path: "app/api/**"
+      instructions: >
+        This folder contains FastAPI endpoints.
+        Review for:
+        - Request validation using Pydantic
+        - Proper response models
+        - Correct HTTP status codes
+        - Dependency Injection
+        - Authentication & Authorization
+        - No business logic inside route handlers
+        - Proper async usage
+        - Consistent exception handling
+
+    - path: "app/services/**"
+      instructions: >
+        This folder contains business logic, AI services and orchestration.
+        Review for:
+        - Clean architecture
+        - Reusable functions
+        - Proper exception handling
+        - Async programming best practices
+        - Minimal duplicated code
+        - Efficient processing
+        - SOLID principles
+        - Dependency inversion where applicable
+
+    - path: "app/services/llm/**"
+      instructions: >
+        Review AI and LLM related code for:
+        - Prompt quality
+        - Prompt injection risks
+        - Hallucination mitigation
+        - Token efficiency
+        - Retry mechanisms
+        - Deterministic outputs where required
+        - Proper handling of model failures
+        - Safe user input handling
+
+    - path: "app/database/**"
+      instructions: >
+        Review database layer for:
+        - SQL Injection risks
+        - Parameterized queries
+        - Transaction safety
+        - Rollback handling
+        - Session management
+        - Connection leaks
+        - Efficient ORM usage
+        - Proper indexing opportunities
+
+    - path: "app/kafka/**"
+      instructions: >
+        Review Kafka consumers and producers for:
+        - Offset management
+        - Retry mechanisms
+        - Dead Letter Queue handling
+        - Duplicate message handling
+        - Consumer resiliency
+        - Logging
+        - Serialization & deserialization safety
+
+    - path: "app/temporal/**"
+      instructions: >
+        Review Temporal workflows for:
+        - Workflow determinism
+        - Activity retries
+        - Timeout configuration
+        - Idempotent activities
+        - Failure recovery
+        - Proper workflow orchestration
+        - Avoid blocking operations
+
+    - path: "app/config/**"
+      instructions: >
+        Ensure configuration files:
+        - Do not expose secrets
+        - Use environment variables
+        - Have safe defaults
+        - Validate required configuration
+
+    - path: "**/*.sql"
+      instructions: >
+        Review SQL for:
+        - Query performance
+        - Proper indexes
+        - Avoid SELECT *
+        - Efficient joins
+        - Parameterized statements
+        - Normalization
+        - Constraints
+        - Explain plan considerations
+
+    - path: "docker-compose*.yaml"
+      instructions: >
+        Validate Docker Compose configuration for:
+        - Proper networking
+        - Secrets handling
+        - Health checks
+        - Restart policies
+        - Volume mappings
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches: [".*"]
+
+  pre_merge_checks:
+    description:
+      mode: warning
+
+    docstrings:
+      mode: warning
+      threshold: 70
+
+    issue_assessment:
+      mode: warning
+
+  finishing_touches:
+    docstrings:
+      enabled: true
+
+    unit_tests:
+      enabled: true
+
+  tools:
+    semgrep:
+      enabled: true
+
+    gitleaks:
+      enabled: true
+
+    sqlfluff:
+      enabled: true
+
+    shellcheck:
+      enabled: true
+
+    yamllint:
+      enabled: true
+
+    flake8:
+      enabled: true
+
+    pylint:
+      enabled: true
+
+    ast-grep:
+      essential_rules: true
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  web_search:
+    enabled: true
