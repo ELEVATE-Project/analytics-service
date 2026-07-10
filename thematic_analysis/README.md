@@ -6,7 +6,7 @@ Maps batch data to approved themes at a custom threshold (e.g. $70\%$), then clu
 
 ###  Batch Thematic Analysis 
 
-This is what `run_thematic_batch_tritopic.py` does. It takes a **large batch** of statements (either from your CSV file or from the "Others" pile in the database) and discovers new emerging themes from them.
+This is what `thematic_analysis.py` does. It takes a **large batch** of statements (either from your CSV file or from the "Others" pile in the database) and discovers new emerging themes from them.
 
 ```
   Input: Your CSV file  OR  "Others" from the database
@@ -122,17 +122,24 @@ Create a file called `.env` inside the `thematic_analysis/` folder:
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/analytics_db
 OPENROUTER_API_KEY=sk-or-xxxxxxxxxxxxxxxxxxxxxxxx
 ```
-
 > Replace the API key with your actual OpenRouter key.  
 > Database URL format: `postgresql://<user>:<password>@<host>:<port>/<dbname>`
 
-### Step 3 — Initialize the database
+## Step 3 — Initialize the Database
 
-Run this once from the project root to create all tables:
+From the project root, move up one directory:
+
+```bash
+cd ..
+```
+
+Then initialize the database by running:
 
 ```bash
 psql -U postgres -d analytics_db -f schema.sql
 ```
+
+This command creates all the required tables in the `analytics_db` database.
 
 ### Step 4 — Seed approved themes
 
@@ -141,7 +148,7 @@ To manually force a fresh seed:
 
 ```bash
 psql -U postgres -d analytics_db -c "TRUNCATE themes RESTART IDENTITY CASCADE;"
-psql -U postgres -d analytics_db -f thematic_analysis/seed_themes.sql
+psql -U postgres -d analytics_db -f seed_themes.sql
 ```
 
 ---
@@ -164,26 +171,26 @@ Use this when you already have a CSV file of objectives or challenges you want t
 
 ```bash
 # Analysing a story CSV — process the "objective" column
-python run_thematic_batch_tritopic.py \
+python thematic_analysis.py \
     --input story.csv \
     --process_column objective \
     --threshold 0.70
 
 # Analysing a discussion CSV — process the "Challenges" column
-python run_thematic_batch_tritopic.py \
+python thematic_analysis.py \
     --input discussion.csv \
     --process_column Challenges \
     --threshold 0.60
 
 # Save results to a custom file path as well
-python run_thematic_batch_tritopic.py \
+python thematic_analysis.py \
     --input story.csv \
     --process_column objective \
     --threshold 0.70 \
     --output my_results.csv
 
 # Quick test — limit to first 200 rows
-python run_thematic_batch_tritopic.py \
+python thematic_analysis.py \
     --input story.csv \
     --process_column objective \
     --threshold 0.70 \
@@ -220,13 +227,13 @@ No `--input` flag is needed. The script fetches directly from the `analysis_resu
 
 ```bash
 # Fetch all "Others" from the database and run thematic analysis
-python run_thematic_batch_tritopic.py --threshold 0.70
+python thematic_analysis.py --threshold 0.70
 
 # Same but also save an extra copy of the results to a custom path
-python run_thematic_batch_tritopic.py --threshold 0.70 --output themes_from_db.csv
+python thematic_analysis.py --threshold 0.70 --output themes_from_db.csv
 
 # Quick test — limit to first 200 rows from DB
-python run_thematic_batch_tritopic.py --threshold 0.70 --limit 200
+python thematic_analysis.py --threshold 0.70 --limit 200
 ```
 
 > The script uses this database filter automatically:
@@ -434,18 +441,18 @@ psql -U postgres -d analytics_db -f schema.sql
 # ─── RUN ANALYSIS ───────────────────────────────────────────────────────
 
 # From a CSV (story — "objective" column)
-python run_thematic_batch_tritopic.py \
+python thematic_analysis.py \
     --input story.csv --process_column objective --threshold 0.70
 
 # From a CSV (discussion — "Challenges" column)
-python run_thematic_batch_tritopic.py \
+python thematic_analysis.py \
     --input discussion.csv --process_column Challenges --threshold 0.60
 
 # From database (processes "Others" tagged statements)
-python run_thematic_batch_tritopic.py --threshold 0.70
+python thematic_analysis.py --threshold 0.70
 
 # Quick test — only process 200 rows
-python run_thematic_batch_tritopic.py \
+python thematic_analysis.py \
     --input story.csv --process_column objective --threshold 0.70 --limit 200
 
 # ─── VIEW RESULTS ────────────────────────────────────────────────────────
