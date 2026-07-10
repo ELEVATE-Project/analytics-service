@@ -108,7 +108,7 @@ reviews:
         - Proper workflow orchestration
         - Avoid blocking operations
 
-    - path: "app/config/**"
+    - path: "app/config.py"
       instructions: >
         Ensure configuration files:
         - Do not expose secrets

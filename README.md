@@ -107,29 +107,27 @@ Example response:
 
 ---
 
-## Ingesting & Testing with Kafka
+## Orchestration Modes
 
-To push a mock story event into the Kafka ingestion topic (`analytics.ingestion.raw`), you can use the following command:
+The service supports two processing modes configured via the `PROCESSING_MODE` environment variable in your `.env` file:
 
-```bash
-/Users/user/.pyenv/versions/3.9.19/bin/python -c 'import json, json5, pathlib; text = pathlib.Path("/Users/user/Documents/AI/analytics-arch/analytics_service/tests/kafka_events/create/create_story.json").read_text(encoding="utf-8"); print(json.dumps(json5.loads(text), separators=(",", ":")))' | /Users/user/Documents/shikshalokam/elevate-analytics/tools/kafka_2.12-3.7.1/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic analytics.ingestion.raw
-```
+### 1. Real-Time Processing (`PROCESSING_MODE=real-time`)
+*   **Ingestion Flow**: When a new Kafka event is received, the consumer automatically attempts to trigger a Temporal workflow (`ConfigDrivenProcessingWorkflow`) immediately.
+*   **Temporal Connection Self-Healing**: 
+    *   On startup, the Kafka consumer initializes the Temporal client connection.
+    *   If the Temporal server is offline or unreachable during consumer startup or during execution, the consumer **does not crash**.
+    *   Instead, the consumer gracefully logs the connection error and leaves the submission in the PostgreSQL database with a `'pending'` status.
+    *   When new Kafka events arrive, the consumer automatically checks if the Temporal client is disconnected and attempts to reconnect/heal the connection. Once the Temporal server is back online, real-time workflow triggering resumes automatically.
 
----
-
-## Thematic Classification Pipeline
-
-Thematic classification is implemented as a gated, multi-step pipeline inside [thematic_activity.py](file:///Users/user/Documents/AI/analytics-arch/analytics_service/app/temporal/thematic_activity.py). Below are the sequential steps executed for each target text column:
-
-1. **Read Column Config**: Resolves target columns from settings (e.g. `objective` or `challenges`) and extracts the corresponding statement texts.
-2. **Discussion Splitting (Step 1b)**: For discussion submission types, splits cells using a delimiter (`|` by default) into separate statements so each point is classified individually.
-3. **Word-Count & Garbage Check (Step 2)**: Checks if the statement word count is less than `MINIMUM_THEME_WORD_COUNT` (default 5) or matches repetitive spam patterns. If so, flags it as `Unknown/Unclear` and **stops** processing.
-4. **Local Safety & Moderation (Step 3)**: Performs a non-LLM safety check against sensitive PII patterns (email, Indian phone numbers, Aadhaar, PAN) and abusive/profane keywords. If flagged, sets `content_quality = 'Flagged'` and **stops** processing.
-5. **Fetch Approved Taxonomies (Step 5)**: Queries the database for all taxonomies/themes currently marked with an `'Approved'` status.
-6. **Local Embedding Match (Step 6)**: Employs a local `SentenceTransformer` (`all-MiniLM-L6-v2`) to encode the statement and calculate cosine similarities against all approved themes.
-7. **Evaluate Local Threshold (Step 7)**: If the highest cosine similarity score $\ge$ `SIMILARITY_SCORE_THRESHOLD` (default 0.65), maps the statement directly to that theme, sets `content_quality = 'Standard'`, saves the rounded score to the database, and skips the LLM call entirely.
-8. **Fallback LLM Request (Step 8)**: If the local embedding match similarity is below the threshold, retrieves the active `thematic_classification` prompt template from the database, builds the user prompt by inserting the statement and approved themes lists, and issues an API request to OpenRouter.
-9. **Assess LLM Confidence & Finalize (Step 9)**: 
-   - If the LLM successfully maps the statement with a confidence score $\ge$ `LLM_CONFIDENCE_SCORE_THRESHOLD` (default 0.8), sets `content_quality = 'Standard'` and updates the DB with the mapped theme.
-   - If both the local embedding score and the LLM confidence score fall below their respective thresholds, sets `content_quality = 'Others'`.
+### 2. Batch Processing (`PROCESSING_MODE=batch`)
+*   **Ingestion Flow**: When a new Kafka event is received, the consumer simply stores the record in PostgreSQL with a `'pending'` status. The consumer **completely bypasses all Temporal calls** during ingestion. Even if the Temporal backend is entirely down, Kafka event ingestion works flawlessly.
+*   **Automatic Daily Schedule Registration**: 
+    *   When the Temporal worker process starts, it inspects `PROCESSING_MODE`. If set to `batch`, the worker automatically registers a daily batch Schedule in the Temporal Server named `daily-batch-processing`.
+    *   The run time is configured via the `BATCH_SCHEDULE_CRON` environment variable (default: `0 20 * * *` - 8:00 PM UTC).
+    *   If the schedule is already registered, the worker logs this and skips registration gracefully.
+*   **Batch Execution**: 
+    *   At the scheduled time, the Temporal Server triggers the `BatchProcessingWorkflow`.
+    *   This workflow calls the `fetch_pending_submissions_activity` to retrieve all submissions in PostgreSQL with a `'pending'` status.
+    *   It then spawns child workflows (`ConfigDrivenProcessingWorkflow`) to process all retrieved submissions in parallel.
+    *   If the Temporal Server backend is offline at the scheduled run time, its *catch-up* policy will trigger the missed batch immediately upon starting up again.
 

@@ -48,6 +48,36 @@ async def start_worker():
         activities=activities
     )
 
+    # Register daily batch schedule if configured for batch mode
+    if settings.PROCESSING_MODE.lower().strip() == "batch":
+        try:
+            from temporalio.client import (
+                Schedule,
+                ScheduleActionStartWorkflow,
+                ScheduleSpec,
+                ScheduleAlreadyRunningError,
+            )
+
+            logger.info(f"Registering daily batch schedule '{settings.BATCH_SCHEDULE_CRON}' in Temporal...")
+            await client.create_schedule(
+                id="daily-batch-processing",
+                schedule=Schedule(
+                    action=ScheduleActionStartWorkflow(
+                        BatchProcessingWorkflow.run,
+                        id="daily-batch-processing-run",
+                        task_queue=settings.TEMPORAL_QUEUE,
+                    ),
+                    spec=ScheduleSpec(
+                        cron_expressions=[settings.BATCH_SCHEDULE_CRON]
+                    ),
+                ),
+            )
+            logger.info("Daily batch schedule successfully registered.")
+        except ScheduleAlreadyRunningError:
+            logger.info("Daily batch schedule already exists in Temporal. Skipping registration.")
+        except Exception as e:
+            logger.error(f"Failed to register daily batch schedule in Temporal: {e}")
+
     logger.info(f"🚀 Temporal Worker started. Listening on task queue '{settings.TEMPORAL_QUEUE}'...")
     try:
         await worker.run()

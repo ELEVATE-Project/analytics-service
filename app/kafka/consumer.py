@@ -44,8 +44,12 @@ class IngestionConsumer:
         Starts a Temporal workflow execution in real-time.
         """
         if not self.temporal_client:
-            logger.error("Temporal client not connected. Skipping workflow trigger.")
-            return
+            try:
+                logger.info(f"Temporal client not connected. Attempting to reconnect to {settings.TEMPORAL_HOST}...")
+                self.temporal_client = await Client.connect(settings.TEMPORAL_HOST)
+            except Exception as e:
+                logger.error(f"Failed to connect to Temporal: {e}. Leaving submission {submission_id} as 'pending'.")
+                return
 
         process_steps = settings.get_process_config(submission_type)
         if not process_steps:
@@ -76,7 +80,12 @@ class IngestionConsumer:
                 
             logger.info(f"Workflow {workflow_id} triggered successfully.")
         except Exception as e:
-            logger.error(f"Failed to trigger workflow {workflow_id}: {e}")
+            logger.error(f"Failed to trigger workflow {workflow_id}: {e}. Leaving submission {submission_id} as 'pending'.")
+            # Reset client on connection / gRPC issues to trigger reconnect next time
+            err_str = str(e).lower()
+            if any(term in err_str for term in ["connect", "rpc", "connection", "unavailable"]):
+                logger.info("Detected connection issue with Temporal. Resetting client to trigger reconnect on next message.")
+                self.temporal_client = None
 
     async def process_message(self, raw_payload: str) -> None:
         """
