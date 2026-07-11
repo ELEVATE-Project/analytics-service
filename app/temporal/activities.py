@@ -55,8 +55,16 @@ async def deface_blur_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             return {"status": "skipped", "reason": "no image urls available"}
 
         blurred_local_paths = []
+        relative_original_urls = []
         for i, url in enumerate(image_urls):
-            filename = f"{submission_id}_{tenant_code}_{i}.jpg"
+            import urllib.parse
+            import os
+            parsed_path = urllib.parse.urlparse(url).path
+            relative_original_urls.append(parsed_path)
+            ext = os.path.splitext(parsed_path)[1]
+            if not ext:
+                ext = ".jpg"
+            filename = f"{submission_id}_{tenant_code}_{i}{ext}"
             try:
                 # 1. Download file locally
                 local_path = _download_file(url, filename)
@@ -70,23 +78,42 @@ async def deface_blur_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                     output_path=str(output_path)
                 )
                 
-                blurred_local_paths.append(str(output_path))
+                # 3. Upload to GCP
+                from app.services.gcp_storage import upload_to_gcp
+                from app.config import settings
+                
+                if "story" in sub_type:
+                    blob_name = f"{settings.STORY_BLOB}/{filename}"
+                else:
+                    blob_name = f"{settings.DISCUSSION_BLOB}/{filename}"
+                
+                public_url = upload_to_gcp(str(output_path), blob_name)
+                
+                blurred_local_paths.append(public_url)
+                
+                # Delete from outputs directory once uploaded
+                if output_path.exists():
+                    output_path.unlink()
+                    
+                # Delete original downloaded image once processed
+                if local_path.exists():
+                    local_path.unlink()
+                    
             except Exception as e:
                 logger.error(f"Failed face blurring for {url}: {e}")
                 raise
 
         # Save output paths back to DB
-        # Note: In production this would upload to S3/GCS and save public URLs
-        if blurred_local_paths:
+        if blurred_local_paths or relative_original_urls:
             if sub_type == "story":
                 await conn.execute(
-                    "UPDATE story_submissions SET blur_image_urls = $3, updated_at = now() WHERE submission_id = $1 AND tenant_code = $2",
-                    submission_id, tenant_code, blurred_local_paths
+                    "UPDATE story_submissions SET blur_image_urls = $3, image_urls = $4, updated_at = now() WHERE submission_id = $1 AND tenant_code = $2",
+                    submission_id, tenant_code, blurred_local_paths, relative_original_urls
                 )
             else:
                 await conn.execute(
-                    "UPDATE discussion_submissions SET blur_image_urls = $3, updated_at = now() WHERE submission_id = $1 AND tenant_code = $2",
-                    submission_id, tenant_code, blurred_local_paths
+                    "UPDATE discussion_submissions SET blur_image_urls = $3, image_urls = $4, updated_at = now() WHERE submission_id = $1 AND tenant_code = $2",
+                    submission_id, tenant_code, blurred_local_paths, relative_original_urls
                 )
 
         return {"status": "success", "blur_paths": blurred_local_paths}
