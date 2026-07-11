@@ -119,3 +119,59 @@ def test_worker_startup_registers_batch_schedule(monkeypatch):
             assert kwargs["schedule"].spec.cron_expressions == ["0 20 * * *"]
 
     asyncio.run(run_test())
+
+
+def test_deface_blur_activity_success(monkeypatch):
+    """Test that deface_blur_activity downloads, processes, uploads, and deletes temp files successfully."""
+    async def run_test():
+        from app.temporal.deface_blur_activity import deface_blur_activity
+        from app.temporal.deface_blur_activity import db as db_module
+        from pathlib import Path
+
+        # Mock db connection acquire
+        mock_conn = AsyncMock()
+        mock_conn.execute = AsyncMock()
+        
+        class _CustomFakeConn:
+            async def __aenter__(self):
+                return mock_conn
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+        
+        monkeypatch.setattr(db_module, "pool", MagicMock(acquire=lambda: _CustomFakeConn()))
+
+        # Mock payload helper
+        monkeypatch.setattr(
+            "app.temporal.deface_blur_activity.get_submission_type_and_payload",
+            AsyncMock(return_value=("story", {"image_urls": ["https://foo.com/3281/bar.png"]}))
+        )
+
+        # Mock download/blur/upload
+        mock_download = MagicMock(return_value=Path("/tmp/bar.png"))
+        monkeypatch.setattr("app.temporal.deface_blur_activity._download_file", mock_download)
+        
+        mock_anonymize = MagicMock()
+        monkeypatch.setattr("app.temporal.deface_blur_activity.anonymize_face", mock_anonymize)
+        
+        mock_upload = MagicMock(return_value="/bucket/story_blurred_image/3281/bar.png")
+        monkeypatch.setattr("app.temporal.deface_blur_activity.upload_to_gcp", mock_upload)
+
+        # Mock path exists and unlink
+        mock_path = MagicMock()
+        mock_path.__truediv__.return_value = mock_path
+        mock_path.exists.return_value = True
+        mock_path.unlink = MagicMock()
+        
+        monkeypatch.setattr("app.temporal.deface_blur_activity.DOWNLOADS_DIR", mock_path)
+        monkeypatch.setattr("app.temporal.deface_blur_activity.OUTPUTS_DIR", mock_path)
+
+        res = await deface_blur_activity({"submission_id": "sub1", "tenant_code": "tenant1"})
+        
+        assert res["status"] == "success"
+        assert res["blur_paths"] == ["/bucket/story_blurred_image/3281/bar.png"]
+        mock_conn.execute.assert_called_once()
+        # Verify cleanups were called on both local_path and output_path
+        assert mock_path.unlink.call_count == 2
+
+    asyncio.run(run_test())
+

@@ -21,8 +21,7 @@ presidio-anonymizer
 torch
 langdetect
 numpy>=1.24.0
-google-genai>=2.10.0
-google-cloud-storage>=2.10.0
+google-cloud-storage
 
 
 # spacy<3.8.0
