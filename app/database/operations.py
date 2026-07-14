@@ -411,6 +411,36 @@ async def insert_analysis_result(
     )
 
 
+async def insert_ranking_result(
+    conn: asyncpg.Connection,
+    submission_id: str,
+    tenant_code: str,
+    criteria_data: Dict[str, Any],
+    composite_score: float,
+    tier: Optional[str],
+    overall_summary: Optional[str],
+    meta_data: Optional[Dict[str, Any]] = None
+) -> None:
+    """
+    Saves LLM-generated story rating/ranking output to the ranking table.
+    """
+    await conn.execute(
+        """
+        INSERT INTO ranking (
+            submission_id, tenant_code, criteria_data, composite_score, tier, overall_summary, meta_data
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        """,
+        submission_id,
+        tenant_code,
+        json.dumps(criteria_data),
+        composite_score,
+        tier,
+        overall_summary,
+        json.dumps(meta_data) if meta_data else None
+    )
+
+
 async def get_submission_type_and_payload(conn: asyncpg.Connection, submission_id: str, tenant_code: str) -> tuple:
     """
     Retrieves the submission type and payload details for story or discussion submissions.
@@ -427,8 +457,8 @@ async def get_submission_type_and_payload(conn: asyncpg.Connection, submission_i
     if "story" in sub_type:
         payload_row = await conn.fetchrow(
             """
-            SELECT title, objective, challenge, action_steps, impact, duration, blurb, content, image_urls, pii_masked_at, abusive_masked_at 
-            FROM story_submissions 
+            SELECT title, objective, challenge, action_steps, impact, duration, blurb, content, image_urls, pdf_urls, pii_masked_at, abusive_masked_at
+            FROM story_submissions
             WHERE submission_id = $1 AND tenant_code = $2
             """,
             submission_id, tenant_code

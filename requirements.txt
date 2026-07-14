@@ -22,6 +22,7 @@ torch
 langdetect
 numpy>=1.24.0
 google-cloud-storage
+pypdf>=4.0.0
 
 
 # spacy<3.8.0

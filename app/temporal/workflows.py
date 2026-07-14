@@ -12,6 +12,7 @@ with workflow.unsafe.imports_passed_through():
     from app.temporal.deface_blur_activity import deface_blur_activity
     from app.temporal.pii_and_abusive_activity import pii_and_abusive_language_detection_activity
     from app.temporal.thematic_activity import thematic_classification_activity
+    from app.temporal.story_rating_activity import story_rating_activity
 
 @workflow.defn
 class ConfigDrivenProcessingWorkflow:
@@ -104,6 +105,22 @@ class ConfigDrivenProcessingWorkflow:
                     steps_execution[idx]["status"] = status_val
                     steps_execution[idx]["completed_timestamp"] = workflow.now().isoformat()
                     completed_steps.append("image_blur")
+                    workflow.logger.info(f"Completed workflow step: '{step_name}' with status: {status_val}")
+
+                elif step_name == "story_rating":
+                    res = await workflow.execute_activity(
+                        story_rating_activity,
+                        {
+                            "submission_id": submission_id,
+                            "tenant_code": tenant_code
+                        },
+                        start_to_close_timeout=timedelta(minutes=10),
+                        retry_policy=retry_policy
+                    )
+                    status_val = res.get("status", "success") if isinstance(res, dict) else "success"
+                    steps_execution[idx]["status"] = status_val
+                    steps_execution[idx]["completed_timestamp"] = workflow.now().isoformat()
+                    completed_steps.append("story_rating")
                     workflow.logger.info(f"Completed workflow step: '{step_name}' with status: {status_val}")
 
                 else:
