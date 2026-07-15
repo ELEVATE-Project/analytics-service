@@ -21,7 +21,7 @@ logger = logging.getLogger("analytics_service.temporal.activities")
 BASE_DIR = Path(__file__).resolve().parents[2]
 DOWNLOADS_DIR = BASE_DIR / "downloads"
 
-MAX_PDF_TEXT_CHARS = 40000 #TODO check and remove this based on the discussion 
+MAX_PDF_TEXT_CHARS = 40000 #TODO insert this in meta_data of ratting table
 
 REQUIRED_RATING_FIELDS = [
     "document_language", "impact_and_outcome_score", "impact_justification",

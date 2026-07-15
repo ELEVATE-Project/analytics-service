@@ -1,5 +1,6 @@
 import json
 import logging
+import urllib.parse
 from typing import Dict, Any, Optional, List
 import asyncpg
 from datetime import datetime
@@ -21,6 +22,18 @@ def _normalize_url_list(value: Any) -> List[str]:
     if isinstance(value, list):
         return [str(url) for url in value]
     return [str(value)]
+
+def _strip_base_url(url: str) -> str:
+    """Strips scheme+host from an absolute URL, keeping only the path (e.g. /bucket/folder/file.pdf)."""
+    url_str = str(url).strip()
+    parsed = urllib.parse.urlparse(url_str)
+    if parsed.scheme and parsed.netloc:
+        return parsed.path
+    return url_str
+
+def _normalize_media_url_list(value: Any) -> List[str]:
+    """Like _normalize_url_list, but stores only the path — never the base URL."""
+    return [_strip_base_url(url) for url in _normalize_url_list(value)]
 
 async def upsert_metadata(conn: asyncpg.Connection, data: Dict[str, Any], tenant_code: str) -> tuple:
     """
@@ -178,8 +191,8 @@ async def insert_or_update_submission(
             )
             challenges_joined = _normalize_string_list(data.get("challenges"))
             action_steps_joined = _normalize_string_list(data.get("actionSteps"))
-            image_urls = _normalize_url_list(data.get("imageUrls"))
-            pdf_urls = _normalize_url_list(data.get("pdfUrls"))
+            image_urls = _normalize_media_url_list(data.get("imageUrls"))
+            pdf_urls = _normalize_media_url_list(data.get("pdfUrls"))
 
             if row_exists:
                 await conn.execute(
@@ -243,8 +256,8 @@ async def insert_or_update_submission(
             )
             challenges_joined = _normalize_string_list(data.get("challenges"))
             solutions_joined = _normalize_string_list(data.get("solutions"))
-            image_urls = _normalize_url_list(data.get("imageUrls"))
-            pdf_urls = _normalize_url_list(data.get("pdfUrls"))
+            image_urls = _normalize_media_url_list(data.get("imageUrls"))
+            pdf_urls = _normalize_media_url_list(data.get("pdfUrls"))
 
             if row_exists:
                 await conn.execute(
