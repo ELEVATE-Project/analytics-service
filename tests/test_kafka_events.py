@@ -25,6 +25,9 @@ class _FakeConn:
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
+    async def fetchval(self, *args, **kwargs):
+        return None
+
 
 class _FakePool:
     def acquire(self):

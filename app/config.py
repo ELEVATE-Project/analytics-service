@@ -1,5 +1,5 @@
 import json
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -46,22 +46,35 @@ class Settings(BaseSettings):
     SIMILARITY_SCORE_THRESHOLD: float = Field(default=0.65)
     LLM_CONFIDENCE_SCORE_THRESHOLD: float = Field(default=0.8)
 
-    # GCP Credentials
+    # Auth Token Configuration
+    AUTH_TOKEN: str = Field(default="dummy-analytics-auth-token-2026")
+    CSV_SCHEDULE_CRON_TIME: str = Field(default="0 20 * * *")
+    KAFKA_TOPIC_CSV_ROWS: str = Field(default="analytics.ingestion.raw")
+
+    # CSV Column Schemas (stored as JSON arrays of column names)
+    STORY_CSV_COLUMN: str = Field(
+        default='["id","Title","User name","Designation","Location","District","Organization","Report Created At","Objective","Challenges","Action Steps","Impact","Duration","Blurb","masked_blurb","Content","masked_content","Images","Pdf","Transcript Link"]'
+    )
+    DISCUSSION_CSV_COLUMN: str = Field(
+        default='["id","Title","User name","User Location","District","Participant Count","Men","Women","Children","Date of Discussion","Organization","Challenges","Solutions","Author","Language","Report Created At","Transcript Link","Image Urls","PDF Urls"]'
+    )
+
+    # GCP Credentials & Cloud Storage Config
     TYPE: str = Field(default="service_account")
     PROJECT_ID: str = Field(default="")
     PRIVATE_KEY_ID: str = Field(default="")
     PRIVATE_KEY: str = Field(default="")
     CLIENT_EMAIL: str = Field(default="")
     CLIENT_ID: str = Field(default="")
-    AUTH_URI: str = Field(default="")
-    TOKEN_URI: str = Field(default="")
-    AUTH_PROVIDER_X509_CERT_URL: str = Field(default="")
+    AUTH_URI: str = Field(default="https://accounts.google.com/o/oauth2/auth")
+    TOKEN_URI: str = Field(default="https://oauth2.googleapis.com/token")
+    AUTH_PROVIDER_X509_CERT_URL: str = Field(default="https://www.googleapis.com/oauth2/v1/certs")
     CLIENT_X509_CERT_URL: str = Field(default="")
     UNIVERSE_DOMAIN: str = Field(default="googleapis.com")
-    BUCKET_NAME: str = Field(default="")
-    STORY_BLOB: str = Field(default="")
-    DISCUSSION_BLOB: str = Field(default="")
-    MEDIA_BASE_URL: str = Field(default="")
+    BUCKET_NAME: str = Field(default="dev-sg-dashboard")
+    STORY_BLOB: str = Field(default="story_blurred_image")
+    DISCUSSION_BLOB: str = Field(default="dicussion_blurred_image")
+    MEDIA_BASE_URL: str = Field(default="https://mohini-static.shikshalokam.org")
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -76,6 +89,28 @@ class Settings(BaseSettings):
         if v.startswith("postgresql+asyncpg://"):
             return v.replace("postgresql+asyncpg://", "postgresql://")
         return v
+
+    def get_gcs_credentials_dict(self) -> Optional[Dict[str, str]]:
+        """
+        Assembles the individual credentials into the JSON dict that
+        google.cloud.storage.Client.from_service_account_info() expects.
+        Returns None if required fields are missing.
+        """
+        if not self.CLIENT_EMAIL or not self.PRIVATE_KEY:
+            return None
+        return {
+            "type": self.TYPE,
+            "project_id": self.PROJECT_ID,
+            "private_key_id": self.PRIVATE_KEY_ID,
+            "private_key": self.PRIVATE_KEY.replace("\\n", "\n").replace('"', ''),
+            "client_email": self.CLIENT_EMAIL,
+            "client_id": self.CLIENT_ID,
+            "auth_uri": self.AUTH_URI,
+            "token_uri": self.TOKEN_URI,
+            "auth_provider_x509_cert_url": self.AUTH_PROVIDER_X509_CERT_URL,
+            "client_x509_cert_url": self.CLIENT_X509_CERT_URL,
+            "universe_domain": self.UNIVERSE_DOMAIN,
+        }
 
     def get_process_config(self, submission_type: str) -> List[Dict[str, Any]]:
         """
@@ -98,3 +133,4 @@ class Settings(BaseSettings):
 
 # Singleton instance
 settings = Settings()
+
