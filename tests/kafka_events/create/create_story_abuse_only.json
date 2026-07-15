@@ -5,24 +5,20 @@
   "tenantCode": "mitra",
   "eventType": "create",
   "eventPublishedAt": "2026-07-06T11:00:00.000Z",
+  "tags": {
+    "state": "Bihar",
+    "district": "Patna",
+    "organization": "Navodaya School",
+    "programId": "8baf962e-7c52-46cd-9787-16e3ee4d4121",
+    "programName": "Shiksha Chaupals",
+    "leaderCategoryId": "96be72cf-aa0a-4bd3-b363-49271254177a",
+    "leaderCategoryName": "Women leader (WL)"
+  },
   "data": {
-    "programInfo": {
-      "id": "8baf962e-7c52-46cd-9787-16e3ee4d4121",
-      "name": "Shiksha Chaupals",
-      "description": "Community level discussion to improve education"
-    },
-    "LeaderCategoryInfo": {
-      "id": "96be72cf-aa0a-4bd3-b363-49271254177a",
-      "name": "Women leader (WL)",
-      "description": "Community level discussion facilitated by women leader"
-    },
     "title": "School Infrastructure Issues and Terrible Management",
     "userId": "402",
     "userName": "Ravi",
-    "organization": "Navodaya School",
     "designation": "Teacher",
-    "state": "Bihar",
-    "district": "Patna",
     "submissionDate": "2026-07-06T11:00:00Z",
     "imageUrls": [],
     "pdfUrls": null,

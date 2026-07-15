@@ -5,30 +5,29 @@
   "tenantCode": "mitra",
   "eventType": "update",
   "eventPublishedAt": "2024-07-17T06:59:37.773Z",
-  "oldValues": {
-    "programInfo": {
-      "id": "8baf962e-7c52-46cd-9787-16e3ee4d4121",
-      "name": "Shiksha Chaupals",
-      "description": "Community level discussion to improve education"
-    },
-    "LeaderCategoryInfo": {
-      "id": "96be72cf-aa0a-4bd3-b363-49271254177a",
-      "name": "Women leader (WL)",
-      "description": "Community level discussion facilitated by women leader"
-    },
-    "title": "Infrastructure Challenges and Solutions in Schools",
-    "userId": "383", //This can come in future after login
-    "userName": "Ramesh",
-    "organization": "Sahyogi Sanstha",
-    "designation": "Women leader",
+  "tags": {
     "state": "Bihar",
     "district": "Patna",
-    "submissionDate": "2025-07-30T13:25:00Z", //This can be discussion date or Report Created At
+    "organization": "Sahyogi Sanstha",
+    "programId": "8baf962e-7c52-46cd-9787-16e3ee4d4121",
+    "programName": "Shiksha Chaupals",
+    "leaderCategoryId": "96be72cf-aa0a-4bd3-b363-49271254177a",
+    "leaderCategoryName": "Women leader (WL)"
+  },
+  "oldValues": {
+    "title": "Infrastructure Challenges and Solutions in Schools",
+    "userId": "383",
+    "userName": "Ramesh",
+    "designation": "Women leader",
+    "submissionDate": "2025-07-30T13:25:00Z",
     "imageUrls": [
       "https://mohini-static.shikshalokam.org/chatbot/storymedia/3281/1751514555-1000078256.png",
       "https://mohini-static.shikshalokam.org/chatbot/storymedia/3281/1751514563-1000078247.png"
     ],
-    "pdfUrls": "https://mohini-static.shikshalokam.org/chatbot/storymedia/200/Infrastructure_Challenges_and_Solutions_in_Schools.pdf",
+    "pdfUrls": {
+      "original": "https://mohini-static.shikshalokam.org/chatbot/storymedia/200/Infrastructure_Challenges_and_Solutions_in_Schools.pdf",
+      "masked": "https://mohini-static.shikshalokam.org/chatbot/storymedia/masked/200/Infrastructure_Challenges_and_Solutions_in_Schools.pdf"
+    },
     "transcriptLink": "7xlngbc02dzrrgw3lmqtlavke322r2x8",
     "challenges": [
       "The school faces a challenge with classroom space.",
@@ -38,73 +37,23 @@
     "solutions": [
       "Building new classrooms to address the space issue.",
       "Buying land to create a playground for students.",
-      "Adding more books to the library to improve resources."
+      "Adding more books to the library."
     ],
     "participantsData": [
-      {
-        "role": "men",
-        "count": 4
-      },
-      {
-        "role": "women",
-        "count": 2
-      },
-      {
-        "role": "teacher",
-        "count": 3
-      }
+      { "role": "men", "count": 4 },
+      { "role": "women", "count": 2 },
+      { "role": "children", "count": 1 },
+      { "role": "teacher", "count": 3 }
     ],
-    "newValues": {
-      "programInfo": {
-        "id": "8baf962e-7c52-46cd-9787-16e3ee4d4112",
-        "name": "Shikshana Chavadis",
-        "description": "Community level discussion to improve education"
-      },
-      "LeaderCategoryInfo": {
-        "id": "96be72cf-aa0a-4bd3-b363-49271254177a",
-        "name": "Women leader (WL)",
-        "description": "Community level discussion facilitated by women leader"
-      },
-      "title": "Improving parent-teacher communication through innovative feedback mechanisms",
-      "userId": "3832", //This can come in future after login
-      "userName": "Ramya",
-      "organization": "Sahyogi Sanstha",
-      "designation": "Women leader",
-      "state": "Bihar",
-      "district": "Patna",
-      "submissionDate": "2025-07-30T13:25:00Z", //This can be discussion date or Report Created At
-      "imageUrls": [
-        "https://mohini-static.shikshalokam.org/chatbot/storymedia/3281/1751514555-1000078256.png",
-        "https://mohini-static.shikshalokam.org/chatbot/storymedia/3281/1751514563-1000078247.png"
-      ],
-      "pdfUrls": "https://mohini-static.shikshalokam.org/chatbot/storymedia/200/Infrastructure_Challenges_and_Solutions_in_Schools.pdf",
-      "transcriptLink": "7xlngbc02dzrrgw3lmqtlavke322r2x8",
-      "challenges": [
-        "The school faces a challenge with classroom space.",
-        "There is no playground for students to play.",
-        "The library lacks sufficient books for students."
-      ],
-      "solutions": [
-        "Building new classrooms to address the space issue.",
-        "Buying land to create a playground for students.",
-        "Adding more books to the library to improve resources."
-      ],
-      "participantsData": [
-        {
-          "role": "men",
-          "count": 4
-        },
-        {
-          "role": "women",
-          "count": 2
-        },
-        {
-          "role": "teacher",
-          "count": 3
-        }
-      ],
-      "author": "120",
-      "language": "en"
-    }
+    "author": "120",
+    "language": "en"
+  },
+  "newValues": {
+    "title": "Transformative Impact of Localized Learning Materials in Multigrade Classrooms",
+    "participantsData": [
+      { "role": "men", "count": 4 },
+      { "role": "women", "count": 2 },
+      { "role": "children", "count": 1 }
+    ]
   }
 }

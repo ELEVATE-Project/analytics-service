@@ -35,11 +35,11 @@ class _FakePool:
     ("fixture_path", "expected_event_type"),
     [
         (FIXTURE_ROOT / "create" / "create_discussion.json", "create"),
-        # (FIXTURE_ROOT / "create" / "create_story.json", "create"),
-        # (FIXTURE_ROOT / "update" / "update_discussion.json", "update"),
-        # (FIXTURE_ROOT / "update" / "update_story.json", "update"),
-        # (FIXTURE_ROOT / "delete" / "delete_discussion.json", "delete"),
-        # (FIXTURE_ROOT / "delete" / "delete_story.json", "delete"),
+        (FIXTURE_ROOT / "create" / "create_story.json", "create"),
+        (FIXTURE_ROOT / "update" / "update_discussion.json", "update"),
+        (FIXTURE_ROOT / "update" / "update_story.json", "update"),
+        (FIXTURE_ROOT / "delete" / "delete_discussion.json", "delete"),
+        (FIXTURE_ROOT / "delete" / "delete_story.json", "delete"),
     ],
 )
 def test_process_message_routes_fixture_events(monkeypatch, fixture_path, expected_event_type):
