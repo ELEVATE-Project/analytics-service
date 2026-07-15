@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     LLM_MAX_TOKENS: int = Field(default=2048)
     LLM_TIMEOUT_SECONDS: int = Field(default=60)
 
+    # Story Rating Configuration
+    MAX_PDF_TEXT_CHARS: int = Field(default=40000)
+
     # Scoped Ingestion Pipeline Configuration (JSON strings loaded from env)
     PROCESS_CONFIG_STORY: str = Field(
         default='[{"name": "pii_and_abusive_language_detection", "columns": ["objective"]}, {"name": "thematic_classification", "columns": ["objective"]}, {"name": "story_rating"}]'

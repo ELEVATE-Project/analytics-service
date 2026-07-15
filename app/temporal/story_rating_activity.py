@@ -21,8 +21,6 @@ logger = logging.getLogger("analytics_service.temporal.activities")
 BASE_DIR = Path(__file__).resolve().parents[2]
 DOWNLOADS_DIR = BASE_DIR / "downloads"
 
-MAX_PDF_TEXT_CHARS = 40000 #TODO insert this in meta_data of ratting table
-
 REQUIRED_RATING_FIELDS = [
     "document_language", "impact_and_outcome_score", "impact_justification",
     "issue_and_challenge_score", "issue_justification", "action_steps_score",
@@ -58,7 +56,7 @@ def _extract_text_from_pdf(local_path: Path) -> str:
     return "\n".join(pages_text).strip()
 
 
-def _truncate_text(text: str, max_chars: int = MAX_PDF_TEXT_CHARS) -> str:
+def _truncate_text(text: str, max_chars: int = settings.MAX_PDF_TEXT_CHARS) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + "\n\n[... content truncated ...]"
@@ -88,7 +86,8 @@ def _fetch_story_content(
     Blocking helper (run via asyncio.to_thread): downloads and extracts PDF text,
     falling back to challenge/action_steps/impact fields if the PDF is missing,
     fails to download, or yields no extractable text.
-    Returns (content, source) where source is 'pdf' or 'fields'.
+    Returns (content, source, total_chars) where source is 'pdf' or 'fields' and
+    total_chars is the length of the extracted/fallback text before truncation.
     """
     if pdf_url:
         local_path = None
@@ -104,7 +103,7 @@ def _fetch_story_content(
 
             if pdf_text.strip():
                 logger.info(f"{log_prefix} Using PDF content for analysis ({len(pdf_text)} chars)")
-                return _truncate_text(pdf_text), "pdf"
+                return _truncate_text(pdf_text), "pdf", len(pdf_text)
 
             logger.warning(f"{log_prefix} PDF extracted no text. Falling back to submission fields.")
         except Exception as e:
@@ -118,7 +117,8 @@ def _fetch_story_content(
     else:
         logger.info(f"{log_prefix} No PDF link provided. Using submission fields.")
 
-    return _build_fallback_text(challenge, action_steps, impact), "fields"
+    fallback_text = _build_fallback_text(challenge, action_steps, impact)
+    return fallback_text, "fields", len(fallback_text)
 
 
 async def _get_story_rating_prompt(conn) -> Dict[str, Any]:
@@ -165,7 +165,7 @@ async def story_rating_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         pdf_urls = payload.get("pdf_urls") or []
         pdf_url = next((u for u in pdf_urls if u and str(u).strip()), None)
 
-        content, source = await asyncio.to_thread(
+        content, source, total_pdf_text_chars = await asyncio.to_thread(
             _fetch_story_content,
             pdf_url,
             payload.get("challenge"),
@@ -235,7 +235,13 @@ async def story_rating_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 composite_score=composite_score,
                 tier=tier,
                 overall_summary=overall_summary,
-                meta_data={"content_source": source, "pdf_url": pdf_url, "llm_response": result},
+                meta_data={
+                    "content_source": source,
+                    "pdf_url": pdf_url,
+                    "llm_response": result,
+                    "total_pdf_text_chars": total_pdf_text_chars,
+                    "max_pdf_text_chars": settings.MAX_PDF_TEXT_CHARS,
+                },
             )
 
             await insert_llm_log(
