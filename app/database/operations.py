@@ -139,43 +139,51 @@ async def insert_or_update_submission(
 
         # 1. Upsert Master Submission record
         # Note: status is initialized as 'pending' for new creates
-        submission_uuid_row = await conn.fetchrow(
-            """
-            INSERT INTO submissions (
-                session_id, submission_id, tenant_code, submission_type, user_id, user_name, role,
-                state, district, organization, submission_date, program_id, leader_id, status
+        try:
+            submission_uuid_row = await conn.fetchrow(
+                """
+                INSERT INTO submissions (
+                    session_id, submission_id, tenant_code, submission_type, user_id, user_name, role,
+                    state, district, organization, submission_date, program_id, leader_id, status
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                ON CONFLICT (submission_id, tenant_code) DO UPDATE SET
+                    session_id = COALESCE(EXCLUDED.session_id, submissions.session_id),
+                    user_id = EXCLUDED.user_id,
+                    user_name = EXCLUDED.user_name,
+                    role = EXCLUDED.role,
+                    state = EXCLUDED.state,
+                    district = EXCLUDED.district,
+                    organization = EXCLUDED.organization,
+                    submission_date = EXCLUDED.submission_date,
+                    program_id = EXCLUDED.program_id,
+                    leader_id = EXCLUDED.leader_id,
+                    status = EXCLUDED.status,
+                    updated_at = now()
+                RETURNING id, status;
+                """,
+                session_id,
+                submission_id,
+                tenant_code,
+                submission_type,
+                data.get("userId"),
+                data.get("userName"),
+                data.get("designation"), # Designation maps to role
+                data.get("state"),
+                data.get("district"),
+                data.get("organization"),
+                submission_date,
+                program_id,
+                leader_id,
+                "pending"
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-            ON CONFLICT (submission_id, tenant_code) DO UPDATE SET
-                session_id = COALESCE(EXCLUDED.session_id, submissions.session_id),
-                user_id = EXCLUDED.user_id,
-                user_name = EXCLUDED.user_name,
-                role = EXCLUDED.role,
-                state = EXCLUDED.state,
-                district = EXCLUDED.district,
-                organization = EXCLUDED.organization,
-                submission_date = EXCLUDED.submission_date,
-                program_id = EXCLUDED.program_id,
-                leader_id = EXCLUDED.leader_id,
-                status = EXCLUDED.status,
-                updated_at = now()
-            RETURNING id, status;
-            """,
-            session_id,
-            submission_id,
-            tenant_code,
-            submission_type,
-            data.get("userId"),
-            data.get("userName"),
-            data.get("designation"), # Designation maps to role
-            data.get("state"),
-            data.get("district"),
-            data.get("organization"),
-            submission_date,
-            program_id,
-            leader_id,
-            "pending"
-        )
+        except asyncpg.exceptions.UniqueViolationError as e:
+            if e.constraint_name == "submissions_session_id_key":
+                raise ValueError(
+                    f"session_id {session_id!r} is already associated with a different submission; "
+                    f"rejecting submission {submission_id} under tenant {tenant_code}."
+                ) from e
+            raise
 
         db_sub_uuid = submission_uuid_row["id"]
         db_sub_status = submission_uuid_row["status"]
