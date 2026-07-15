@@ -2,17 +2,28 @@ import json
 import logging
 import urllib.error
 import urllib.request
+from typing import Optional
 from app.config import settings
 
 logger = logging.getLogger("analytics_service.services.llm")
 
-def openrouter_chat_completion(prompt: str) -> str:
+def openrouter_chat_completion(
+    prompt: str,
+    model: Optional[str] = None,
+    max_tokens: Optional[int] = None,
+    timeout: Optional[int] = None,
+) -> str:
     """
     Makes a synchronous HTTP request to OpenRouter to generate content.
     Independent of Temporal and can be called from CLI/scripts.
+
+    model/max_tokens/timeout override the global settings for this call only;
+    omit (or pass None) to fall back to OPENROUTER_MODEL/LLM_MAX_TOKENS/LLM_TIMEOUT_SECONDS.
     """
     api_key = settings.OPENROUTER_API_KEY
-    model = settings.OPENROUTER_MODEL
+    model = model or settings.OPENROUTER_MODEL
+    max_tokens = max_tokens or settings.LLM_MAX_TOKENS
+    timeout = timeout or settings.LLM_TIMEOUT_SECONDS
 
     if not api_key:
         raise RuntimeError("OPENROUTER_API_KEY environment variable is not set")
@@ -23,7 +34,7 @@ def openrouter_chat_completion(prompt: str) -> str:
     request_body = {
         "model": model,
         "temperature": settings.LLM_TEMPERATURE,
-        "max_tokens": settings.LLM_MAX_TOKENS,
+        "max_tokens": max_tokens,
         "messages": [
             {
                 "role": "user",
@@ -31,7 +42,7 @@ def openrouter_chat_completion(prompt: str) -> str:
             }
         ],
     }
-    
+
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -47,7 +58,7 @@ def openrouter_chat_completion(prompt: str) -> str:
     )
 
     try:
-        with urllib.request.urlopen(request, timeout=settings.LLM_TIMEOUT_SECONDS) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             response_data = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8", errors="replace")

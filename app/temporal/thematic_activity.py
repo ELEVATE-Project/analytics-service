@@ -127,6 +127,9 @@ async def _classify_single_statement(
     pii_masked_at: list = None,
     abusive_masked_at: list = None,
     analysis_type: str = "thematic_classification",
+    resolved_model: str = None,
+    resolved_max_tokens: int = None,
+    resolved_timeout: int = None,
 ) -> Dict[str, Any]:
     """
     Runs the full classification pipeline (Steps 2-9) for a single statement.
@@ -264,7 +267,9 @@ async def _classify_single_statement(
         full_prompt = f"{system_prompt}\n\n{user_prompt}"
 
         from app.services.llm import openrouter_chat_completion
-        response_text = openrouter_chat_completion(full_prompt)
+        response_text = openrouter_chat_completion(
+            full_prompt, model=resolved_model, max_tokens=resolved_max_tokens, timeout=resolved_timeout,
+        )
 
         # Clean markdown wrappers
         cleaned = response_text.strip()
@@ -324,7 +329,7 @@ async def _classify_single_statement(
             conn,
             submission_id=submission_id,
             tenant_code=tenant_code,
-            model_name=settings.OPENROUTER_MODEL,
+            model_name=resolved_model or settings.OPENROUTER_MODEL,
             analysis_type=analysis_type,
             prompt_version_id=prompt_version_id,
             prompt_tokens=len(full_prompt.split()),
@@ -413,6 +418,9 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
     tenant_code = params["tenant_code"]
     target_columns = params["target_columns"]
     analysis_type = params.get("analysis_type", "thematic_classification")
+    resolved_model = params.get("llm_model") or settings.OPENROUTER_MODEL
+    resolved_max_tokens = params.get("max_tokens") or settings.LLM_MAX_TOKENS
+    resolved_timeout = params.get("llm_timeout_seconds") or settings.LLM_TIMEOUT_SECONDS
 
     if not target_columns:
         return {"status": "skipped", "reason": "no columns specified"}
@@ -483,6 +491,9 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                     pii_masked_at=pii_masked_at,
                     abusive_masked_at=abusive_masked_at,
                     analysis_type=analysis_type,
+                    resolved_model=resolved_model,
+                    resolved_max_tokens=resolved_max_tokens,
+                    resolved_timeout=resolved_timeout,
                 )
                 all_results.append(res)
 

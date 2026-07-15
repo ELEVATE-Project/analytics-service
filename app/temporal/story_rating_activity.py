@@ -155,6 +155,9 @@ async def story_rating_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     submission_id = params["submission_id"]
     tenant_code = params["tenant_code"]
     log_prefix = f"[StoryRating:{submission_id}]"
+    resolved_model = params.get("llm_model") or settings.OPENROUTER_MODEL
+    resolved_max_tokens = params.get("max_tokens") or settings.LLM_MAX_TOKENS
+    resolved_timeout = params.get("llm_timeout_seconds") or settings.LLM_TIMEOUT_SECONDS
 
     async with db.pool.acquire() as conn:
         sub_type, payload = await get_submission_type_and_payload(conn, submission_id, tenant_code)
@@ -189,7 +192,9 @@ async def story_rating_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         response_text = ""
         try:
             from app.services.llm import openrouter_chat_completion
-            response_text = await asyncio.to_thread(openrouter_chat_completion, full_prompt)
+            response_text = await asyncio.to_thread(
+                openrouter_chat_completion, full_prompt, model=resolved_model, max_tokens=resolved_max_tokens, timeout=resolved_timeout,
+            )
 
             cleaned = response_text.strip()
             if cleaned.startswith("```"):
@@ -248,7 +253,7 @@ async def story_rating_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 conn,
                 submission_id=submission_id,
                 tenant_code=tenant_code,
-                model_name=settings.OPENROUTER_MODEL,
+                model_name=resolved_model,
                 analysis_type="story_rating",
                 prompt_version_id=prompt_version_id,
                 prompt_tokens=len(full_prompt.split()),
@@ -266,7 +271,7 @@ async def story_rating_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                     conn,
                     submission_id=submission_id,
                     tenant_code=tenant_code,
-                    model_name=settings.OPENROUTER_MODEL,
+                    model_name=resolved_model,
                     analysis_type="story_rating",
                     prompt_version_id=prompt_version_id,
                     prompt_tokens=len(full_prompt.split()) if full_prompt else 0,
