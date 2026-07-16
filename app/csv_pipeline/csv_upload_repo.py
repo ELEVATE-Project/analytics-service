@@ -56,8 +56,9 @@ async def insert_upload_record(
     file_name: str | None = None,
     file_size: int | None = None,
     meta_data: dict[str, Any] | None = None,
+    status: str = "pending",
 ) -> int:
-    """Insert a new row with status='pending'. Returns the new row's id."""
+    """Insert a new row with the given status. Returns the new row's id."""
     if not db.pool:
         await db.connect()
 
@@ -67,7 +68,7 @@ async def insert_upload_record(
             INSERT INTO csv_uploads
                 (report_type, program_name, leader_category, cloud_storage_path,
                  file_name, file_size, meta_data, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, 'pending')
+            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
             RETURNING id
             """,
             report_type,
@@ -77,9 +78,10 @@ async def insert_upload_record(
             file_name,
             file_size,
             json.dumps(meta_data or {}),
+            status,
         )
         record_id = row["id"]
-        logger.info("Inserted csv_uploads record %s (status=pending)", record_id)
+        logger.info("Inserted csv_uploads record %s (status=%s)", record_id, status)
         return record_id
 
 
@@ -171,3 +173,38 @@ async def list_by_status(status: str) -> list[dict]:
             status,
         )
         return [dict(r) for r in rows]
+
+
+async def try_claim_for_processing(record_id: int) -> Optional[str]:
+    """
+    Atomically set status to 'in_progress' if record exists and its status is not 'in_progress'.
+    Returns:
+      - 'success' if successfully claimed/updated.
+      - 'in_progress' if it is already in progress.
+      - None if the record does not exist.
+    """
+    if not db.pool:
+        await db.connect()
+
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE csv_uploads
+            SET status = 'in_progress'
+            WHERE id = $1 AND status != 'in_progress'
+            RETURNING status
+            """,
+            record_id,
+        )
+        if row:
+            logger.info("Atomically claimed record %s for processing", record_id)
+            return "success"
+
+        # If update did not match any row, determine if it doesn't exist or is in_progress
+        exists = await conn.fetchval(
+            "SELECT 1 FROM csv_uploads WHERE id = $1 LIMIT 1",
+            record_id,
+        )
+        if not exists:
+            return None
+        return "in_progress"

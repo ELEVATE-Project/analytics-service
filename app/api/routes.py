@@ -1,3 +1,4 @@
+import asyncio
 import io
 import logging
 
@@ -40,7 +41,7 @@ class ManualTriggerRequest(BaseModel):
     submission_type: str
 
 
-@router.post("/trigger")
+@router.post("/trigger", dependencies=[Depends(verify_auth_token)])
 async def trigger_submission_manually(request: ManualTriggerRequest):
     """
     Manually triggers real-time processing workflow for a submission.
@@ -108,7 +109,9 @@ async def upload_report(
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Only .csv files are accepted")
 
-    file_bytes = await file.read()
+    file_bytes = await file.read(settings.MAX_CSV_UPLOAD_BYTES + 1)
+    if len(file_bytes) > settings.MAX_CSV_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Uploaded file is too large")
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
@@ -130,15 +133,15 @@ async def upload_report(
     is_valid = True
     errors = []
     try:
-        df = pd.read_csv(io.BytesIO(file_bytes))
-        is_valid, errors = validate_columns(df, normalized_type)
+        df = await asyncio.to_thread(pd.read_csv, io.BytesIO(file_bytes))
+        is_valid, errors = await asyncio.to_thread(validate_columns, df, normalized_type)
     except Exception as exc:
         is_valid = False
         errors = [f"Failed to parse CSV: {exc}"]
 
     # Upload to GCS
     try:
-        cloud_storage_path = upload_csv(file_bytes, normalized_type, file_name)
+        cloud_storage_path = await asyncio.to_thread(upload_csv, file_bytes, normalized_type, file_name)
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -166,6 +169,7 @@ async def upload_report(
         file_name=file_name,
         file_size=file_size,
         meta_data=meta_data,
+        status=status,
     )
 
     logger.info(
@@ -186,6 +190,11 @@ async def upload_report(
             logger.info("Triggered real-time CsvProcessingWorkflow for upload ID %s", record_id)
         except Exception as e:
             logger.error("Failed to trigger real-time CsvProcessingWorkflow: %s", e)
+            await csv_upload_repo.update_status(record_id, "on_hold", {"error": f"Temporal trigger failed: {e}"})
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to start CSV processing workflow: {e}",
+            )
 
     response = {
         "message": "Successfully uploaded to cloud",
@@ -207,14 +216,11 @@ async def push_record(
     """
     Manually trigger processing for a specific csv_upload record.
     """
-    record = await csv_upload_repo.get_record(record_id)
-    if record is None:
+    claim_status = await csv_upload_repo.try_claim_for_processing(record_id)
+    if claim_status is None:
         raise HTTPException(status_code=404, detail="Record not found")
-
-    if record["status"] == "in_progress":
+    if claim_status == "in_progress":
         raise HTTPException(status_code=409, detail="Record is already being processed")
-
-    await csv_upload_repo.update_status(record_id, "in_progress")
 
     try:
         temporal_client = await Client.connect(settings.TEMPORAL_HOST)

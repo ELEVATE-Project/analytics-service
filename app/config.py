@@ -51,6 +51,7 @@ class Settings(BaseSettings):
 
     # Auth Token Configuration
     AUTH_TOKEN: str = Field(description="Bearer token for API authentication. Must be set via environment variable.")
+    MAX_CSV_UPLOAD_BYTES: int = Field(default=10485760) # 10MB
     CSV_SCHEDULE_CRON_TIME: str = Field(default="0 20 * * *")
     KAFKA_TOPIC_CSV_ROWS: str = Field(default="analytics.ingestion.raw")
 

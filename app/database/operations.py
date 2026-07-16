@@ -220,7 +220,7 @@ async def insert_or_update_submission(
     # would silently revert already-masked fields. Absent fields stay None here and
     # are preserved via COALESCE in the SQL below, leaving them untouched in the DB.
     if event_type == "update":
-        data = event_payload.get("newValues", {})
+        raw_data = event_payload.get("newValues", {})
     else:
         raw_data = event_payload.get("data", {}) or {}
     data = _clean_val(raw_data)
