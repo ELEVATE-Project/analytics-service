@@ -207,7 +207,14 @@ class IngestionConsumer:
                     raise KafkaException(msg.error())
                 
                 raw_payload = msg.value().decode("utf-8")
-                await self.process_message(raw_payload)
+                try:
+                    await self.process_message(raw_payload)
+                except Exception as e:
+                    logger.error(
+                        f"Unhandled error processing Kafka message, skipping it. "
+                        f"Payload: {raw_payload!r}. Error: {e}",
+                        exc_info=True,
+                    )
                 
         except asyncio.CancelledError:
             logger.info("Kafka consumer loop cancelled.")

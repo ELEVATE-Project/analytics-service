@@ -1,5 +1,6 @@
 import json
 import logging
+import urllib.parse
 from typing import Dict, Any, Optional, List
 import asyncpg
 from datetime import datetime
@@ -34,18 +35,49 @@ def _normalize_string_list(value: Any) -> Optional[str]:
         return "\n".join(items) if items else None
     return str(cleaned)
 
-def _normalize_url_list(value: Any) -> List[str]:
-    """Helper to convert list or single string URL to database TEXT[]."""
+def _normalize_url_list(value: Any) -> Optional[List[str]]:
+    """Helper to convert list or single string URL to database TEXT[].
+    Returns None when the key was genuinely absent (vs. explicitly empty), so
+    partial updates can distinguish "not provided" from "cleared" via COALESCE."""
     cleaned = _clean_val(value)
-    if not cleaned:
-        return []
+    if cleaned is None:
+        return None
     if isinstance(cleaned, list):
         return [str(url) for url in cleaned if url is not None]
+    if not value:
+        return []
     return [str(cleaned)]
 
-async def upsert_metadata(conn: asyncpg.Connection, data: Dict[str, Any], tenant_code: str) -> tuple:
+def _strip_base_url(url: str) -> str:
+    """Strips scheme+host from an absolute URL, keeping only the path (e.g. /bucket/folder/file.pdf)."""
+    url_str = str(url).strip()
+    parsed = urllib.parse.urlparse(url_str)
+    if parsed.scheme and parsed.netloc:
+        return parsed.path
+    return url_str
+
+def _normalize_media_url_list(value: Any) -> Optional[List[str]]:
+    """Like _normalize_url_list, but stores only the path — never the base URL."""
+    normalized = _normalize_url_list(value)
+    return None if normalized is None else [_strip_base_url(url) for url in normalized]
+
+def _normalize_pdf_urls(value: Any) -> tuple:
+    """Handle pdfUrls in new object format {original, masked}.
+    Returns (original_urls, masked_urls); each is None when absent so COALESCE
+    preserves the existing column on partial updates."""
+    if value is None:
+        return None, None
+    if isinstance(value, dict):
+        original = _normalize_media_url_list(value.get("original"))
+        masked = _normalize_media_url_list(value.get("masked"))
+        return original, masked
+    # Legacy fallback: plain string or list
+    return _normalize_media_url_list(value), None
+
+async def upsert_metadata(conn: asyncpg.Connection, tags: Dict[str, Any], tenant_code: str) -> tuple:
     """
     Safely upserts parent metadata tables: tenant, leader_category, and programs.
+    Reads from the new top-level `tags` dict with flattened keys.
     Returns (program_id, leader_id) as UUIDs.
     """
     # 1. Upsert Tenant
@@ -62,10 +94,9 @@ async def upsert_metadata(conn: asyncpg.Connection, data: Dict[str, Any], tenant
     leader_id = None
     program_id = None
 
-    # 2. Upsert Leader Category Info
-    leader_info = data.get("LeaderCategoryInfo")
-    if leader_info and leader_info.get("id"):
-        leader_id = leader_info["id"]
+    # 2. Upsert Leader Category (from flattened tags)
+    leader_id = tags.get("leaderCategoryId")
+    if leader_id:
         await conn.execute(
             """
             INSERT INTO leader_category (id, name, description, tenant_code)
@@ -76,15 +107,14 @@ async def upsert_metadata(conn: asyncpg.Connection, data: Dict[str, Any], tenant
                 updated_at = now()
             """,
             leader_id,
-            leader_info.get("name", ""),
-            leader_info.get("description"),
+            tags.get("leaderCategoryName", ""),
+            None,  # TODO: description can be added once the PM provides it 
             tenant_code
         )
 
-    # 3. Upsert Programs Info (depends on leader category)
-    program_info = data.get("programInfo")
-    if program_info and program_info.get("id") and leader_id:
-        program_id = program_info["id"]
+    # 3. Upsert Programs (depends on leader category)
+    program_id = tags.get("programId")
+    if program_id and leader_id:
         await conn.execute(
             """
             INSERT INTO programs (id, leaders_id, name, description, tenant_code)
@@ -97,12 +127,60 @@ async def upsert_metadata(conn: asyncpg.Connection, data: Dict[str, Any], tenant
             """,
             program_id,
             leader_id,
-            program_info.get("name", ""),
-            program_info.get("description"),
+            tags.get("programName", ""),
+            None,  # TODO: description can be added once the PM provides it 
             tenant_code
         )
 
     return program_id, leader_id
+
+async def upsert_participant_metrics(
+    conn: asyncpg.Connection,
+    submission_id: str,
+    tenant_code: str,
+    submission_type: str,
+    participants_data: List[Dict[str, Any]],
+) -> None:
+    """
+    Upserts role-based participant counts from Kafka `participantsData` into the
+    dynamic KPI metrics tables (metric_definitions + submission_metrics).
+    participants_data is always a full snapshot (not a delta), so existing metrics
+    for this submission are cleared and replaced rather than merged.
+    """
+    await conn.execute(
+        "DELETE FROM submission_metrics WHERE submission_id = $1 AND tenant_code = $2",
+        submission_id, tenant_code
+    )
+
+    for entry in participants_data:
+        role = entry.get("role")
+        count = entry.get("count")
+        if not role or count is None:
+            continue
+        metric_code = str(role).strip()
+
+        await conn.execute(
+            """
+            INSERT INTO metric_definitions (code, label, value_type, submission_type, is_active)
+            VALUES ($1, $2, 'numeric', $3, TRUE)
+            ON CONFLICT (code) DO UPDATE SET
+                label = EXCLUDED.label,
+                value_type = EXCLUDED.value_type,
+                submission_type = EXCLUDED.submission_type,
+                is_active = EXCLUDED.is_active
+            """,
+            metric_code, metric_code, submission_type
+        )
+
+        await conn.execute(
+            """
+            INSERT INTO submission_metrics (submission_id, tenant_code, metric_code, numeric_value)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (submission_id, tenant_code, metric_code) DO UPDATE SET
+                numeric_value = EXCLUDED.numeric_value
+            """,
+            submission_id, tenant_code, metric_code, int(count)
+        )
 
 async def delete_submission(conn: asyncpg.Connection, submission_id: str, tenant_code: str) -> bool:
     """
@@ -126,65 +204,95 @@ async def insert_or_update_submission(
 ) -> Dict[str, Any]:
     """
     Performs transactional write for submission master and type-specific tables.
+    Handles the new Kafka event format with top-level `tags` and delta-only `newValues`.
     """
     submission_id = str(event_payload["submissionId"])
     tenant_code = event_payload["tenantCode"]
     submission_type = event_payload["submissionType"]
     session_id = event_payload.get("sessionId")
-    raw_data = event_payload.get("data", {}) or {}
+    event_type = event_payload.get("eventType", "create").lower().strip()
+    tags = event_payload.get("tags", {})
+
+    # Resolve the data payload based on event type.
+    # For updates, newValues is delta-only — do NOT merge in oldValues. Downstream
+    # activities (e.g. pii_and_abusive_activity) overwrite these same columns with
+    # masked text after ingestion; filling gaps from the producer's raw oldValues
+    # would silently revert already-masked fields. Absent fields stay None here and
+    # are preserved via COALESCE in the SQL below, leaving them untouched in the DB.
+    if event_type == "update":
+        data = event_payload.get("newValues", {})
+    else:
+        raw_data = event_payload.get("data", {}) or {}
     data = _clean_val(raw_data)
 
     # Start database transaction if not already handled
     async with conn.transaction():
-        # Upsert parent metadata tables
-        program_id, leader_id = await upsert_metadata(conn, data, tenant_code)
+        # Upsert parent metadata tables (reads from flattened tags)
+        program_id, leader_id = await upsert_metadata(conn, tags, tenant_code)
 
-        # Parse submission date
+        # Parse submission date. On a partial update where submissionDate is absent,
+        # leave it None (rather than defaulting to now()) so COALESCE below preserves
+        # the existing value instead of overwriting it with a "real" default.
         sub_date_str = data.get("submissionDate")
         if sub_date_str:
             submission_date = datetime.fromisoformat(sub_date_str.replace("Z", "+00:00"))
-        else:
+        elif event_type != "update":
             submission_date = datetime.utcnow()
+        else:
+            submission_date = None
+
+        # Read state/district/organization from tags (new format)
+        state = tags.get("state")
+        district = tags.get("district")
+        organization = tags.get("organization")
 
         # 1. Upsert Master Submission record
         # Note: status is initialized as 'pending' for new creates
-        submission_uuid_row = await conn.fetchrow(
-            """
-            INSERT INTO submissions (
-                session_id, submission_id, tenant_code, submission_type, user_id, user_name, role,
-                state, district, organization, submission_date, program_id, leader_id, status
+        try:
+            submission_uuid_row = await conn.fetchrow(
+                """
+                INSERT INTO submissions (
+                    session_id, submission_id, tenant_code, submission_type, user_id, user_name, role,
+                    state, district, organization, submission_date, program_id, leader_id, status
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                ON CONFLICT (submission_id, tenant_code) DO UPDATE SET
+                    session_id = COALESCE(EXCLUDED.session_id, submissions.session_id),
+                    user_id = COALESCE(EXCLUDED.user_id, submissions.user_id),
+                    user_name = COALESCE(EXCLUDED.user_name, submissions.user_name),
+                    role = COALESCE(EXCLUDED.role, submissions.role),
+                    state = COALESCE(EXCLUDED.state, submissions.state),
+                    district = COALESCE(EXCLUDED.district, submissions.district),
+                    organization = COALESCE(EXCLUDED.organization, submissions.organization),
+                    submission_date = COALESCE(EXCLUDED.submission_date, submissions.submission_date),
+                    program_id = COALESCE(EXCLUDED.program_id, submissions.program_id),
+                    leader_id = COALESCE(EXCLUDED.leader_id, submissions.leader_id),
+                    status = EXCLUDED.status,
+                    updated_at = now()
+                RETURNING id, status;
+                """,
+                session_id,
+                submission_id,
+                tenant_code,
+                submission_type,
+                data.get("userId"),
+                data.get("userName"),
+                data.get("designation"), # Designation maps to role
+                state,
+                district,
+                organization,
+                submission_date,
+                program_id,
+                leader_id,
+                "pending"
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-            ON CONFLICT (submission_id, tenant_code) DO UPDATE SET
-                session_id = COALESCE(EXCLUDED.session_id, submissions.session_id),
-                user_id = EXCLUDED.user_id,
-                user_name = EXCLUDED.user_name,
-                role = EXCLUDED.role,
-                state = EXCLUDED.state,
-                district = EXCLUDED.district,
-                organization = EXCLUDED.organization,
-                submission_date = EXCLUDED.submission_date,
-                program_id = EXCLUDED.program_id,
-                leader_id = EXCLUDED.leader_id,
-                status = EXCLUDED.status,
-                updated_at = now()
-            RETURNING id, status;
-            """,
-            session_id,
-            submission_id,
-            tenant_code,
-            submission_type,
-            data.get("userId"),
-            data.get("userName"),
-            data.get("designation"), # Designation maps to role
-            data.get("state"),
-            data.get("district"),
-            data.get("organization"),
-            submission_date,
-            program_id,
-            leader_id,
-            "pending"
-        )
+        except asyncpg.exceptions.UniqueViolationError as e:
+            if e.constraint_name == "submissions_session_id_key":
+                raise ValueError(
+                    f"session_id {session_id!r} is already associated with a different submission; "
+                    f"rejecting submission {submission_id} under tenant {tenant_code}."
+                ) from e
+            raise
 
         db_sub_uuid = submission_uuid_row["id"]
         db_sub_status = submission_uuid_row["status"]
@@ -200,24 +308,25 @@ async def insert_or_update_submission(
             )
             challenges_joined = _normalize_string_list(data.get("challenges"))
             action_steps_joined = _normalize_string_list(data.get("actionSteps"))
-            image_urls = _normalize_url_list(data.get("imageUrls"))
-            pdf_urls = _normalize_url_list(data.get("pdfUrls"))
+            image_urls = _normalize_media_url_list(data.get("imageUrls"))
+            pdf_urls, masked_pdf_urls = _normalize_pdf_urls(data.get("pdfUrls"))
 
             if row_exists:
                 await conn.execute(
                     """
                     UPDATE story_submissions SET
-                        title = $3,
-                        objective = $4,
-                        challenge = $5,
-                        action_steps = $6,
-                        impact = $7,
-                        duration = $8,
-                        blurb = $9,
-                        content = $10,
-                        image_urls = $11,
-                        pdf_urls = $12,
-                        transcript_link = $13,
+                        title = COALESCE($3, title),
+                        objective = COALESCE($4, objective),
+                        challenge = COALESCE($5, challenge),
+                        action_steps = COALESCE($6, action_steps),
+                        impact = COALESCE($7, impact),
+                        duration = COALESCE($8, duration),
+                        blurb = COALESCE($9, blurb),
+                        content = COALESCE($10, content),
+                        image_urls = COALESCE($11, image_urls),
+                        pdf_urls = COALESCE($12, pdf_urls),
+                        masked_pdf_urls = COALESCE($13, masked_pdf_urls),
+                        transcript_link = COALESCE($14, transcript_link),
                         updated_at = now()
                     WHERE submission_id = $1 AND tenant_code = $2
                     """,
@@ -232,6 +341,7 @@ async def insert_or_update_submission(
                     data.get("content"),
                     image_urls,
                     pdf_urls,
+                    masked_pdf_urls,
                     data.get("transcriptLink")
                 )
             else:
@@ -239,9 +349,9 @@ async def insert_or_update_submission(
                     """
                     INSERT INTO story_submissions (
                         submission_id, tenant_code, title, objective, challenge, action_steps,
-                        impact, duration, blurb, content, image_urls, pdf_urls, transcript_link
+                        impact, duration, blurb, content, image_urls, pdf_urls, masked_pdf_urls, transcript_link
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                     """,
                     submission_id, tenant_code,
                     data.get("title"),
@@ -254,6 +364,7 @@ async def insert_or_update_submission(
                     data.get("content"),
                     image_urls,
                     pdf_urls,
+                    masked_pdf_urls,
                     data.get("transcriptLink")
                 )
 
@@ -265,21 +376,22 @@ async def insert_or_update_submission(
             )
             challenges_joined = _normalize_string_list(data.get("challenges"))
             solutions_joined = _normalize_string_list(data.get("solutions"))
-            image_urls = _normalize_url_list(data.get("imageUrls"))
-            pdf_urls = _normalize_url_list(data.get("pdfUrls"))
+            image_urls = _normalize_media_url_list(data.get("imageUrls"))
+            pdf_urls, masked_pdf_urls = _normalize_pdf_urls(data.get("pdfUrls"))
 
             if row_exists:
                 await conn.execute(
                     """
                     UPDATE discussion_submissions SET
-                        title = $3,
-                        challenges = $4,
-                        solutions = $5,
-                        author = $6,
-                        language = $7,
-                        image_urls = $8,
-                        pdf_urls = $9,
-                        transcript_link = $10,
+                        title = COALESCE($3, title),
+                        challenges = COALESCE($4, challenges),
+                        solutions = COALESCE($5, solutions),
+                        author = COALESCE($6, author),
+                        language = COALESCE($7, language),
+                        image_urls = COALESCE($8, image_urls),
+                        pdf_urls = COALESCE($9, pdf_urls),
+                        masked_pdf_urls = COALESCE($10, masked_pdf_urls),
+                        transcript_link = COALESCE($11, transcript_link),
                         updated_at = now()
                     WHERE submission_id = $1 AND tenant_code = $2
                     """,
@@ -291,6 +403,7 @@ async def insert_or_update_submission(
                     data.get("language"),
                     image_urls,
                     pdf_urls,
+                    masked_pdf_urls,
                     data.get("transcriptLink")
                 )
             else:
@@ -298,9 +411,9 @@ async def insert_or_update_submission(
                     """
                     INSERT INTO discussion_submissions (
                         submission_id, tenant_code, title, challenges, solutions,
-                        author, language, image_urls, pdf_urls, transcript_link
+                        author, language, image_urls, pdf_urls, masked_pdf_urls, transcript_link
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                     """,
                     submission_id, tenant_code,
                     data.get("title"),
@@ -310,7 +423,17 @@ async def insert_or_update_submission(
                     data.get("language"),
                     image_urls,
                     pdf_urls,
+                    masked_pdf_urls,
                     data.get("transcriptLink")
+                )
+
+            # Dynamic KPI metrics: participantsData is a full snapshot when present;
+            # absent on a partial update means it didn't change, so leave existing
+            # submission_metrics rows untouched.
+            participants_data = data.get("participantsData")
+            if participants_data is not None:
+                await upsert_participant_metrics(
+                    conn, submission_id, tenant_code, submission_type, participants_data
                 )
 
         logger.info(f"Successfully ingested {submission_type} submission {submission_id} under tenant {tenant_code}")
@@ -433,6 +556,36 @@ async def insert_analysis_result(
     )
 
 
+async def insert_ranking_result(
+    conn: asyncpg.Connection,
+    submission_id: str,
+    tenant_code: str,
+    criteria_data: Dict[str, Any],
+    composite_score: float,
+    tier: Optional[str],
+    overall_summary: Optional[str],
+    meta_data: Optional[Dict[str, Any]] = None
+) -> None:
+    """
+    Saves LLM-generated story rating/ranking output to the ranking table.
+    """
+    await conn.execute(
+        """
+        INSERT INTO ranking (
+            submission_id, tenant_code, criteria_data, composite_score, tier, overall_summary, meta_data
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        """,
+        submission_id,
+        tenant_code,
+        json.dumps(criteria_data),
+        composite_score,
+        tier,
+        overall_summary,
+        json.dumps(meta_data) if meta_data else None
+    )
+
+
 async def get_submission_type_and_payload(conn: asyncpg.Connection, submission_id: str, tenant_code: str) -> tuple:
     """
     Retrieves the submission type and payload details for story or discussion submissions.
@@ -449,8 +602,8 @@ async def get_submission_type_and_payload(conn: asyncpg.Connection, submission_i
     if "story" in sub_type:
         payload_row = await conn.fetchrow(
             """
-            SELECT title, objective, challenge, action_steps, impact, duration, blurb, content, image_urls, pii_masked_at, abusive_masked_at 
-            FROM story_submissions 
+            SELECT title, objective, challenge, action_steps, impact, duration, blurb, content, image_urls, pdf_urls, pii_masked_at, abusive_masked_at
+            FROM story_submissions
             WHERE submission_id = $1 AND tenant_code = $2
             """,
             submission_id, tenant_code

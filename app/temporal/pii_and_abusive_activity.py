@@ -55,6 +55,9 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
     tenant_code = params["tenant_code"]
     target_columns = params["target_columns"]
     analysis_type = params.get("analysis_type", "pii_and_abusive_language_detection")
+    resolved_model = params.get("llm_model") or settings.OPENROUTER_MODEL
+    resolved_max_tokens = params.get("max_tokens") or settings.LLM_MAX_TOKENS
+    resolved_timeout = params.get("llm_timeout_seconds") or settings.LLM_TIMEOUT_SECONDS
 
     if not target_columns:
         return {"status": "skipped", "reason": "no columns specified"}
@@ -93,7 +96,9 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
             from app.services.llm import openrouter_chat_completion
             full_prompt = f"{system_prompt}\n\n{user_prompt}"
             
-            response_text = openrouter_chat_completion(full_prompt)
+            response_text = openrouter_chat_completion(
+                full_prompt, model=resolved_model, max_tokens=resolved_max_tokens, timeout=resolved_timeout,
+            )
 
             # Clean/parse LLM response
             cleaned_response = response_text.strip()
@@ -170,7 +175,7 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
                 conn,
                 submission_id,
                 tenant_code,
-                settings.OPENROUTER_MODEL,
+                resolved_model,
                 analysis_type,
                 prompt_version_id,
                 prompt_tokens,
@@ -198,7 +203,7 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
                     conn,
                     submission_id,
                     tenant_code,
-                    settings.OPENROUTER_MODEL,
+                    resolved_model,
                     analysis_type,
                     prompt_version_id,
                     prompt_tokens,

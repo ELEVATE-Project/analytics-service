@@ -18,6 +18,7 @@ with workflow.unsafe.imports_passed_through():
         csv_update_status_activity,
         fetch_pending_csv_uploads_activity
     )
+    from app.temporal.story_rating_activity import story_rating_activity
 
 @workflow.defn
 class ConfigDrivenProcessingWorkflow:
@@ -56,6 +57,12 @@ class ConfigDrivenProcessingWorkflow:
             for idx, step in enumerate(process_steps):
                 step_name = step.get("name")
                 target_columns = step.get("columns", [])
+                # Optional per-step LLM overrides; activities fall back to global .env settings if omitted
+                llm_overrides = {
+                    "llm_model": step.get("llm_model"),
+                    "max_tokens": step.get("max_tokens"),
+                    "llm_timeout_seconds": step.get("llm_timeout_seconds"),
+                }
 
                 workflow.logger.info(f"Starting workflow step {idx + 1}/{len(process_steps)}: '{step_name}' for submission_id: {submission_id}")
 
@@ -66,7 +73,8 @@ class ConfigDrivenProcessingWorkflow:
                             "submission_id": submission_id,
                             "tenant_code": tenant_code,
                             "target_columns": target_columns,
-                            "analysis_type": step_name
+                            "analysis_type": step_name,
+                            **llm_overrides,
                         },
                         start_to_close_timeout=timedelta(minutes=5),
                         retry_policy=retry_policy
@@ -85,7 +93,8 @@ class ConfigDrivenProcessingWorkflow:
                             "submission_id": submission_id,
                             "tenant_code": tenant_code,
                             "target_columns": target_columns,
-                            "analysis_type": step_name
+                            "analysis_type": step_name,
+                            **llm_overrides,
                         },
                         start_to_close_timeout=timedelta(minutes=5),
                         retry_policy=retry_policy
@@ -110,6 +119,23 @@ class ConfigDrivenProcessingWorkflow:
                     steps_execution[idx]["status"] = status_val
                     steps_execution[idx]["completed_timestamp"] = workflow.now().isoformat()
                     completed_steps.append("image_blur")
+                    workflow.logger.info(f"Completed workflow step: '{step_name}' with status: {status_val}")
+
+                elif step_name == "story_rating":
+                    res = await workflow.execute_activity(
+                        story_rating_activity,
+                        {
+                            "submission_id": submission_id,
+                            "tenant_code": tenant_code,
+                            **llm_overrides,
+                        },
+                        start_to_close_timeout=timedelta(minutes=10),
+                        retry_policy=retry_policy
+                    )
+                    status_val = res.get("status", "success") if isinstance(res, dict) else "success"
+                    steps_execution[idx]["status"] = status_val
+                    steps_execution[idx]["completed_timestamp"] = workflow.now().isoformat()
+                    completed_steps.append("story_rating")
                     workflow.logger.info(f"Completed workflow step: '{step_name}' with status: {status_val}")
 
                 else:
