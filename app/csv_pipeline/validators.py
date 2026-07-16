@@ -49,6 +49,7 @@ def validate_columns(df: pd.DataFrame, report_type: str) -> tuple[bool, list[str
     extra = set(actual_cols_lower.keys()) - set(expected_cols_lower.keys())
     if extra:
         extra_originals = sorted(actual_cols_lower[e] for e in extra)
-        logger.info(f"Note: CSV contains extra columns not in the schema: {extra_originals}")
+        errors.append(f"Extra/unexpected columns: {extra_originals}")
+        logger.warning(f"Validation failed for report_type='{report_type}'. Extra: {extra_originals}")
 
     return (len(errors) == 0), errors
