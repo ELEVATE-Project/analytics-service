@@ -144,7 +144,7 @@ def row_to_json(
     IngestionConsumer.process_message() so the same downstream
     pipeline (PII detection, thematic analysis) picks it up.
     """
-    row_dict = row.where(pd.notna(row), None).to_dict()
+    row_dict = {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
     
     try:
         submission_id = int(row_dict.get("id"))

@@ -6,21 +6,42 @@ from datetime import datetime
 
 logger = logging.getLogger("analytics_service.operations")
 
-def _normalize_string_list(value: Any) -> Optional[str]:
-    """Helper to convert list or string to database TEXT."""
+def _clean_val(value: Any) -> Any:
     if value is None:
         return None
+    if isinstance(value, float):
+        import math
+        if math.isnan(value):
+            return None
+        return value
+    if isinstance(value, str):
+        if value.lower().strip() in ("nan", "null", "none"):
+            return None
+        return value
     if isinstance(value, list):
-        return "\n".join(str(item) for item in value)
-    return str(value)
+        return [_clean_val(item) for item in value if _clean_val(item) is not None]
+    if isinstance(value, dict):
+        return {k: _clean_val(v) for k, v in value.items()}
+    return value
+
+def _normalize_string_list(value: Any) -> Optional[str]:
+    """Helper to convert list or string to database TEXT."""
+    cleaned = _clean_val(value)
+    if cleaned is None:
+        return None
+    if isinstance(cleaned, list):
+        items = [str(item) for item in cleaned if item is not None]
+        return "\n".join(items) if items else None
+    return str(cleaned)
 
 def _normalize_url_list(value: Any) -> List[str]:
     """Helper to convert list or single string URL to database TEXT[]."""
-    if not value:
+    cleaned = _clean_val(value)
+    if not cleaned:
         return []
-    if isinstance(value, list):
-        return [str(url) for url in value]
-    return [str(value)]
+    if isinstance(cleaned, list):
+        return [str(url) for url in cleaned if url is not None]
+    return [str(cleaned)]
 
 async def upsert_metadata(conn: asyncpg.Connection, data: Dict[str, Any], tenant_code: str) -> tuple:
     """
@@ -110,7 +131,8 @@ async def insert_or_update_submission(
     tenant_code = event_payload["tenantCode"]
     submission_type = event_payload["submissionType"]
     session_id = event_payload.get("sessionId")
-    data = event_payload.get("data", {})
+    raw_data = event_payload.get("data", {}) or {}
+    data = _clean_val(raw_data)
 
     # Start database transaction if not already handled
     async with conn.transaction():
