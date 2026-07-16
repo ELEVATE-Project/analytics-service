@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     LLM_CONFIDENCE_SCORE_THRESHOLD: float = Field(default=0.8)
 
     # Auth Token Configuration
-    AUTH_TOKEN: str = Field(default="dummy-analytics-auth-token-2026")
+    AUTH_TOKEN: str = Field(description="Bearer token for API authentication. Must be set via environment variable.")
     CSV_SCHEDULE_CRON_TIME: str = Field(default="0 20 * * *")
     KAFKA_TOPIC_CSV_ROWS: str = Field(default="analytics.ingestion.raw")
 
@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     AUTH_PROVIDER_X509_CERT_URL: str = Field(default="https://www.googleapis.com/oauth2/v1/certs")
     CLIENT_X509_CERT_URL: str = Field(default="")
     UNIVERSE_DOMAIN: str = Field(default="googleapis.com")
-    BUCKET_NAME: str = Field(default="dev-sg-dashboard")
+    BUCKET_NAME: str = Field(description="GCS bucket name for CSV uploads. Must be set via environment variable.")
     STORY_BLOB: str = Field(default="story_blurred_image")
     DISCUSSION_BLOB: str = Field(default="dicussion_blurred_image")
     MEDIA_BASE_URL: str = Field(default="https://mohini-static.shikshalokam.org")

@@ -200,7 +200,10 @@ async def upload_report(
 
 
 @csv_router.post("/push/{record_id}")
-async def push_record(record_id: int):
+async def push_record(
+    record_id: int,
+    _token: HTTPAuthorizationCredentials = Depends(verify_auth_token),
+):
     """
     Manually trigger processing for a specific csv_upload record.
     """
