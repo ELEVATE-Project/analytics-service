@@ -82,6 +82,15 @@ The pipeline supports two execution modes governed by the `PROCESSING_MODE` envi
     *   `leader_category`: The category of the target leaders
     *   `file`: The `.csv` file upload
 *   **Behavior**: Validates columns, runs a duplicate file check, saves to GCS, and inserts a pending row into the tracking table.
+*   **Example curl Request**:
+    ```bash
+    curl -i -X POST http://localhost:8000/v1/upload/ \
+      -H "Authorization: Bearer dummy-analytics-auth-token-2026" \
+      -F "report_type=discussion" \
+      -F "program_name=My Program" \
+      -F "leader_category=District Leader" \
+      -F "file=@sample.csv"
+    ```
 
 ### 2. Manual Process Override
 *   **Endpoint**: `POST /v1/push/{record_id}`
