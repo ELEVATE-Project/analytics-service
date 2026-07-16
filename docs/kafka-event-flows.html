@@ -1,0 +1,454 @@
+<title>Kafka Ingestion — Event Flows</title>
+<meta name="description" content="How analytics_service processes create, update, and delete events from analytics.ingestion.raw" />
+<style>
+  :root {
+    --bg: #EEF2F3;
+    --surface: #FFFFFF;
+    --surface-2: #F6F8F9;
+    --ink: #141A1F;
+    --ink-soft: #4C575D;
+    --ink-faint: #7C878C;
+    --border: rgba(20, 26, 31, 0.11);
+    --border-strong: rgba(20, 26, 31, 0.20);
+    --accent: #0F6B66;
+    --accent-soft: #E3F1F0;
+    --create: #1E7A46;
+    --create-soft: #E4F3E9;
+    --update: #91650F;
+    --update-soft: #F8EEDC;
+    --delete: #A3352C;
+    --delete-soft: #F7E5E3;
+    --code-bg: #101418;
+    --code-ink: #D9E2E6;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    --shadow: 0 1px 2px rgba(20,26,31,0.04), 0 6px 20px -8px rgba(20,26,31,0.10);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0F1417;
+      --surface: #161C20;
+      --surface-2: #1B2226;
+      --ink: #E7ECEE;
+      --ink-soft: #A7B2B6;
+      --ink-faint: #78848A;
+      --border: rgba(231, 236, 238, 0.10);
+      --border-strong: rgba(231, 236, 238, 0.20);
+      --accent: #4FC7BF;
+      --accent-soft: #17302E;
+      --create: #5FC98B;
+      --create-soft: #163523;
+      --update: #E6B658;
+      --update-soft: #332A15;
+      --delete: #E38079;
+      --delete-soft: #341E1C;
+      --code-bg: #0A0D10;
+      --code-ink: #C9D3D6;
+      --shadow: 0 1px 2px rgba(0,0,0,0.20), 0 10px 30px -10px rgba(0,0,0,0.55);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0F1417; --surface: #161C20; --surface-2: #1B2226;
+    --ink: #E7ECEE; --ink-soft: #A7B2B6; --ink-faint: #78848A;
+    --border: rgba(231, 236, 238, 0.10); --border-strong: rgba(231, 236, 238, 0.20);
+    --accent: #4FC7BF; --accent-soft: #17302E;
+    --create: #5FC98B; --create-soft: #163523;
+    --update: #E6B658; --update-soft: #332A15;
+    --delete: #E38079; --delete-soft: #341E1C;
+    --code-bg: #0A0D10; --code-ink: #C9D3D6;
+    --shadow: 0 1px 2px rgba(0,0,0,0.20), 0 10px 30px -10px rgba(0,0,0,0.55);
+  }
+  :root[data-theme="light"] {
+    --bg: #EEF2F3; --surface: #FFFFFF; --surface-2: #F6F8F9;
+    --ink: #141A1F; --ink-soft: #4C575D; --ink-faint: #7C878C;
+    --border: rgba(20, 26, 31, 0.11); --border-strong: rgba(20, 26, 31, 0.20);
+    --accent: #0F6B66; --accent-soft: #E3F1F0;
+    --create: #1E7A46; --create-soft: #E4F3E9;
+    --update: #91650F; --update-soft: #F8EEDC;
+    --delete: #A3352C; --delete-soft: #F7E5E3;
+    --code-bg: #101418; --code-ink: #D9E2E6;
+    --shadow: 0 1px 2px rgba(20,26,31,0.04), 0 6px 20px -8px rgba(20,26,31,0.10);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { background: var(--bg); }
+  body {
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.55;
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 56px 24px 96px;
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--accent);
+    display: inline-block;
+  }
+
+  h1 {
+    font-size: clamp(28px, 4vw, 38px);
+    line-height: 1.12;
+    letter-spacing: -0.015em;
+    margin: 14px 0 8px;
+    text-wrap: balance;
+  }
+  .lede {
+    color: var(--ink-soft);
+    font-size: 16.5px;
+    max-width: 62ch;
+    margin: 0 0 40px;
+  }
+  .lede code { font-size: 0.92em; }
+
+  h2 {
+    font-size: 21px;
+    letter-spacing: -0.005em;
+    margin: 0 0 4px;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+  h2 .tag {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+    letter-spacing: 0.02em;
+  }
+  h3 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ink-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    margin: 40px 0 14px;
+  }
+
+  code, .mono { font-family: var(--mono); }
+  code {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    padding: 0.1em 0.4em;
+    border-radius: 4px;
+    font-size: 0.88em;
+  }
+
+  /* ---- legend / at-a-glance table ---- */
+  .legend {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .legend-chip {
+    display: flex; align-items: center; gap: 8px;
+    font-family: var(--mono); font-size: 13px; font-weight: 600;
+    padding: 9px 12px; border-radius: 8px; border: 1px solid var(--border);
+  }
+  .legend-chip .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .legend-chip.create { background: var(--create-soft); color: var(--create); }
+  .legend-chip.update { background: var(--update-soft); color: var(--update); }
+  .legend-chip.delete { background: var(--delete-soft); color: var(--delete); }
+  .legend-chip .dot.create { background: var(--create); }
+  .legend-chip .dot.update { background: var(--update); }
+  .legend-chip .dot.delete { background: var(--delete); }
+
+  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow); }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; min-width: 640px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  thead th { font-family: var(--mono); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-faint); font-weight: 600; background: var(--surface-2); }
+  tbody tr:last-child td { border-bottom: none; }
+  td:first-child, th:first-child { color: var(--ink-faint); font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+  td code { font-size: 0.85em; }
+
+  /* ---- event section cards ---- */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--accent);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    padding: 26px 26px 20px;
+    margin: 18px 0 34px;
+  }
+  .card.create { border-left-color: var(--create); }
+  .card.update { border-left-color: var(--update); }
+  .card.delete { border-left-color: var(--delete); }
+
+  h2 .tag.create { background: var(--create-soft); color: var(--create); }
+  h2 .tag.update { background: var(--update-soft); color: var(--update); }
+  h2 .tag.delete { background: var(--delete-soft); color: var(--delete); }
+  h2 .tag.flow   { background: var(--accent-soft); color: var(--accent); }
+
+  .card .summary { color: var(--ink-soft); font-size: 14.5px; margin: 6px 0 18px; max-width: 64ch; }
+
+  .diagram-frame {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 18px 10px;
+    overflow-x: auto;
+  }
+  .diagram-frame .mermaid { display: flex; justify-content: center; min-width: 560px; }
+
+  .refs {
+    margin-top: 14px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-faint);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+  }
+  .refs b { color: var(--ink-soft); font-weight: 600; }
+
+  .callout {
+    display: flex; gap: 12px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    font-size: 14px;
+    color: var(--ink-soft);
+    margin: 14px 0 34px;
+  }
+  .callout .glyph {
+    font-family: var(--mono); font-weight: 700; color: var(--accent);
+    flex: none;
+  }
+
+  footer {
+    margin-top: 48px;
+    padding-top: 18px;
+    border-top: 1px solid var(--border);
+    font-size: 12.5px;
+    color: var(--ink-faint);
+    font-family: var(--mono);
+  }
+
+  @media (max-width: 640px) {
+    .legend { grid-template-columns: 1fr; }
+  }
+</style>
+
+<div class="eyebrow">analytics_service &middot; app/kafka/consumer.py</div>
+<h1>What happens for each Kafka event</h1>
+<p class="lede">
+  Every message on <code>analytics.ingestion.raw</code> carries an <code>eventType</code> of
+  <code>create</code>, <code>update</code>, or <code>delete</code>. Each takes a different path through
+  <code>insert_or_update_submission</code> — this page traces exactly what gets read, written, and
+  triggered for each one.
+</p>
+
+<div class="legend">
+  <div class="legend-chip create"><span class="dot create"></span>create — full insert</div>
+  <div class="legend-chip update"><span class="dot update"></span>update — delta only</div>
+  <div class="legend-chip delete"><span class="dot delete"></span>delete — cascades</div>
+</div>
+
+<h3>At a glance</h3>
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr><th>&nbsp;</th><th>create</th><th>update</th><th>delete</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>data source</td>
+        <td><code>event.data</code> (full object)</td>
+        <td><code>event.newValues</code> (delta only)</td>
+        <td>&mdash;</td>
+      </tr>
+      <tr>
+        <td>pre-check</td>
+        <td>rejected if <code>(submission_id, tenant_code)</code> already exists</td>
+        <td>rejected if <code>session_id</code> belongs to a <em>different</em> submission</td>
+        <td>none</td>
+      </tr>
+      <tr>
+        <td>column writes</td>
+        <td>every column set from <code>data</code></td>
+        <td><code>COALESCE(new, existing)</code> &mdash; only delta fields change</td>
+        <td>row + cascades removed</td>
+      </tr>
+      <tr>
+        <td><code>participantsData</code></td>
+        <td>written to <code>submission_metrics</code></td>
+        <td>replaced in full if present, untouched if absent</td>
+        <td>cascade-deleted with the row</td>
+      </tr>
+      <tr>
+        <td>status after</td>
+        <td><code>pending</code></td>
+        <td><code>pending</code> &mdash; forces full reprocessing</td>
+        <td>row gone</td>
+      </tr>
+      <tr>
+        <td>triggers workflow</td>
+        <td>yes, in real-time mode</td>
+        <td>yes, in real-time mode</td>
+        <td>no</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="callout">
+  <span class="glyph">try/except</span>
+  <span>
+    Every message is processed inside a guard in the consumer's poll loop: a bad payload, a
+    <code>ValueError</code> from a rejected write, or any other exception is logged with the raw
+    message and the loop moves on — one bad message never takes down the consumer or the Temporal worker.
+  </span>
+</div>
+
+<!-- ============================= CREATE ============================= -->
+<h2><span class="tag create">create</span> New submission</h2>
+<p class="summary">
+  The full <code>data</code> object is written top to bottom. A <code>session_id</code> collision or a
+  duplicate <code>(submission_id, tenant_code)</code> stops ingestion before anything is written.
+</p>
+<div class="card create">
+  <div class="diagram-frame">
+    <pre class="mermaid">
+%%{init: {'theme':'base', 'themeVariables': { 'primaryColor': '#E4F3E9', 'primaryTextColor': '#14201A', 'primaryBorderColor': '#1E7A46', 'lineColor': '#1E7A46', 'tertiaryColor': '#F7E5E3', 'fontFamily': 'ui-monospace, monospace', 'fontSize': '13px' }}}%%
+flowchart TD
+    A["Kafka message<br/>eventType = create"] --> D{"(submission_id, tenant_code)<br/>already in submissions?"}
+    D -- yes --> D1["Log 'duplicate entry'<br/>skip ingestion"]
+    D -- no --> E["data = event.data (full)<br/>tags = event.tags"]
+    E --> E2["upsert_metadata:<br/>tenant, leader_category, programs"]
+    E2 --> E3["INSERT submissions<br/>session_id, user_id, state, district,<br/>organization, status = 'pending'"]
+    E3 --> F{"session_id already<br/>used by another submission?"}
+    F -- yes --> F1["UniqueViolationError caught →<br/>ValueError → logged, message skipped"]
+    F -- no --> G{submissionType}
+    G -- story --> G1["INSERT story_submissions<br/>full row"]
+    G -- discussion --> G2["INSERT discussion_submissions<br/>full row"]
+    G2 --> G3{"participantsData<br/>present?"}
+    G3 -- yes --> G4["upsert_participant_metrics:<br/>metric_definitions + submission_metrics"]
+    G3 -- no --> H["transaction commits"]
+    G4 --> H
+    G1 --> H
+    H --> I{PROCESSING_MODE}
+    I -- real-time --> J["start_workflow<br/>status → 'processing'"]
+    I -- batch --> K["leave status = 'pending'<br/>picked up by next batch cron"]
+    </pre>
+  </div>
+  <div class="refs">
+    <span><b>consumer.py</b> 116–134</span>
+    <span><b>operations.py</b> 124–229, 349–366</span>
+  </div>
+</div>
+
+<!-- ============================= UPDATE ============================= -->
+<h2><span class="tag update">update</span> Partial update</h2>
+<p class="summary">
+  <code>newValues</code> is delta-only — a field missing from it means "unchanged," not "clear it."
+  Every write uses <code>COALESCE(new, existing)</code> so fields outside the delta — including any
+  already PII-masked text — are left exactly as they are.
+</p>
+<div class="card update">
+  <div class="diagram-frame">
+    <pre class="mermaid">
+%%{init: {'theme':'base', 'themeVariables': { 'primaryColor': '#F8EEDC', 'primaryTextColor': '#201A0A', 'primaryBorderColor': '#91650F', 'lineColor': '#91650F', 'tertiaryColor': '#F7E5E3', 'fontFamily': 'ui-monospace, monospace', 'fontSize': '13px' }}}%%
+flowchart TD
+    A["Kafka message<br/>eventType = update"] --> B["data = event.newValues (delta only)<br/>tags = event.tags (always sent in full)"]
+    B --> B2["upsert_metadata:<br/>re-upserts leader_category / programs"]
+    B2 --> B3{"submissionDate<br/>in newValues?"}
+    B3 -- no --> B4["submission_date = None"]
+    B3 -- yes --> B5["submission_date = parsed value"]
+    B4 --> C
+    B5 --> C["UPSERT submissions<br/>COALESCE(new, existing) per column<br/>status forced → 'pending' (always)"]
+    C --> D{"session_id collides with<br/>a different submission?"}
+    D -- yes --> D1["ValueError raised →<br/>logged, message skipped, service keeps running"]
+    D -- no --> E{submissionType}
+    E -- story --> F1["UPDATE story_submissions<br/>COALESCE($n, column) per field —<br/>only delta fields actually change"]
+    E -- discussion --> F2["UPDATE discussion_submissions<br/>same COALESCE pattern"]
+    F2 --> F3{"participantsData<br/>present in newValues?"}
+    F3 -- yes --> F4["DELETE existing submission_metrics,<br/>re-INSERT full new snapshot"]
+    F3 -- no --> G["submission_metrics<br/>left untouched"]
+    F4 --> H["transaction commits"]
+    G --> H
+    F1 --> H
+    H --> I{PROCESSING_MODE}
+    I -- real-time --> J["start_workflow again —<br/>status='pending' reprocesses the delta"]
+    I -- batch --> K["status stays 'pending'<br/>reprocessed on next batch run"]
+    </pre>
+  </div>
+  <div class="refs">
+    <span><b>operations.py</b> 141–156, 175–229, 244–260, 363–393</span>
+  </div>
+</div>
+
+<!-- ============================= DELETE ============================= -->
+<h2><span class="tag delete">delete</span> Remove submission</h2>
+<p class="summary">
+  A single <code>DELETE</code> on <code>submissions</code> — everything else disappears via
+  foreign-key cascade. No workflow runs.
+</p>
+<div class="card delete">
+  <div class="diagram-frame">
+    <pre class="mermaid">
+%%{init: {'theme':'base', 'themeVariables': { 'primaryColor': '#F7E5E3', 'primaryTextColor': '#201412', 'primaryBorderColor': '#A3352C', 'lineColor': '#A3352C', 'fontFamily': 'ui-monospace, monospace', 'fontSize': '13px' }}}%%
+flowchart TD
+    A["Kafka message<br/>eventType = delete"] --> B["delete_submission(submission_id, tenant_code)"]
+    B --> C["DELETE FROM submissions<br/>WHERE submission_id + tenant_code"]
+    C --> D["ON DELETE CASCADE removes:<br/>story/discussion_submissions, llm_logs,<br/>analysis_results, ranking, submission_metrics"]
+    D --> E["metric_definitions is NOT touched —<br/>shared reference data across submissions"]
+    E --> F["no Temporal workflow triggered"]
+    </pre>
+  </div>
+  <div class="refs">
+    <span><b>operations.py</b> 116–128</span>
+    <span><b>schema.sql</b> ON DELETE CASCADE, 71–258</span>
+  </div>
+</div>
+
+<!-- ============================= WORKFLOW ============================= -->
+<h2><span class="tag flow">shared</span> Downstream Temporal workflow</h2>
+<p class="summary">
+  Both <code>create</code> and <code>update</code> end the same way in real-time mode: a
+  <code>ConfigDrivenProcessingWorkflow</code> run, driven by the tenant's
+  <code>PROCESS_CONFIG_STORY</code> / <code>PROCESS_CONFIG_DISCUSSION</code> step list.
+</p>
+<div class="card">
+  <div class="diagram-frame">
+    <pre class="mermaid">
+%%{init: {'theme':'base', 'themeVariables': { 'primaryColor': '#E3F1F0', 'primaryTextColor': '#0A1F1D', 'primaryBorderColor': '#0F6B66', 'lineColor': '#0F6B66', 'tertiaryColor': '#F7E5E3', 'fontFamily': 'ui-monospace, monospace', 'fontSize': '13px' }}}%%
+flowchart TD
+    A["ConfigDrivenProcessingWorkflow.run"] --> B["update_status_activity → 'processing'"]
+    B --> C["Step 1 · pii_and_abusive_language_detection_activity<br/>masks PII / abusive text per configured column"]
+    C --> D["Step 2 · thematic_classification_activity<br/>local embedding match → LLM fallback"]
+    D --> E["Step 3 · deface_blur_activity<br/>download → blur faces → upload to GCS"]
+    E --> F["Step 4 · story_rating_activity<br/>(story submissions only)"]
+    F --> G{all steps succeeded?}
+    G -- yes --> H["update_status_activity → 'success'"]
+    G -- no --> I["mark failed step + remaining as skipped<br/>update_status_activity → 'failed'<br/>re-raise"]
+    </pre>
+  </div>
+  <div class="refs">
+    <span><b>workflows.py</b> 17–189</span>
+    <span>each step's <code>llm_model</code> / <code>max_tokens</code> / <code>llm_timeout_seconds</code> can be overridden per step in the config JSON</span>
+  </div>
+</div>
+
+<footer>analytics_service — traced from app/kafka/consumer.py, app/database/operations.py, app/temporal/workflows.py</footer>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs";
+  mermaid.initialize({ startOnLoad: true, securityLevel: "loose" });
+</script>
