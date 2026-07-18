@@ -603,7 +603,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
 
     Pipeline (per statement, via _run_local_classification):
       Step 1:  Read column config, extract text
-      Step 1b: Split discussion-type statements by delimiter
+      Step 1b: For discussions, each TEXT[] array element is its own statement (no parsing needed)
       Step 2:  Word-count / garbage gate → Unknown/Unclear
       Step 3:  Safety check (no LLM) → Flagged
       Step 4:  STOP point for Unknown/Flagged
@@ -665,19 +665,27 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
             if not raw_value:
                 continue
 
-            raw_text = str(raw_value).strip()
-            if not raw_text:
-                continue
-
-            # --- Step 1b: Discussion splitting logic ---
+            # --- Step 1b: Build the list of statements to classify ---
             is_discussion = "discussion" in sub_type
             if is_discussion:
-                # Split discussion-type cells by delimiter into separate statements
-                delimiter = settings.THEMATIC_STATEMENT_DELIMITER
-                statements = [s.strip() for s in raw_text.split(delimiter) if s.strip()]
+                # challenges/solutions are stored as TEXT[] (see operations.py's
+                # _normalize_statement_list) — asyncpg returns them as a native Python
+                # list already, one element per discrete statement. No delimiter/JSON
+                # parsing needed (and none would be safe, since a statement could
+                # legitimately contain any given delimiter character itself).
+                if isinstance(raw_value, list):
+                    statements = [str(s).strip() for s in raw_value if s and str(s).strip()]
+                else:
+                    # Defensive fallback in case of unexpected non-array data
+                    fallback = str(raw_value).strip()
+                    statements = [fallback] if fallback else []
             else:
-                # Story / single-statement types — process as one unit
-                statements = [raw_text]
+                # Story types are single-string columns — process as one unit
+                raw_text = str(raw_value).strip()
+                statements = [raw_text] if raw_text else []
+
+            if not statements:
+                continue
 
             for statement in statements:
                 finished_result, pending_item = await _run_local_classification(

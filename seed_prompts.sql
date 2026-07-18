@@ -289,8 +289,13 @@ INPUT FIELDS TO SCAN: {columns}
 
 ## Output Format
 
-Return ONLY a valid JSON object structure (strict JSON only, no explanation outside JSON):
+Return ONLY a valid JSON object structure (strict JSON only, no explanation outside JSON).
 
+Each entry under INPUT FIELDS TO SCAN is either a single string, or a JSON array of
+strings (when a column holds multiple independent statements). Match your output
+shape to that column''s input shape:
+
+- If the column''s input was a SINGLE STRING, return a single object:
 {
   "<column_name>": {
     "masked_text": "...",
@@ -303,6 +308,33 @@ Return ONLY a valid JSON object structure (strict JSON only, no explanation outs
     ]
   }
 }
+
+- If the column''s input was a JSON ARRAY of strings, return a JSON ARRAY of that same
+  per-statement object shape — one entry per input statement, in the SAME ORDER — and
+  include a "statement_index" field matching the statement''s 0-based position in the
+  input array:
+{
+  "<column_name>": [
+    {
+      "statement_index": 0,
+      "masked_text": "...",
+      "pii_found": [],
+      "abusive_language": false,
+      "abusive_spans": []
+    },
+    {
+      "statement_index": 1,
+      "masked_text": "...",
+      "pii_found": [],
+      "abusive_language": false,
+      "abusive_spans": []
+    }
+  ]
+}
+
+CRITICAL: an array output MUST have exactly one entry per input statement, in the same
+order, with "statement_index" matching that position. Never merge, drop, or reorder
+statements.
 
 Return every column in {columns}, even if empty (empty arrays, false, no missing keys).',
   -- user_prompt: text placeholder

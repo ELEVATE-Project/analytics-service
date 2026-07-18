@@ -5,8 +5,6 @@ from typing import Dict, Any, Optional, List
 import asyncpg
 from datetime import datetime
 
-from app.config import settings
-
 logger = logging.getLogger("analytics_service.operations")
 
 def _normalize_string_list(value: Any) -> Optional[str]:
@@ -17,16 +15,22 @@ def _normalize_string_list(value: Any) -> Optional[str]:
         return "\n".join(str(item) for item in value)
     return str(value)
 
-def _normalize_delimited_text(value: Any) -> Optional[str]:
-    """Helper to convert a list of statements into a single TEXT value joined by
-    THEMATIC_STATEMENT_DELIMITER. Used for discussion_submissions.challenges/solutions,
-    where each list item is one discrete statement; thematic_activity.py splits back
-    on the same delimiter to process each statement independently."""
+def _normalize_statement_list(value: Any) -> Optional[List[str]]:
+    """Helper to convert a value into a Postgres TEXT[] value — one array element
+    per discrete statement. Used for discussion_submissions.challenges/solutions;
+    thematic_activity.py and pii_and_abusive_activity.py (which also reads/writes
+    this column) get back a native Python list with no decoding needed, since
+    asyncpg handles the TEXT[] binding automatically in both directions.
+
+    A native array is used instead of delimiter-joining a single TEXT value because
+    a delimiter character (e.g. "|") occurring naturally inside one statement would
+    otherwise corrupt the round-trip by splitting that statement into multiple
+    fragments — a Postgres array has no such ambiguity."""
     if value is None:
         return None
     if isinstance(value, list):
-        return settings.THEMATIC_STATEMENT_DELIMITER.join(str(item) for item in value)
-    return str(value)
+        return [str(item) for item in value]
+    return [str(value)]
 
 def _normalize_url_list(value: Any) -> Optional[List[str]]:
     """Helper to convert list or single string URL to database TEXT[].
@@ -365,8 +369,8 @@ async def insert_or_update_submission(
                 "SELECT 1 FROM discussion_submissions WHERE submission_id = $1 AND tenant_code = $2",
                 submission_id, tenant_code
             )
-            challenges_joined = _normalize_delimited_text(data.get("challenges"))
-            solutions_joined = _normalize_delimited_text(data.get("solutions"))
+            challenges_joined = _normalize_statement_list(data.get("challenges"))
+            solutions_joined = _normalize_statement_list(data.get("solutions"))
             image_urls = _normalize_media_url_list(data.get("imageUrls"))
             pdf_urls, masked_pdf_urls = _normalize_pdf_urls(data.get("pdfUrls"))
 

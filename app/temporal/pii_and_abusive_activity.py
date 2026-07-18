@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from typing import Dict, Any
+from typing import Any, Dict, List, Optional
 from temporalio import activity
 
 from app.config import settings
@@ -28,6 +28,16 @@ def _get_case_insensitive_key(d: dict, key: str) -> Any:
         if k.lower() == key_lower:
             return v
     return None
+
+
+def _parse_statement_list(raw_value: Any) -> Optional[List[str]]:
+    """
+    Returns raw_value if it's already a list — discussion columns like
+    challenges/solutions are stored as TEXT[] (per operations.py's
+    _normalize_statement_list), which asyncpg auto-decodes to a native Python list.
+    Returns None for scalar columns (a story's objective/challenge are plain text).
+    """
+    return raw_value if isinstance(raw_value, list) else None
 
 
 async def _get_pii_and_abusive_prompt(conn, analysis_type: str) -> Dict[str, Any]:
@@ -86,12 +96,24 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
             # Replace {columns} in system prompt
             system_prompt = system_prompt_tmpl.replace("{columns}", json.dumps(target_columns))
 
-            # Prepare the user prompt input (dictionary mapping column -> raw value)
+            # Prepare the user prompt input (dictionary mapping column -> raw value).
+            # Discussion columns (challenges/solutions) are stored as TEXT[] and come
+            # back from asyncpg as a native list — embed it directly so the model sees
+            # a proper nested array (and is asked to return one masked entry per
+            # statement, per the prompt's list-input contract) rather than a flattened
+            # string.
             input_text_dict = {}
+            column_statements: Dict[str, List[str]] = {}
             for col in target_columns:
                 db_col = map_column_to_db_col(col, sub_type)
-                input_text_dict[col] = payload.get(db_col) or ""
-            
+                raw_value = payload.get(db_col) or ""
+                parsed_list = _parse_statement_list(raw_value)
+                if parsed_list is not None:
+                    column_statements[col] = parsed_list
+                    input_text_dict[col] = parsed_list
+                else:
+                    input_text_dict[col] = raw_value
+
             user_prompt = user_prompt_tmpl.replace("{{text}}", json.dumps(input_text_dict, ensure_ascii=False))
 
             # Make the LLM API call
@@ -127,12 +149,56 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
             for col in target_columns:
                 db_col = map_column_to_db_col(col, sub_type)
                 col_res = _get_case_insensitive_key(llm_response_dict, col)
-                
-                if isinstance(col_res, dict):
+
+                if col in column_statements:
+                    # List-valued column — expect one masked entry per input statement.
+                    original_statements = column_statements[col]
+                    if not isinstance(col_res, list):
+                        logger.warning(
+                            f"Expected a list response for column {col} (has {len(original_statements)} "
+                            f"statements) but got {type(col_res).__name__}; leaving column unmasked."
+                        )
+                        continue
+
+                    masked_by_index: Dict[int, str] = {}
+                    col_pii_found = False
+                    col_abusive = False
+                    for entry in col_res:
+                        if not isinstance(entry, dict):
+                            continue
+                        idx = entry.get("statement_index")
+                        if not isinstance(idx, int) or not (0 <= idx < len(original_statements)):
+                            continue
+                        masked_text = entry.get("masked_text")
+                        masked_by_index[idx] = masked_text if masked_text is not None else original_statements[idx]
+                        if entry.get("pii_found"):
+                            col_pii_found = True
+                        if entry.get("abusive_language"):
+                            col_abusive = True
+
+                    if len(masked_by_index) != len(original_statements):
+                        logger.warning(
+                            f"PII masking for column {col} returned {len(masked_by_index)} of "
+                            f"{len(original_statements)} statements; missing entries kept unmasked."
+                        )
+
+                    # Never drop a statement: default any missing index back to its
+                    # original (unmasked) text so the array length — and thematic
+                    # classification's per-statement iteration downstream — stays intact.
+                    # Assigned as a plain list (not json.dumps'd) — db_col is TEXT[],
+                    # and asyncpg binds a native Python list directly, no encoding needed.
+                    masked_list = [masked_by_index.get(i, original_statements[i]) for i in range(len(original_statements))]
+                    updated_fields[db_col] = masked_list
+                    if col_pii_found:
+                        pii_masked_at_list.append(col)
+                    if col_abusive:
+                        abusive_masked_at_list.append(col)
+
+                elif isinstance(col_res, dict):
                     masked_text = col_res.get("masked_text")
                     if masked_text is not None:
                         updated_fields[db_col] = masked_text
-                    
+
                     pii_found = col_res.get("pii_found", [])
                     abusive_language = col_res.get("abusive_language", False)
                     if pii_found:
