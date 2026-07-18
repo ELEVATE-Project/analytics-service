@@ -396,7 +396,6 @@ async def _run_batched_llm_fallback(
     usage: Dict[str, Any] = {}
     items_by_index: Dict[int, List[Dict[str, Any]]] = {}
     llm_result = None
-    batch_error_message = None
 
     try:
         async with db.pool.acquire() as conn:
@@ -506,7 +505,6 @@ async def _run_batched_llm_fallback(
 
     except Exception as e:
         logger.error(f"[Thematic Pipeline] Batched LLM fallback failed for {len(pending_items)} statement(s): {e}")
-        batch_error_message = str(e)
         if prompt_version_id is not None:
             try:
                 # Real usage is only available if the API call itself succeeded (e.g. a
@@ -534,7 +532,17 @@ async def _run_batched_llm_fallback(
                     )
             except Exception as log_err:
                 logger.error(f"[Thematic Pipeline] Failed to log batched LLM failure to llm_logs: {log_err}")
-        items_by_index = {}  # every pending item falls through to "Others" below
+
+        # Re-raise rather than falling through to Step 9 with an empty
+        # items_by_index — an HTTP/parsing/logging failure here is an
+        # infrastructure error, not a legitimate low-confidence classification.
+        # Swallowing it would silently persist every pending statement as a
+        # valid-looking "Others" result and report the activity as successful,
+        # which would prevent Temporal's configured RetryPolicy from ever
+        # retrying a transient failure (matching how pii_and_abusive_activity.py
+        # and story_rating_activity.py already re-raise from their own LLM
+        # failure handlers instead of persisting a fabricated result).
+        raise
 
     # --- Step 9: Finalize each pending item using its grouped classified_data entries.
     # Own connection scope — acquired fresh now that the LLM call (if any) has returned.
@@ -571,11 +579,10 @@ async def _run_batched_llm_fallback(
             diagnostics["llm_fallback"]["confidence_score"] = llm_confidence
             # Complete raw LLM response for this batch call, stored on every statement that
             # went through the fallback (not just the entries that ended up qualifying) so
-            # the full context is available for audit/debugging from any one row.
-            if llm_result is not None:
-                diagnostics["llm_fallback"]["complete_llm_response"] = llm_result
-            elif batch_error_message is not None:
-                diagnostics["llm_fallback"]["error"] = batch_error_message
+            # the full context is available for audit/debugging from any one row. Reaching
+            # this point at all means the try block above succeeded, so llm_result is
+            # always set (a batch call failure re-raises instead of reaching Step 9).
+            diagnostics["llm_fallback"]["complete_llm_response"] = llm_result
 
             if qualifying_llm:
                 diagnostics["llm_fallback"]["passed"] = True

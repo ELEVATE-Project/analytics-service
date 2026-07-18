@@ -5,7 +5,6 @@ from temporalio import workflow
 
 with workflow.unsafe.imports_passed_through():
     from temporalio.common import RetryPolicy
-    from app.config import settings
     from app.temporal.activities import (
         update_status_activity,
         fetch_pending_submissions_activity
@@ -202,15 +201,18 @@ class ConfigDrivenProcessingWorkflow:
 @workflow.defn
 class BatchProcessingWorkflow:
     @workflow.run
-    async def run(self) -> Dict[str, Any]:
+    async def run(self, batch_size: int) -> Dict[str, Any]:
         """
         Runs batch execution for all pending submissions, fetching and fanning out
-        child workflows in bounded chunks (settings.BATCH_SIZE) rather than loading
-        the entire pending queue into memory and launching all child workflows at
-        once — at a few thousand pending submissions, doing it unbounded risks OOM
-        on the worker and overwhelming the Temporal cluster with concurrent starts.
+        child workflows in bounded chunks (batch_size) rather than loading the entire
+        pending queue into memory and launching all child workflows at once — at a few
+        thousand pending submissions, doing it unbounded risks OOM on the worker and
+        overwhelming the Temporal cluster with concurrent starts.
+
+        batch_size is passed in by the caller (rather than read from settings here)
+        so that replaying this workflow's history stays deterministic even if worker
+        configuration changes between the original run and a replay.
         """
-        batch_size = settings.BATCH_SIZE
         # Safety cap on chunks processed in a single run — if this is ever hit, the
         # remainder is picked up by the next scheduled run rather than looping forever.
         max_chunks = 1000
