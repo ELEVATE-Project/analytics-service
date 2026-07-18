@@ -118,12 +118,36 @@ class Settings(BaseSettings):
     def validate_kafka_ingestion_schema_json(cls, v: str, info) -> str:
         try:
             parsed = json.loads(v)
-            if not isinstance(parsed, dict) or not {"create", "update", "delete"} <= parsed.keys():
-                raise ValueError(
-                    f"{info.field_name} must be a JSON object with 'create', 'update', and 'delete' keys."
-                )
         except (json.JSONDecodeError, TypeError) as e:
             raise ValueError(f"Invalid JSON configuration for {info.field_name}: {e}") from e
+
+        if not isinstance(parsed, dict) or not {"create", "update", "delete"} <= parsed.keys():
+            raise ValueError(
+                f"{info.field_name} must be a JSON object with 'create', 'update', and 'delete' keys."
+            )
+
+        # consumer.py's _validate_ingestion_schema unconditionally does
+        # event_schema.get("required", []) on each section, so a malformed section
+        # (e.g. a string instead of an object) must be rejected here rather than
+        # crashing the consumer at message-processing time.
+        for section_name in ("create", "update", "delete"):
+            section = parsed[section_name]
+            if not isinstance(section, dict):
+                raise ValueError(
+                    f"{info.field_name}.{section_name} must be a JSON object, got {type(section).__name__}."
+                )
+            for list_field in ("required", "optional"):
+                if list_field in section:
+                    field_value = section[list_field]
+                    if not isinstance(field_value, list) or not all(isinstance(item, str) for item in field_value):
+                        raise ValueError(
+                            f"{info.field_name}.{section_name}.{list_field} must be a list of strings."
+                        )
+            if "newValuesNoEmpty" in section and not isinstance(section["newValuesNoEmpty"], bool):
+                raise ValueError(
+                    f"{info.field_name}.{section_name}.newValuesNoEmpty must be a boolean."
+                )
+
         return v
 
     def get_process_config(self, submission_type: str) -> List[Dict[str, Any]]:
