@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -396,7 +397,8 @@ async def _run_batched_llm_fallback(
         full_prompt = f"{system_prompt}\n\n{user_prompt}"
 
         from app.services.llm import openrouter_chat_completion
-        response_text = openrouter_chat_completion(
+        response_text = await asyncio.to_thread(
+            openrouter_chat_completion,
             full_prompt, model=resolved_model, max_tokens=resolved_max_tokens, timeout=resolved_timeout,
         )
 
