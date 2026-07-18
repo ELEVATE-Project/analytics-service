@@ -159,11 +159,12 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
                 # List-valued column — expect one masked entry per input statement.
                 original_statements = column_statements[col]
                 if not isinstance(col_res, list):
-                    logger.warning(
-                        f"Expected a list response for column {col} (has {len(original_statements)} "
-                        f"statements) but got {type(col_res).__name__}; leaving column unmasked."
+                    raise ValueError(
+                        f"PII masking response for column {col} was not a list (got "
+                        f"{type(col_res).__name__}); expected one masked entry per of "
+                        f"{len(original_statements)} statement(s). Refusing to report success "
+                        f"with potentially unmasked PII."
                     )
-                    continue
 
                 masked_by_index: Dict[int, str] = {}
                 col_pii_found = False
@@ -174,6 +175,12 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
                     idx = entry.get("statement_index")
                     if not isinstance(idx, int) or not (0 <= idx < len(original_statements)):
                         continue
+                    if idx in masked_by_index:
+                        raise ValueError(
+                            f"PII masking response for column {col} returned duplicate "
+                            f"statement_index {idx}. Refusing to report success with "
+                            f"potentially unmasked PII."
+                        )
                     masked_text = entry.get("masked_text")
                     masked_by_index[idx] = masked_text if masked_text is not None else original_statements[idx]
                     if entry.get("pii_found"):
@@ -181,18 +188,17 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
                     if entry.get("abusive_language"):
                         col_abusive = True
 
-                if len(masked_by_index) != len(original_statements):
-                    logger.warning(
-                        f"PII masking for column {col} returned {len(masked_by_index)} of "
-                        f"{len(original_statements)} statements; missing entries kept unmasked."
+                missing_indices = [i for i in range(len(original_statements)) if i not in masked_by_index]
+                if missing_indices:
+                    raise ValueError(
+                        f"PII masking for column {col} is missing masked entries for "
+                        f"statement_index {missing_indices} of {len(original_statements)} "
+                        f"statement(s). Refusing to report success with potentially unmasked PII."
                     )
 
-                # Never drop a statement: default any missing index back to its
-                # original (unmasked) text so the array length — and thematic
-                # classification's per-statement iteration downstream — stays intact.
-                # Assigned as a plain list (not json.dumps'd) — db_col is TEXT[],
-                # and asyncpg binds a native Python list directly, no encoding needed.
-                masked_list = [masked_by_index.get(i, original_statements[i]) for i in range(len(original_statements))]
+                # Every index is now guaranteed to be covered exactly once above, so no
+                # fallback to original (unmasked) text is needed here.
+                masked_list = [masked_by_index[i] for i in range(len(original_statements))]
                 updated_fields[db_col] = masked_list
                 if col_pii_found:
                     pii_masked_at_list.append(col)
