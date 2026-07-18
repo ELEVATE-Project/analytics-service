@@ -20,7 +20,14 @@ class Settings(BaseSettings):
     # keeps memory and concurrent child-workflow count bounded regardless of queue size.
     BATCH_SIZE: int = Field(default=100)
 
-    # Optional full schema reset on startup
+    # Deployment environment — defaults to the safe option ('production') so a
+    # missing/unset value never accidentally allows destructive operations like
+    # RESET_DB. Must be explicitly set to 'development' to opt into those.
+    ENVIRONMENT: str = Field(default="production")
+
+    # Optional full schema reset on startup — only takes effect when
+    # ENVIRONMENT=development (see db.py's initialize_schema), so a stray
+    # RESET_DB=true in a production config can't wipe a live database.
     RESET_DB: bool = Field(default=False)
 
     # Temporal Configuration
