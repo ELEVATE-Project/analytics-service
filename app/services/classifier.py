@@ -32,9 +32,10 @@ def _get_model() -> SentenceTransformer:
 
 def build_theme_embeddings(approved_themes: List[Dict[str, Any]]) -> Dict[str, np.ndarray]:
     """
-    Build embeddings for each approved theme.
-    For each theme, encodes both the name and definition separately,
-    then stacks them as a multi-vector representation.
+    Build embeddings for each approved theme, matching the representation used
+    by the offline thematic_analysis.py discovery tool:
+      - one base vector encoding name + definition + keywords combined
+      - one additional vector per '|'-delimited example statement
 
     Returns: {theme_id_str: np.ndarray of shape (N, embedding_dim)}
     """
@@ -43,22 +44,49 @@ def build_theme_embeddings(approved_themes: List[Dict[str, Any]]) -> Dict[str, n
 
     for theme in approved_themes:
         theme_id = str(theme["id"])
-        name = theme.get("name", "")
+        name = theme.get("name", "") or ""
         definition = theme.get("definitions", "") or theme.get("definition", "") or ""
+        keywords = theme.get("keywords", "") or ""
+        examples = theme.get("examples", "") or ""
 
-        texts_to_encode = []
-        if name:
-            texts_to_encode.append(f"Theme: {name}")
-        if definition:
-            texts_to_encode.append(definition)
+        base_text = f"Theme: {name}. Definition: {definition}. Keywords: {keywords}."
+        base_emb = np.array(model.encode(base_text)).reshape(1, -1)
 
-        if not texts_to_encode:
-            continue
+        example_list = [ex.strip() for ex in examples.split("|") if ex.strip()]
+        if example_list:
+            example_embs = np.array(model.encode(example_list))
+            vectors = np.vstack([base_emb, example_embs])
+        else:
+            vectors = base_emb
 
-        embeddings = model.encode(texts_to_encode)
-        theme_vectors[theme_id] = np.array(embeddings)
+        theme_vectors[theme_id] = vectors
 
     return theme_vectors
+
+
+def get_theme_similarities(
+    statement: str,
+    theme_vectors: Dict[str, np.ndarray],
+) -> List[Tuple[str, float]]:
+    """
+    Computes each theme's best (max) cosine similarity to the statement.
+
+    Returns a list of (theme_id, similarity_score) sorted by score descending.
+    Empty list if no themes available.
+    """
+    if not theme_vectors:
+        return []
+
+    model = _get_model()
+    stmt_emb = model.encode(statement).reshape(1, -1)
+
+    scores: List[Tuple[str, float]] = []
+    for theme_id, vectors in theme_vectors.items():
+        sims = cosine_similarity(stmt_emb, vectors)[0]
+        scores.append((theme_id, float(np.max(sims))))
+
+    scores.sort(key=lambda pair: pair[1], reverse=True)
+    return scores
 
 
 def classify_statement(
@@ -67,31 +95,15 @@ def classify_statement(
     theme_id_to_info: Dict[str, Dict[str, Any]],
 ) -> Tuple[Optional[str], float]:
     """
-    Classify a single statement against pre-computed theme embeddings.
-
-    For each theme, computes cosine similarity between the statement embedding
-    and each of the theme's vectors (name + definition), takes the max per theme,
-    then picks the best overall theme.
+    Classify a single statement against pre-computed theme embeddings,
+    returning only the single best match. See get_theme_similarities()
+    for the full ranked list (used by multi-theme callers).
 
     Returns:
         (best_theme_id, best_similarity_score)
         If no themes available, returns (None, 0.0)
     """
-    if not theme_vectors:
+    scores = get_theme_similarities(statement, theme_vectors)
+    if not scores:
         return None, 0.0
-
-    model = _get_model()
-    stmt_emb = model.encode(statement).reshape(1, -1)
-
-    best_theme_id: Optional[str] = None
-    best_score: float = -1.0
-
-    for theme_id, vectors in theme_vectors.items():
-        sims = cosine_similarity(stmt_emb, vectors)[0]
-        max_sim = float(np.max(sims))
-
-        if max_sim > best_score:
-            best_score = max_sim
-            best_theme_id = theme_id
-
-    return best_theme_id, best_score
+    return scores[0]

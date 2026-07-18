@@ -46,17 +46,26 @@ You are an expert data classifier specializing in educational barrier analysis. 
 
 ---
 
+## Input Format
+
+You will typically receive MULTIPLE statements from the same submission in a single request. Each one is given a numeric index in square brackets, e.g.:
+
+[0] Teachers do not come to school on time
+[1] Lack of toilets in schools
+
+Classify every statement independently — do not let one statement''s content influence another''s classification.
+
 ## Task Instructions
 
-For each challenge statement provided:
+For each indexed statement provided:
 
 1. **Read carefully** to understand the core barrier being described
 2. **Classify** into the most appropriate theme
 3. **Check for PII** using the guidelines above
-4. **Provide justification** - Explain in 1-2 sentences why this theme was chosen, citing specific words or phrases from the challenge
+4. **Provide justification** - Explain in 1-2 sentences why this theme was chosen, citing specific words or phrases from the statement
 5. **Assign confidence score** - Rate your classification confidence from 0.0 to 1.0 (where 1.0 is most confident)
-6. **Flag multi-theme mapping** - Set to `true` if the challenge contains multiple distinct barriers, `false` if it is a single barrier
-7. **Output** in the specified JSON format
+6. **Flag multi-theme mapping** - Set to `true` if the statement contains multiple distinct barriers, `false` if it is a single barrier
+7. **Output** in the specified JSON format, always including the statement''s index
 
 ## Output Format
 
@@ -65,6 +74,7 @@ Return ONLY a valid JSON object with this structure (no additional text, markdow
 {
   "classified_data": [
     {
+      "statement_index": 0,
       "challenge": "Teachers do not come to school on time",
       "theme_id": "550e8400-e29b-41d4-a716-446655440007",
       "theme_name": "Teacher Capacity and Quality Issues",
@@ -74,6 +84,7 @@ Return ONLY a valid JSON object with this structure (no additional text, markdow
       "multi_theme_mapped": false
     },
     {
+      "statement_index": 1,
       "challenge": "Lack of toilets in schools",
       "theme_id": "660f9511-f30c-52e5-b827-557766551118",
       "theme_name": "School Infrastructure and Facility Issues",
@@ -85,34 +96,37 @@ Return ONLY a valid JSON object with this structure (no additional text, markdow
   ]
 }
 
-Note: If multiple distinct barriers are mentioned in a single challenge, include multiple theme objects in the array. Also always return the output with 7 key-value JSON object [challenge, theme_id, theme_name, pii_flag, justification, confidence_score, multi_theme_mapped]
+CRITICAL: "statement_index" MUST exactly match the bracketed index of the statement being classified in the input — this is how each result gets matched back to its source statement. Every index given in the input MUST appear at least once in classified_data, even when the classification is uncertain (use your best-guess theme with a low confidence_score rather than omitting an index entirely).
+
+Note: If multiple distinct barriers are mentioned in a single statement, include multiple theme objects sharing the SAME statement_index. Always return each object with these 8 keys: [statement_index, challenge, theme_id, theme_name, pii_flag, justification, confidence_score, multi_theme_mapped]
 
 ---
 CRITICAL: Multi-Theme Classification Rules
 READ THIS CAREFULLY - THIS IS THE MOST IMPORTANT INSTRUCTION:
-When a SINGLE challenge statement contains MULTIPLE DISTINCT barriers:
+When a SINGLE statement contains MULTIPLE DISTINCT barriers:
 
 You MUST create SEPARATE JSON objects for EACH distinct theme
 Each object should have multi_theme_mapped: true
-Each object should reference the SAME original challenge text
+Each object should share the SAME statement_index (and reference the same original statement text)
 Each object should have a DIFFERENT theme_id and theme_name
 
 Example:
-Input: "There are no teachers in the school and there are no toilets in the school"
+Input: [0] "There are no teachers in the school and there are no toilets in the school"
 
-When multi_theme_mapped is true, you MUST have created multiple objects. If you set multi_theme_mapped: true but only create one object, this is a CRITICAL ERROR.
+When multi_theme_mapped is true, you MUST have created multiple objects (both with statement_index 0). If you set multi_theme_mapped: true but only create one object, this is a CRITICAL ERROR.
 
 ---
 ## Field Definitions
 
-- **challenge**: The original challenge statement being classified
+- **statement_index**: The integer index (matching the bracketed number in the input) of the statement this classification belongs to
+- **challenge**: The original statement text being classified
 - **justification**: A brief explanation (1-2 sentences) citing specific words/phrases that led to this classification
 - **confidence_score**: A decimal value between 0.0-1.0 indicating classification certainty
-- **multi_theme_mapped**: Boolean - `true` if this challenge statement contains multiple distinct barriers requiring multiple theme classifications, `false` otherwise
+- **multi_theme_mapped**: Boolean - `true` if this statement contains multiple distinct barriers requiring multiple theme classifications, `false` otherwise
 
 ## Classification Rules
 
-- If a challenge mentions multiple distinct barriers, classify it into MULTIPLE themes (one for each barrier mentioned)
+- If a statement mentions multiple distinct barriers, classify it into MULTIPLE themes (one for each barrier mentioned)
 - Example: "There are no teachers in the school and there are no toilets in the school" should be mapped to both Theme 7 (Teacher Capacity and Quality Issues) AND Theme 6 (School Infrastructure and Facility Issues)
 - Be consistent in classification across similar statements
 - When in doubt between two themes, choose the one most strongly represented by the core issue described.',
@@ -123,7 +137,7 @@ When multi_theme_mapped is true, you MUST have created multiple objects. If you 
 
 ---
 
-**Now classify the following statements:**
+**Now classify the following indexed statements:**
 {{statements}}',
   TRUE,
   'Seeded theme classification prompt v1 — system/user split from prompt_version.csv',
@@ -266,6 +280,7 @@ INPUT FIELDS TO SCAN: {columns}
 - **Do NOT mask generic/category terms** even if sensitive-sounding: Anganwadi, Aadhar (as a word, not the number), morning/evening/summer, or generic school types (e.g. "Kasturba Vidyalaya" is a school category in Bihar, not a specific institution).
 - **Rule of thumb**: mask only when the combination of details could identify a specific individual. Isolated place/program/category names don''t count.
 - **Replacement tags**: Replace masked spans with tags: <PERSON>, <PHONE>, <ID>, <LOCATION>.
+- **As a general rule**: if the objective points to one or more specific people or a specific school in a village or district, then the name of person and the village needs to be masked. For example, if the objective is- “To ensure safety of a girl subjected to domestic violence in X village in Rohtas district” or “To ensure safety of a girl subjected to domestic violence in X village” can be PII even though the girl’s name is not mentioned because village is a tiny unit and it could be easy to identify that girl in that X village.
 
 ## Abuse Detection
 

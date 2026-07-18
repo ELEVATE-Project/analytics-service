@@ -5,6 +5,8 @@ from typing import Dict, Any, Optional, List
 import asyncpg
 from datetime import datetime
 
+from app.config import settings
+
 logger = logging.getLogger("analytics_service.operations")
 
 def _normalize_string_list(value: Any) -> Optional[str]:
@@ -13,6 +15,17 @@ def _normalize_string_list(value: Any) -> Optional[str]:
         return None
     if isinstance(value, list):
         return "\n".join(str(item) for item in value)
+    return str(value)
+
+def _normalize_delimited_text(value: Any) -> Optional[str]:
+    """Helper to convert a list of statements into a single TEXT value joined by
+    THEMATIC_STATEMENT_DELIMITER. Used for discussion_submissions.challenges/solutions,
+    where each list item is one discrete statement; thematic_activity.py splits back
+    on the same delimiter to process each statement independently."""
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return settings.THEMATIC_STATEMENT_DELIMITER.join(str(item) for item in value)
     return str(value)
 
 def _normalize_url_list(value: Any) -> Optional[List[str]]:
@@ -352,8 +365,8 @@ async def insert_or_update_submission(
                 "SELECT 1 FROM discussion_submissions WHERE submission_id = $1 AND tenant_code = $2",
                 submission_id, tenant_code
             )
-            challenges_joined = _normalize_string_list(data.get("challenges"))
-            solutions_joined = _normalize_string_list(data.get("solutions"))
+            challenges_joined = _normalize_delimited_text(data.get("challenges"))
+            solutions_joined = _normalize_delimited_text(data.get("solutions"))
             image_urls = _normalize_media_url_list(data.get("imageUrls"))
             pdf_urls, masked_pdf_urls = _normalize_pdf_urls(data.get("pdfUrls"))
 
