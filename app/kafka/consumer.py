@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
@@ -36,6 +37,35 @@ def _is_empty(value) -> bool:
     if isinstance(value, (str, list, dict, tuple)) and len(value) == 0:
         return True
     return False
+
+
+def _emptiness_label(value) -> str:
+    """Distinguishes *why* a value tripped _is_empty(), for precise problem messages."""
+    return "null" if value is None else "empty"
+
+
+def _payload_fingerprint(raw_payload: str) -> str:
+    """A log-safe stand-in for a raw Kafka payload: a short hash plus byte length,
+    enough to correlate a log line with the full message already preserved on the
+    DLQ topic, without duplicating submission text / user identifiers into logs."""
+    digest = hashlib.sha256(raw_payload.encode("utf-8")).hexdigest()[:12]
+    return f"sha256:{digest} ({len(raw_payload)} bytes)"
+
+
+def _extract_identifiers(event: dict) -> dict:
+    """Pulls correlation identifiers (submissionId/tenantCode/sessionId — not
+    submission content) out of a parsed event, so an invalid message can be found
+    directly by these fields instead of by hashing payloads."""
+    return {
+        "submissionId": event.get("submissionId"),
+        "tenantCode": event.get("tenantCode"),
+        "sessionId": event.get("sessionId"),
+    }
+
+
+def _format_identifiers(identifiers: dict) -> str:
+    present = [f"{k}={v}" for k, v in identifiers.items() if v is not None]
+    return ", ".join(present) if present else "no identifiers found"
 
 
 class IngestionConsumer:
@@ -115,30 +145,39 @@ class IngestionConsumer:
                 logger.info("Detected connection issue with Temporal. Resetting client to trigger reconnect on next message.")
                 self.temporal_client = None
 
-    async def _send_to_dlq(self, raw_payload: str, reason: str) -> None:
+    async def _send_to_dlq(self, raw_payload: str, reason: str, identifiers: dict = None) -> None:
         """
         Publishes a malformed/invalid message to the dead-letter topic instead of
         silently dropping it, so it can be inspected or replayed later after the
-        producer-side bug that caused it is fixed.
+        producer-side bug that caused it is fixed. When available, submissionId/
+        tenantCode/sessionId are attached as extra headers (and logged) so the
+        message can be found directly, without hashing payloads.
         """
+        identifiers = identifiers or {}
+        id_str = _format_identifiers(identifiers)
+
         if not self.dlq_producer:
-            logger.error(f"DLQ producer not initialized; dropping invalid message. Reason: {reason}. Payload: {raw_payload!r}")
+            logger.error(f"DLQ producer not initialized; dropping invalid message. Reason: {reason}. Identifiers: {id_str}. Payload: {_payload_fingerprint(raw_payload)}")
             return
 
         def _produce():
+            headers = [("reason", reason.encode("utf-8"))]
+            for key, value in identifiers.items():
+                if value is not None:
+                    headers.append((key, str(value).encode("utf-8")))
             self.dlq_producer.produce(
                 self.dlq_topic,
                 value=raw_payload.encode("utf-8"),
-                headers=[("reason", reason.encode("utf-8"))],
+                headers=headers,
             )
             self.dlq_producer.poll(0)
 
         try:
             await asyncio.to_thread(_produce)
-            logger.warning(f"Sent invalid message to DLQ topic '{self.dlq_topic}'. Reason: {reason}. Payload: {raw_payload!r}")
+            logger.warning(f"Sent invalid message to DLQ topic '{self.dlq_topic}'. Reason: {reason}. Identifiers: {id_str}. Payload: {_payload_fingerprint(raw_payload)}")
         except Exception as e:
             logger.error(
-                f"Failed to publish message to DLQ topic '{self.dlq_topic}': {e}. Original payload: {raw_payload!r}",
+                f"Failed to publish message to DLQ topic '{self.dlq_topic}': {e}. Identifiers: {id_str}. Original payload: {_payload_fingerprint(raw_payload)}",
                 exc_info=True,
             )
 
@@ -164,15 +203,17 @@ class IngestionConsumer:
         problems = []
         for path in event_schema.get("required", []):
             value, found = _get_nested(event, path)
-            if not found or _is_empty(value):
-                problems.append(f"'{path}' is missing, null, or empty")
+            if not found:
+                problems.append(f"'{path}' is missing")
+            elif _is_empty(value):
+                problems.append(f"'{path}' is {_emptiness_label(value)}")
 
         if event_type == "update" and event_schema.get("newValuesNoEmpty"):
             new_values = event.get("newValues")
             if isinstance(new_values, dict):
                 for key, value in new_values.items():
                     if _is_empty(value):
-                        problems.append(f"'newValues.{key}' is null or empty")
+                        problems.append(f"'newValues.{key}' is {_emptiness_label(value)}")
 
         return problems
 
@@ -185,24 +226,25 @@ class IngestionConsumer:
         try:
             event = json.loads(raw_payload)
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse Kafka message JSON: {raw_payload!r}. Error: {e}")
+            logger.error(f"Failed to parse Kafka message JSON: {_payload_fingerprint(raw_payload)}. Error: {e}")
             await self._send_to_dlq(raw_payload, f"Invalid JSON: {e}")
             return
 
         if not isinstance(event, dict):
             reason = f"Expected a JSON object, got {type(event).__name__}"
-            logger.error(f"Invalid Kafka message shape: expected an object but received {type(event).__name__}: {raw_payload!r}")
+            logger.error(f"Invalid Kafka message shape: expected an object but received {type(event).__name__}: {_payload_fingerprint(raw_payload)}")
             await self._send_to_dlq(raw_payload, reason)
             return
 
         event_type = event.get("eventType", "create").lower().strip()
         submission_type = event.get("submissionType")
+        identifiers = _extract_identifiers(event)
 
         problems = self._validate_ingestion_schema(event, submission_type, event_type)
         if problems:
             reason = f"Failed ingestion validation for submissionType {submission_type!r}, eventType {event_type!r}: {'; '.join(problems)}"
-            logger.error(reason)
-            await self._send_to_dlq(raw_payload, reason)
+            logger.error(f"{reason}. Identifiers: {_format_identifiers(identifiers)}")
+            await self._send_to_dlq(raw_payload, reason, identifiers)
             return
 
         # Keep None as None here (rather than str(None) == "None", which is truthy)
@@ -252,8 +294,8 @@ class IngestionConsumer:
                 # Execute deletion
                 await delete_submission(conn, submission_id, tenant_code)
             else:
-                logger.error(f"Unsupported Kafka eventType: {event_type}")
-                await self._send_to_dlq(raw_payload, f"Unsupported eventType: {event_type}")
+                logger.error(f"Unsupported Kafka eventType: {event_type}. Identifiers: {_format_identifiers(identifiers)}")
+                await self._send_to_dlq(raw_payload, f"Unsupported eventType: {event_type}", identifiers)
 
     async def _ensure_topics_exist(self, topics: list) -> None:
         """Create the given Kafka topics if they do not already exist."""
@@ -314,7 +356,7 @@ class IngestionConsumer:
                 except Exception as e:
                     logger.error(
                         f"Unhandled error processing Kafka message, skipping it. "
-                        f"Payload: {raw_payload!r}. Error: {e}",
+                        f"Payload: {_payload_fingerprint(raw_payload)}. Error: {e}",
                         exc_info=True,
                     )
 
