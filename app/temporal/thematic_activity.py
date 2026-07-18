@@ -285,7 +285,9 @@ async def _run_local_classification(
     # --- Step 5 (themes already fetched) ---
     # --- Step 6: Local embedding classification ---
     logger.info("[Thematic Pipeline] Step 6: Comparing against approved themes using local SentenceTransformer embeddings")
-    theme_similarities = get_theme_similarities(statement, theme_vectors)
+    # SentenceTransformer.encode() is CPU-bound and synchronous — run it off the
+    # event loop so it doesn't block other activities on this Temporal worker.
+    theme_similarities = await asyncio.to_thread(get_theme_similarities, statement, theme_vectors)
     best_theme_id, best_similarity = theme_similarities[0] if theme_similarities else (None, 0.0)
     result["similarity_score"] = best_similarity
     diagnostics["local_embedding_compare"]["similarity_score"] = best_similarity
@@ -638,9 +640,11 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
             logger.warning(warn_msg)
             warnings.append(warn_msg)
 
-        # Build embedding vectors for approved themes (once)
+        # Build embedding vectors for approved themes (once). Same as below — this
+        # calls SentenceTransformer.encode() synchronously, so it's offloaded to a
+        # thread rather than blocking the event loop.
         theme_id_to_info = {str(t["id"]): t for t in approved_themes}
-        theme_vectors = build_theme_embeddings(approved_themes) if approved_themes else {}
+        theme_vectors = await asyncio.to_thread(build_theme_embeddings, approved_themes) if approved_themes else {}
 
         abusive_masked_at = payload.get("abusive_masked_at") or []
 
