@@ -158,7 +158,7 @@ class Settings(BaseSettings):
         submission type. Raises ValueError if JSON parsing fails, if the config is
         not a dict, or if the submission type doesn't match 'story' or 'discussion'.
         """
-        normalized_type = submission_type.lower().strip() if submission_type else ""
+        normalized_type = submission_type.lower().strip() if isinstance(submission_type, str) else ""
         if "story" in normalized_type:
             raw_schema = self.STORY_KAFKA_PROCESS_SCHEMA
         elif "discussion" in normalized_type:

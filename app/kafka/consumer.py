@@ -205,7 +205,7 @@ class IngestionConsumer:
         (submissionType, eventType) combination. Returns a list of problem descriptions;
         an empty list means the event is valid.
         """
-        normalized_type = (submission_type or "").lower().strip()
+        normalized_type = submission_type.lower().strip() if isinstance(submission_type, str) else ""
         if event_type in ("create", "update") and "story" not in normalized_type and "discussion" not in normalized_type:
             return [f"Unrecognized submissionType {submission_type!r}; no ingestion schema to validate against"]
 
@@ -254,9 +254,15 @@ class IngestionConsumer:
             await self._send_to_dlq(raw_payload, reason)
             return
 
-        event_type = event.get("eventType", "create").lower().strip()
-        submission_type = event.get("submissionType")
         identifiers = _extract_identifiers(event)
+        event_type_raw = event.get("eventType", "create")
+        if not isinstance(event_type_raw, str):
+            reason = f"Invalid eventType: expected a string, got {type(event_type_raw).__name__} ({event_type_raw!r})"
+            logger.error(f"{reason}. Identifiers: {_format_identifiers(identifiers)}")
+            await self._send_to_dlq(raw_payload, reason, identifiers)
+            return
+        event_type = event_type_raw.lower().strip()
+        submission_type = event.get("submissionType")
 
         problems = self._validate_ingestion_schema(event, submission_type, event_type)
         if problems:
