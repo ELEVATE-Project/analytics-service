@@ -159,75 +159,85 @@ async def story_rating_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     resolved_max_tokens = params.get("max_tokens") or settings.LLM_MAX_TOKENS
     resolved_timeout = params.get("llm_timeout_seconds") or settings.LLM_TIMEOUT_SECONDS
 
+    # --- Phase 1: read submission payload/type. Own connection scope — released
+    # before the timeout-bound PDF download and LLM call below.
     async with db.pool.acquire() as conn:
         sub_type, payload = await get_submission_type_and_payload(conn, submission_id, tenant_code)
 
-        if "story" not in sub_type:
-            return {"status": "skipped", "reason": f"story_rating only applies to story submissions, got '{sub_type}'"}
+    if "story" not in sub_type:
+        return {"status": "skipped", "reason": f"story_rating only applies to story submissions, got '{sub_type}'"}
 
-        pdf_urls = payload.get("pdf_urls") or []
-        pdf_url = next((u for u in pdf_urls if u and str(u).strip()), None)
+    pdf_urls = payload.get("pdf_urls") or []
+    pdf_url = next((u for u in pdf_urls if u and str(u).strip()), None)
 
-        content, source, total_pdf_text_chars = await asyncio.to_thread(
-            _fetch_story_content,
-            pdf_url,
-            payload.get("challenge"),
-            payload.get("action_steps"),
-            payload.get("impact"),
-            submission_id,
-            tenant_code,
-            log_prefix,
+    # PDF download/extraction — also timeout-bound external I/O (up to 60s), so no
+    # DB connection is held during this either.
+    content, source, total_pdf_text_chars = await asyncio.to_thread(
+        _fetch_story_content,
+        pdf_url,
+        payload.get("challenge"),
+        payload.get("action_steps"),
+        payload.get("impact"),
+        submission_id,
+        tenant_code,
+        log_prefix,
+    )
+
+    if not content.strip():
+        logger.info(f"{log_prefix} No PDF content and no fallback fields available. Skipping story rating.")
+        return {"status": "skipped", "reason": "no PDF content or fallback fields available"}
+
+    # --- Phase 2: read the rating prompt. Own connection scope.
+    async with db.pool.acquire() as conn:
+        prompt_data = await _get_story_rating_prompt(conn)
+    prompt_version_id = str(prompt_data["id"])
+    system_prompt = prompt_data["system_prompt"]
+    user_prompt = prompt_data["user_prompt"].replace("{{story_content}}", content)
+    full_prompt = f"{system_prompt}\n\n{user_prompt}"
+
+    response_text = ""
+    usage = {}
+    try:
+        # --- Phase 3: call the LLM — no DB connection held during this timeout-bound call.
+        from app.services.llm import openrouter_chat_completion, split_llm_usage
+        response_text, usage = await asyncio.to_thread(
+            openrouter_chat_completion, full_prompt, model=resolved_model, max_tokens=resolved_max_tokens, timeout=resolved_timeout,
         )
 
-        if not content.strip():
-            logger.info(f"{log_prefix} No PDF content and no fallback fields available. Skipping story rating.")
-            return {"status": "skipped", "reason": "no PDF content or fallback fields available"}
+        cleaned = response_text.strip()
+        if cleaned.startswith("```"):
+            lines = cleaned.splitlines()
+            if lines[0].startswith("```json") or lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            cleaned = "\n".join(lines).strip()
 
-        prompt_data = await _get_story_rating_prompt(conn)
-        prompt_version_id = str(prompt_data["id"])
-        system_prompt = prompt_data["system_prompt"]
-        user_prompt = prompt_data["user_prompt"].replace("{{story_content}}", content)
-        full_prompt = f"{system_prompt}\n\n{user_prompt}"
+        result = json.loads(cleaned)
 
-        response_text = ""
-        usage = {}
-        try:
-            from app.services.llm import openrouter_chat_completion, split_llm_usage
-            response_text, usage = await asyncio.to_thread(
-                openrouter_chat_completion, full_prompt, model=resolved_model, max_tokens=resolved_max_tokens, timeout=resolved_timeout,
-            )
+        missing = [f for f in REQUIRED_RATING_FIELDS if f not in result]
+        if missing:
+            raise ValueError(f"LLM response missing required fields: {missing}")
 
-            cleaned = response_text.strip()
-            if cleaned.startswith("```"):
-                lines = cleaned.splitlines()
-                if lines[0].startswith("```json") or lines[0].startswith("```"):
-                    lines = lines[1:]
-                if lines and lines[-1].strip() == "```":
-                    lines = lines[:-1]
-                cleaned = "\n".join(lines).strip()
+        if not all(_is_valid_score(result[f]) for f in SCORE_FIELDS):
+            raise ValueError("One or more scores are outside the valid 0.0-1.0 range.")
 
-            result = json.loads(cleaned)
+        criteria_data = {
+            "document_language": result["document_language"],
+            "impact_and_outcome_score": float(result["impact_and_outcome_score"]),
+            "impact_justification": result["impact_justification"],
+            "issue_and_challenge_score": float(result["issue_and_challenge_score"]),
+            "issue_justification": result["issue_justification"],
+            "action_steps_score": float(result["action_steps_score"]),
+            "action_justification": result["action_justification"],
+        }
+        composite_score = float(result["composite_score"])
+        tier = result["tier"]
+        overall_summary = result["overall_summary"]
 
-            missing = [f for f in REQUIRED_RATING_FIELDS if f not in result]
-            if missing:
-                raise ValueError(f"LLM response missing required fields: {missing}")
-
-            if not all(_is_valid_score(result[f]) for f in SCORE_FIELDS):
-                raise ValueError("One or more scores are outside the valid 0.0-1.0 range.")
-
-            criteria_data = {
-                "document_language": result["document_language"],
-                "impact_and_outcome_score": float(result["impact_and_outcome_score"]),
-                "impact_justification": result["impact_justification"],
-                "issue_and_challenge_score": float(result["issue_and_challenge_score"]),
-                "issue_justification": result["issue_justification"],
-                "action_steps_score": float(result["action_steps_score"]),
-                "action_justification": result["action_justification"],
-            }
-            composite_score = float(result["composite_score"])
-            tier = result["tier"]
-            overall_summary = result["overall_summary"]
-
+        # --- Phase 4: persist results. Fresh connection scope, acquired only now
+        # that the LLM call has returned.
+        async with db.pool.acquire() as conn:
             # Clear any previous rating for this submission before writing the new one
             await conn.execute(
                 "DELETE FROM ranking WHERE submission_id = $1 AND tenant_code = $2",
@@ -264,23 +274,24 @@ async def story_rating_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 meta_data=usage_meta or None,
             )
 
-            logger.info(f"{log_prefix} Story rating success - Tier: {tier}, Composite Score: {composite_score} (source: {source})")
-            return {"status": "success", "tier": tier, "composite_score": composite_score, "content_source": source}
+        logger.info(f"{log_prefix} Story rating success - Tier: {tier}, Composite Score: {composite_score} (source: {source})")
+        return {"status": "success", "tier": tier, "composite_score": composite_score, "content_source": source}
 
-        except Exception as e:
-            logger.error(f"{log_prefix} Story rating failed: {e}")
-            try:
-                # Real usage is only available if the API call itself succeeded — fall
-                # back to a word-count estimate only when we never got a response to
-                # report actual billed tokens for.
-                if usage:
-                    from app.services.llm import split_llm_usage
-                    prompt_tokens, completion_tokens, usage_meta = split_llm_usage(usage)
-                else:
-                    prompt_tokens = len(full_prompt.split()) if full_prompt else 0
-                    completion_tokens = len(response_text.split()) if response_text else 0
-                    usage_meta = None
+    except Exception as e:
+        logger.error(f"{log_prefix} Story rating failed: {e}")
+        try:
+            # Real usage is only available if the API call itself succeeded — fall
+            # back to a word-count estimate only when we never got a response to
+            # report actual billed tokens for.
+            if usage:
+                from app.services.llm import split_llm_usage
+                prompt_tokens, completion_tokens, usage_meta = split_llm_usage(usage)
+            else:
+                prompt_tokens = len(full_prompt.split()) if full_prompt else 0
+                completion_tokens = len(response_text.split()) if response_text else 0
+                usage_meta = None
 
+            async with db.pool.acquire() as conn:
                 await insert_llm_log(
                     conn,
                     submission_id=submission_id,
@@ -294,6 +305,6 @@ async def story_rating_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                     error_message=str(e),
                     meta_data=usage_meta,
                 )
-            except Exception as log_err:
-                logger.error(f"{log_prefix} Failed to log error to llm_logs: {log_err}")
-            raise
+        except Exception as log_err:
+            logger.error(f"{log_prefix} Failed to log error to llm_logs: {log_err}")
+        raise

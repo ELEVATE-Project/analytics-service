@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import math
 import re
 from typing import Dict, Any, List, Optional, Tuple
 from temporalio import activity
@@ -119,6 +120,19 @@ def _build_themes_text(approved_themes: list) -> str:
             f"Keywords: {keywords}\n"
         )
     return "\n---\n".join(lines)
+
+
+def _parse_confidence_score(raw: Any) -> Optional[float]:
+    """Parses an LLM-returned confidence score, rejecting non-numeric, non-finite,
+    or out-of-range values instead of raising (a single malformed entry must not
+    take down the rest of the batch)."""
+    try:
+        score = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(score) or not (0.0 <= score <= 1.0):
+        return None
+    return score
 
 
 def _resolve_theme_id(theme_name: Optional[str], theme_id_to_info: dict) -> Optional[str]:
@@ -349,7 +363,6 @@ async def _run_local_classification(
 
 
 async def _run_batched_llm_fallback(
-    conn,
     pending_items: List[Dict[str, Any]],
     approved_themes: list,
     theme_id_to_info: dict,
@@ -371,6 +384,9 @@ async def _run_batched_llm_fallback(
     echo that index (statement_index) on every classified_data entry so results map
     back to their source statement unambiguously — a raw text match would be fragile
     if two statements were similar or the model paraphrased the echoed text.
+
+    Acquires its own DB connections rather than taking one from the caller, so no
+    pool connection sits idle for the duration of the timeout-bound LLM call below.
     """
     logger.info(f"[Thematic Pipeline] Batched LLM fallback: {len(pending_items)} statement(s) in a single call")
 
@@ -383,7 +399,8 @@ async def _run_batched_llm_fallback(
     batch_error_message = None
 
     try:
-        prompt_data = await _get_theme_classification_prompt(conn, analysis_type)
+        async with db.pool.acquire() as conn:
+            prompt_data = await _get_theme_classification_prompt(conn, analysis_type)
         prompt_version_id = str(prompt_data["id"])
         system_prompt = prompt_data["system_prompt"]
         user_prompt = prompt_data["user_prompt"]
@@ -459,27 +476,33 @@ async def _run_batched_llm_fallback(
                 logger.warning(f"[Thematic Pipeline] classified_data entry had missing/invalid statement_index; matched by echoed text instead (index={fallback_idx}).")
                 idx = fallback_idx
 
+            confidence_score = _parse_confidence_score(item.get("confidence_score"))
+            if confidence_score is None:
+                logger.warning(f"[Thematic Pipeline] classified_data entry at index {idx} has an invalid confidence_score ({item.get('confidence_score')!r}); skipping entry.")
+                continue
+
             item_theme_name = item.get("theme_name")
             items_by_index.setdefault(idx, []).append({
                 "theme_id": _resolve_theme_id(item_theme_name, theme_id_to_info),
                 "theme_name": item_theme_name,
-                "confidence_score": float(item.get("confidence_score", 0) or 0),
+                "confidence_score": confidence_score,
                 "justification": item.get("justification"),
             })
 
         prompt_tokens, completion_tokens, usage_meta = split_llm_usage(usage)
-        await insert_llm_log(
-            conn,
-            submission_id=submission_id,
-            tenant_code=tenant_code,
-            model_name=resolved_model or settings.OPENROUTER_MODEL,
-            analysis_type=analysis_type,
-            prompt_version_id=prompt_version_id,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            status="success",
-            meta_data=usage_meta or None,
-        )
+        async with db.pool.acquire() as conn:
+            await insert_llm_log(
+                conn,
+                submission_id=submission_id,
+                tenant_code=tenant_code,
+                model_name=resolved_model or settings.OPENROUTER_MODEL,
+                analysis_type=analysis_type,
+                prompt_version_id=prompt_version_id,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                status="success",
+                meta_data=usage_meta or None,
+            )
 
     except Exception as e:
         logger.error(f"[Thematic Pipeline] Batched LLM fallback failed for {len(pending_items)} statement(s): {e}")
@@ -495,114 +518,117 @@ async def _run_batched_llm_fallback(
                     prompt_tokens = len(full_prompt.split()) if full_prompt else 0
                     completion_tokens = len(response_text.split()) if response_text else 0
                     usage_meta = None
-                await insert_llm_log(
-                    conn,
-                    submission_id=submission_id,
-                    tenant_code=tenant_code,
-                    model_name=resolved_model or settings.OPENROUTER_MODEL,
-                    analysis_type=analysis_type,
-                    prompt_version_id=prompt_version_id,
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    status="failed",
-                    error_message=str(e),
-                    meta_data=usage_meta,
-                )
+                async with db.pool.acquire() as conn:
+                    await insert_llm_log(
+                        conn,
+                        submission_id=submission_id,
+                        tenant_code=tenant_code,
+                        model_name=resolved_model or settings.OPENROUTER_MODEL,
+                        analysis_type=analysis_type,
+                        prompt_version_id=prompt_version_id,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        status="failed",
+                        error_message=str(e),
+                        meta_data=usage_meta,
+                    )
             except Exception as log_err:
                 logger.error(f"[Thematic Pipeline] Failed to log batched LLM failure to llm_logs: {log_err}")
         items_by_index = {}  # every pending item falls through to "Others" below
 
-    # --- Step 9: Finalize each pending item using its grouped classified_data entries ---
+    # --- Step 9: Finalize each pending item using its grouped classified_data entries.
+    # Own connection scope — acquired fresh now that the LLM call (if any) has returned.
     results = []
-    for idx, pending in enumerate(pending_items):
-        statement = pending["statement"]
-        statement_type = pending["statement_type"]
-        is_discussion = pending["is_discussion"]
-        best_similarity = pending["best_similarity"]
-        diagnostics = pending["diagnostics"]
+    async with db.pool.acquire() as conn:
+        for idx, pending in enumerate(pending_items):
+            statement = pending["statement"]
+            statement_type = pending["statement_type"]
+            is_discussion = pending["is_discussion"]
+            best_similarity = pending["best_similarity"]
+            diagnostics = pending["diagnostics"]
 
-        result = {
-            "statement": statement,
-            "category_type": None,
-            "theme_id": None,
-            "similarity_score": best_similarity,
-            "confidence_score": None,
-            "diagnostics": diagnostics,
-        }
+            result = {
+                "statement": statement,
+                "category_type": None,
+                "theme_id": None,
+                "similarity_score": best_similarity,
+                "confidence_score": None,
+                "diagnostics": diagnostics,
+            }
 
-        resolved_items = items_by_index.get(idx, [])
-        llm_confidence = None
-        llm_justification = None
-        qualifying_llm = []
+            resolved_items = items_by_index.get(idx, [])
+            llm_confidence = None
+            llm_justification = None
+            qualifying_llm = []
 
-        if resolved_items:
-            best_item = max(resolved_items, key=lambda x: x["confidence_score"])
-            llm_confidence = best_item["confidence_score"]
-            llm_justification = best_item["justification"]
-            qualifying_llm = _finalize_qualifying_themes(resolved_items, is_discussion)
+            if resolved_items:
+                best_item = max(resolved_items, key=lambda x: x["confidence_score"])
+                llm_confidence = best_item["confidence_score"]
+                llm_justification = best_item["justification"]
+                qualifying_llm = _finalize_qualifying_themes(resolved_items, is_discussion)
 
-        result["confidence_score"] = llm_confidence
-        diagnostics["llm_fallback"]["confidence_score"] = llm_confidence
-        # Complete raw LLM response for this batch call, stored on every statement that
-        # went through the fallback (not just the entries that ended up qualifying) so
-        # the full context is available for audit/debugging from any one row.
-        if llm_result is not None:
-            diagnostics["llm_fallback"]["complete_llm_response"] = llm_result
-        elif batch_error_message is not None:
-            diagnostics["llm_fallback"]["error"] = batch_error_message
+            result["confidence_score"] = llm_confidence
+            diagnostics["llm_fallback"]["confidence_score"] = llm_confidence
+            # Complete raw LLM response for this batch call, stored on every statement that
+            # went through the fallback (not just the entries that ended up qualifying) so
+            # the full context is available for audit/debugging from any one row.
+            if llm_result is not None:
+                diagnostics["llm_fallback"]["complete_llm_response"] = llm_result
+            elif batch_error_message is not None:
+                diagnostics["llm_fallback"]["error"] = batch_error_message
 
-        if qualifying_llm:
-            diagnostics["llm_fallback"]["passed"] = True
-            is_multi = len(qualifying_llm) > 1
-            result["category_type"] = "Standard"
-            result["theme_id"] = qualifying_llm[0]["theme_id"]
-            result["matched_themes"] = [
-                {"theme_id": item["theme_id"], "confidence_score": item["confidence_score"]}
-                for item in qualifying_llm
-            ]
+            if qualifying_llm:
+                diagnostics["llm_fallback"]["passed"] = True
+                is_multi = len(qualifying_llm) > 1
+                result["category_type"] = "Standard"
+                result["theme_id"] = qualifying_llm[0]["theme_id"]
+                result["matched_themes"] = [
+                    {"theme_id": item["theme_id"], "confidence_score": item["confidence_score"]}
+                    for item in qualifying_llm
+                ]
 
-            for item in qualifying_llm:
+                for item in qualifying_llm:
+                    await insert_analysis_result(
+                        conn,
+                        submission_id=submission_id,
+                        tenant_code=tenant_code,
+                        theme_id=item["theme_id"],
+                        analysis_type="theme",
+                        statements=statement,
+                        statement_type=statement_type,
+                        category_type="Standard",
+                        confidence_score=item["confidence_score"],
+                        similarity_score=best_similarity,
+                        justification=item["justification"],
+                        multi_theme_mapped=is_multi,
+                        meta_data=diagnostics,
+                    )
+
+                theme_names = [theme_id_to_info.get(item["theme_id"], {}).get("name", "?") for item in qualifying_llm]
+                logger.info(
+                    f"LLM match{'es' if is_multi else ''} (batched): '{statement[:60]}...' → {theme_names} "
+                    f"(conf={[round(item['confidence_score'], 2) for item in qualifying_llm]})"
+                )
+            else:
+                # Others — vague, off-taxonomy, low confidence, or the batch call failed entirely
+                result["category_type"] = "Others"
                 await insert_analysis_result(
                     conn,
                     submission_id=submission_id,
                     tenant_code=tenant_code,
-                    theme_id=item["theme_id"],
+                    theme_id=None,
                     analysis_type="theme",
                     statements=statement,
                     statement_type=statement_type,
-                    category_type="Standard",
-                    confidence_score=item["confidence_score"],
+                    category_type="Others",
+                    confidence_score=llm_confidence,
                     similarity_score=best_similarity,
-                    justification=item["justification"],
-                    multi_theme_mapped=is_multi,
+                    justification=llm_justification,
                     meta_data=diagnostics,
                 )
+                logger.info(f"Statement marked Others (low confidence, batched): {statement[:80]}...")
 
-            theme_names = [theme_id_to_info.get(item["theme_id"], {}).get("name", "?") for item in qualifying_llm]
-            logger.info(
-                f"LLM match{'es' if is_multi else ''} (batched): '{statement[:60]}...' → {theme_names} "
-                f"(conf={[round(item['confidence_score'], 2) for item in qualifying_llm]})"
-            )
-        else:
-            # Others — vague, off-taxonomy, low confidence, or the batch call failed entirely
-            result["category_type"] = "Others"
-            await insert_analysis_result(
-                conn,
-                submission_id=submission_id,
-                tenant_code=tenant_code,
-                theme_id=None,
-                analysis_type="theme",
-                statements=statement,
-                statement_type=statement_type,
-                category_type="Others",
-                confidence_score=llm_confidence,
-                similarity_score=best_similarity,
-                justification=llm_justification,
-                meta_data=diagnostics,
-            )
-            logger.info(f"Statement marked Others (low confidence, batched): {statement[:80]}...")
-
-        results.append(result)
+            results.append(result)
 
     return results
 
@@ -717,35 +743,36 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                 else:
                     pending_items.append(pending_item)
 
-        if pending_items:
-            fallback_results = await _run_batched_llm_fallback(
-                conn=conn,
-                pending_items=pending_items,
-                approved_themes=approved_themes,
-                theme_id_to_info=theme_id_to_info,
-                submission_id=submission_id,
-                tenant_code=tenant_code,
-                analysis_type=analysis_type,
-                resolved_model=resolved_model,
-                resolved_max_tokens=resolved_max_tokens,
-                resolved_timeout=resolved_timeout,
-            )
-            all_results.extend(fallback_results)
+    # conn released above — _run_batched_llm_fallback manages its own connection
+    # scopes internally so no pool connection is held idle during its LLM call.
+    if pending_items:
+        fallback_results = await _run_batched_llm_fallback(
+            pending_items=pending_items,
+            approved_themes=approved_themes,
+            theme_id_to_info=theme_id_to_info,
+            submission_id=submission_id,
+            tenant_code=tenant_code,
+            analysis_type=analysis_type,
+            resolved_model=resolved_model,
+            resolved_max_tokens=resolved_max_tokens,
+            resolved_timeout=resolved_timeout,
+        )
+        all_results.extend(fallback_results)
 
-        # Summary
-        quality_counts = {}
-        multi_theme_statement_count = 0
-        for r in all_results:
-            q = r.get("category_type", "unknown")
-            quality_counts[q] = quality_counts.get(q, 0) + 1
-            if len(r.get("matched_themes") or []) > 1:
-                multi_theme_statement_count += 1
+    # Summary
+    quality_counts = {}
+    multi_theme_statement_count = 0
+    for r in all_results:
+        q = r.get("category_type", "unknown")
+        quality_counts[q] = quality_counts.get(q, 0) + 1
+        if len(r.get("matched_themes") or []) > 1:
+            multi_theme_statement_count += 1
 
-        return {
-            "status": "success",
-            "total_statements": len(all_results),
-            "quality_breakdown": quality_counts,
-            "multi_theme_statement_count": multi_theme_statement_count,
-            "warnings": warnings,
-            "results": all_results,
-        }
+    return {
+        "status": "success",
+        "total_statements": len(all_results),
+        "quality_breakdown": quality_counts,
+        "multi_theme_statement_count": multi_theme_statement_count,
+        "warnings": warnings,
+        "results": all_results,
+    }

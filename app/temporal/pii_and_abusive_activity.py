@@ -73,155 +73,163 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
     if not target_columns:
         return {"status": "skipped", "reason": "no columns specified"}
 
-    async with db.pool.acquire() as conn:
-        # Step 1. Update the status in submissions to processing
-        from app.database.operations import update_submission_status
-        await update_submission_status(conn, submission_id, tenant_code, "processing")
+    from app.database.operations import update_submission_status
 
-        prompt_version_id = None
-        full_prompt = ""
-        response_text = ""
-        usage = {}
+    prompt_version_id = None
+    full_prompt = ""
+    response_text = ""
+    usage = {}
 
-        try:
+    try:
+        # --- Phase 1: read submission payload + prompt, mark processing. Own
+        # connection scope — released before the timeout-bound LLM call below, so a
+        # pool connection isn't held idle for the whole duration of that call.
+        async with db.pool.acquire() as conn:
+            # Step 1. Update the status in submissions to processing
+            await update_submission_status(conn, submission_id, tenant_code, "processing")
+
             # Get the submission type and payload
             sub_type, payload = await get_submission_type_and_payload(conn, submission_id, tenant_code)
-            
-            # Step 2. Get the prompt and columns, make the llm api call
+
+            # Step 2. Get the prompt
             prompt_data = await _get_pii_and_abusive_prompt(conn, analysis_type)
-            prompt_version_id = str(prompt_data["id"])
-            system_prompt_tmpl = prompt_data["system_prompt"]
-            user_prompt_tmpl = prompt_data["user_prompt"]
 
-            # Replace {columns} in system prompt
-            system_prompt = system_prompt_tmpl.replace("{columns}", json.dumps(target_columns))
+        prompt_version_id = str(prompt_data["id"])
+        system_prompt_tmpl = prompt_data["system_prompt"]
+        user_prompt_tmpl = prompt_data["user_prompt"]
 
-            # Prepare the user prompt input (dictionary mapping column -> raw value).
-            # Discussion columns (challenges/solutions) are stored as TEXT[] and come
-            # back from asyncpg as a native list — embed it directly so the model sees
-            # a proper nested array (and is asked to return one masked entry per
-            # statement, per the prompt's list-input contract) rather than a flattened
-            # string.
-            input_text_dict = {}
-            column_statements: Dict[str, List[str]] = {}
-            for col in target_columns:
-                db_col = map_column_to_db_col(col, sub_type)
-                raw_value = payload.get(db_col) or ""
-                parsed_list = _parse_statement_list(raw_value)
-                if parsed_list is not None:
-                    column_statements[col] = parsed_list
-                    input_text_dict[col] = parsed_list
-                else:
-                    input_text_dict[col] = raw_value
+        # Replace {columns} in system prompt
+        system_prompt = system_prompt_tmpl.replace("{columns}", json.dumps(target_columns))
 
-            user_prompt = user_prompt_tmpl.replace("{{text}}", json.dumps(input_text_dict, ensure_ascii=False))
+        # Prepare the user prompt input (dictionary mapping column -> raw value).
+        # Discussion columns (challenges/solutions) are stored as TEXT[] and come
+        # back from asyncpg as a native list — embed it directly so the model sees
+        # a proper nested array (and is asked to return one masked entry per
+        # statement, per the prompt's list-input contract) rather than a flattened
+        # string.
+        input_text_dict = {}
+        column_statements: Dict[str, List[str]] = {}
+        for col in target_columns:
+            db_col = map_column_to_db_col(col, sub_type)
+            raw_value = payload.get(db_col) or ""
+            parsed_list = _parse_statement_list(raw_value)
+            if parsed_list is not None:
+                column_statements[col] = parsed_list
+                input_text_dict[col] = parsed_list
+            else:
+                input_text_dict[col] = raw_value
 
-            # Make the LLM API call
-            from app.services.llm import openrouter_chat_completion, split_llm_usage
-            full_prompt = f"{system_prompt}\n\n{user_prompt}"
+        user_prompt = user_prompt_tmpl.replace("{{text}}", json.dumps(input_text_dict, ensure_ascii=False))
 
-            response_text, usage = await asyncio.to_thread(
-                openrouter_chat_completion,
-                full_prompt, model=resolved_model, max_tokens=resolved_max_tokens, timeout=resolved_timeout,
-            )
+        # --- Phase 2: call the LLM — no DB connection held during this timeout-bound call.
+        from app.services.llm import openrouter_chat_completion, split_llm_usage
+        full_prompt = f"{system_prompt}\n\n{user_prompt}"
 
-            # Clean/parse LLM response
-            cleaned_response = response_text.strip()
-            if cleaned_response.startswith("```"):
-                lines = cleaned_response.splitlines()
-                if lines[0].startswith("```json") or lines[0].startswith("```"):
-                    lines = lines[1:]
-                if lines and lines[-1].strip() == "```":
-                    lines = lines[:-1]
-                cleaned_response = "\n".join(lines).strip()
+        response_text, usage = await asyncio.to_thread(
+            openrouter_chat_completion,
+            full_prompt, model=resolved_model, max_tokens=resolved_max_tokens, timeout=resolved_timeout,
+        )
 
-            try:
-                llm_response_dict = json.loads(cleaned_response)
-            except Exception as parse_err:
-                logger.error(f"Failed to parse LLM response JSON: {parse_err}\nRaw response:\n{response_text}\nCleaned response:\n{cleaned_response}")
-                raise parse_err
+        # Clean/parse LLM response
+        cleaned_response = response_text.strip()
+        if cleaned_response.startswith("```"):
+            lines = cleaned_response.splitlines()
+            if lines[0].startswith("```json") or lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            cleaned_response = "\n".join(lines).strip()
 
-            # Step 3 & 4. Store response in respective tables and update pii_masked, pii_masked_at, abusive_masked_at, meta_data
-            updated_fields = {}
-            pii_masked_at_list = []
-            abusive_masked_at_list = []
-            
-            for col in target_columns:
-                db_col = map_column_to_db_col(col, sub_type)
-                col_res = _get_case_insensitive_key(llm_response_dict, col)
+        try:
+            llm_response_dict = json.loads(cleaned_response)
+        except Exception as parse_err:
+            logger.error(f"Failed to parse LLM response JSON: {parse_err}\nRaw response:\n{response_text}\nCleaned response:\n{cleaned_response}")
+            raise parse_err
 
-                if col in column_statements:
-                    # List-valued column — expect one masked entry per input statement.
-                    original_statements = column_statements[col]
-                    if not isinstance(col_res, list):
-                        logger.warning(
-                            f"Expected a list response for column {col} (has {len(original_statements)} "
-                            f"statements) but got {type(col_res).__name__}; leaving column unmasked."
-                        )
+        # Step 3 & 4. Store response in respective tables and update pii_masked, pii_masked_at, abusive_masked_at, meta_data
+        updated_fields = {}
+        pii_masked_at_list = []
+        abusive_masked_at_list = []
+
+        for col in target_columns:
+            db_col = map_column_to_db_col(col, sub_type)
+            col_res = _get_case_insensitive_key(llm_response_dict, col)
+
+            if col in column_statements:
+                # List-valued column — expect one masked entry per input statement.
+                original_statements = column_statements[col]
+                if not isinstance(col_res, list):
+                    logger.warning(
+                        f"Expected a list response for column {col} (has {len(original_statements)} "
+                        f"statements) but got {type(col_res).__name__}; leaving column unmasked."
+                    )
+                    continue
+
+                masked_by_index: Dict[int, str] = {}
+                col_pii_found = False
+                col_abusive = False
+                for entry in col_res:
+                    if not isinstance(entry, dict):
                         continue
+                    idx = entry.get("statement_index")
+                    if not isinstance(idx, int) or not (0 <= idx < len(original_statements)):
+                        continue
+                    masked_text = entry.get("masked_text")
+                    masked_by_index[idx] = masked_text if masked_text is not None else original_statements[idx]
+                    if entry.get("pii_found"):
+                        col_pii_found = True
+                    if entry.get("abusive_language"):
+                        col_abusive = True
 
-                    masked_by_index: Dict[int, str] = {}
-                    col_pii_found = False
-                    col_abusive = False
-                    for entry in col_res:
-                        if not isinstance(entry, dict):
-                            continue
-                        idx = entry.get("statement_index")
-                        if not isinstance(idx, int) or not (0 <= idx < len(original_statements)):
-                            continue
-                        masked_text = entry.get("masked_text")
-                        masked_by_index[idx] = masked_text if masked_text is not None else original_statements[idx]
-                        if entry.get("pii_found"):
-                            col_pii_found = True
-                        if entry.get("abusive_language"):
-                            col_abusive = True
+                if len(masked_by_index) != len(original_statements):
+                    logger.warning(
+                        f"PII masking for column {col} returned {len(masked_by_index)} of "
+                        f"{len(original_statements)} statements; missing entries kept unmasked."
+                    )
 
-                    if len(masked_by_index) != len(original_statements):
-                        logger.warning(
-                            f"PII masking for column {col} returned {len(masked_by_index)} of "
-                            f"{len(original_statements)} statements; missing entries kept unmasked."
-                        )
+                # Never drop a statement: default any missing index back to its
+                # original (unmasked) text so the array length — and thematic
+                # classification's per-statement iteration downstream — stays intact.
+                # Assigned as a plain list (not json.dumps'd) — db_col is TEXT[],
+                # and asyncpg binds a native Python list directly, no encoding needed.
+                masked_list = [masked_by_index.get(i, original_statements[i]) for i in range(len(original_statements))]
+                updated_fields[db_col] = masked_list
+                if col_pii_found:
+                    pii_masked_at_list.append(col)
+                if col_abusive:
+                    abusive_masked_at_list.append(col)
 
-                    # Never drop a statement: default any missing index back to its
-                    # original (unmasked) text so the array length — and thematic
-                    # classification's per-statement iteration downstream — stays intact.
-                    # Assigned as a plain list (not json.dumps'd) — db_col is TEXT[],
-                    # and asyncpg binds a native Python list directly, no encoding needed.
-                    masked_list = [masked_by_index.get(i, original_statements[i]) for i in range(len(original_statements))]
-                    updated_fields[db_col] = masked_list
-                    if col_pii_found:
-                        pii_masked_at_list.append(col)
-                    if col_abusive:
-                        abusive_masked_at_list.append(col)
+            elif isinstance(col_res, dict):
+                masked_text = col_res.get("masked_text")
+                if masked_text is not None:
+                    updated_fields[db_col] = masked_text
 
-                elif isinstance(col_res, dict):
-                    masked_text = col_res.get("masked_text")
-                    if masked_text is not None:
-                        updated_fields[db_col] = masked_text
+                pii_found = col_res.get("pii_found", [])
+                abusive_language = col_res.get("abusive_language", False)
+                if pii_found:
+                    pii_masked_at_list.append(col)
+                if abusive_language:
+                    abusive_masked_at_list.append(col)
+            else:
+                logger.warning(f"Unexpected response structure for column {col}: {col_res}")
 
-                    pii_found = col_res.get("pii_found", [])
-                    abusive_language = col_res.get("abusive_language", False)
-                    if pii_found:
-                        pii_masked_at_list.append(col)
-                    if abusive_language:
-                        abusive_masked_at_list.append(col)
-                else:
-                    logger.warning(f"Unexpected response structure for column {col}: {col_res}")
- 
+        # --- Phase 3: persist results. Fresh connection scope, acquired only now
+        # that the LLM call has returned.
+        async with db.pool.acquire() as conn:
             table_name = "story_submissions" if sub_type == "story" else "discussion_submissions"
-            
+
             # Construct dynamic SET clauses for update query
             n = len(updated_fields)
             set_clauses = ["pii_masked = TRUE", f"pii_masked_at = ${n + 3}", f"abusive_masked_at = ${n + 4}", f"meta_data = ${n + 5}", "updated_at = now()"]
             for i, col in enumerate(updated_fields.keys()):
                 set_clauses.append(f"{col} = ${i+3}")
-                
+
             query = f"""
                 UPDATE {table_name}
                 SET {", ".join(set_clauses)}
                 WHERE submission_id = $1 AND tenant_code = $2
             """
-            
+
             values = list(updated_fields.values())
             await conn.execute(
                 query,
@@ -251,27 +259,28 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
             # Step 6. Update the status in submissions to success
             await update_submission_status(conn, submission_id, tenant_code, "success")
 
-            return {
-                "status": "success",
-                "updated_columns": list(updated_fields.keys()),
-                "pii_masked_at": pii_masked_at_list,
-                "abusive_masked_at": abusive_masked_at_list
-            }
+        return {
+            "status": "success",
+            "updated_columns": list(updated_fields.keys()),
+            "pii_masked_at": pii_masked_at_list,
+            "abusive_masked_at": abusive_masked_at_list
+        }
 
-        except Exception as e:
-            logger.error(f"PII and Abusive language detection failed: {e}")
-            try:
-                # Real usage is only available if the API call itself succeeded (e.g. a
-                # later JSON-parse failure) — fall back to a word-count estimate only
-                # when we never got a response to report actual billed tokens for.
-                if usage:
-                    from app.services.llm import split_llm_usage
-                    prompt_tokens, completion_tokens, usage_meta = split_llm_usage(usage)
-                else:
-                    prompt_tokens = len(full_prompt.split()) if full_prompt else 0
-                    completion_tokens = len(response_text.split()) if response_text else 0
-                    usage_meta = None
+    except Exception as e:
+        logger.error(f"PII and Abusive language detection failed: {e}")
+        try:
+            # Real usage is only available if the API call itself succeeded (e.g. a
+            # later JSON-parse failure) — fall back to a word-count estimate only
+            # when we never got a response to report actual billed tokens for.
+            if usage:
+                from app.services.llm import split_llm_usage
+                prompt_tokens, completion_tokens, usage_meta = split_llm_usage(usage)
+            else:
+                prompt_tokens = len(full_prompt.split()) if full_prompt else 0
+                completion_tokens = len(response_text.split()) if response_text else 0
+                usage_meta = None
 
+            async with db.pool.acquire() as conn:
                 await insert_llm_log(
                     conn,
                     submission_id,
@@ -285,9 +294,10 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
                     error_message=str(e),
                     meta_data=usage_meta
                 )
-            except Exception as log_err:
-                logger.error(f"Failed to log error to llm_logs: {log_err}")
 
-            # Update the status in submissions to failed
-            await update_submission_status(conn, submission_id, tenant_code, "failed")
-            raise e
+                # Update the status in submissions to failed
+                await update_submission_status(conn, submission_id, tenant_code, "failed")
+        except Exception as log_err:
+            logger.error(f"Failed to log error to llm_logs: {log_err}")
+
+        raise e
