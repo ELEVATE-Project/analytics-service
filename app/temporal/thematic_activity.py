@@ -389,8 +389,17 @@ async def _run_batched_llm_fallback(
         user_prompt = prompt_data["user_prompt"]
 
         themes_text = _build_themes_text(approved_themes)
-        statements_text = "\n".join(
-            f"[{idx}] {item['statement']}" for idx, item in enumerate(pending_items)
+        # Serialized as a JSON array (not newline-delimited "[n] text" lines) — a
+        # statement containing an embedded newline followed by something resembling
+        # "[n]" would otherwise be indistinguishable from a real index boundary and
+        # could corrupt the statement_index -> source statement mapping.
+        statements_text = json.dumps(
+            [
+                {"statement_index": idx, "statement": item["statement"]}
+                for idx, item in enumerate(pending_items)
+            ],
+            ensure_ascii=False,
+            indent=2,
         )
 
         user_prompt = user_prompt.replace("{{approved_themes}}", themes_text)
