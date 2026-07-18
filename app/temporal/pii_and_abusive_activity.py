@@ -71,6 +71,7 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
         prompt_version_id = None
         full_prompt = ""
         response_text = ""
+        usage = {}
 
         try:
             # Get the submission type and payload
@@ -94,10 +95,10 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
             user_prompt = user_prompt_tmpl.replace("{{text}}", json.dumps(input_text_dict, ensure_ascii=False))
 
             # Make the LLM API call
-            from app.services.llm import openrouter_chat_completion
+            from app.services.llm import openrouter_chat_completion, split_llm_usage
             full_prompt = f"{system_prompt}\n\n{user_prompt}"
-            
-            response_text = await asyncio.to_thread(
+
+            response_text, usage = await asyncio.to_thread(
                 openrouter_chat_completion,
                 full_prompt, model=resolved_model, max_tokens=resolved_max_tokens, timeout=resolved_timeout,
             )
@@ -167,8 +168,7 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
             )
 
             # Step 5. Update the llm_logs table
-            prompt_tokens = len(full_prompt.split())
-            completion_tokens = len(response_text.split())
+            prompt_tokens, completion_tokens, usage_meta = split_llm_usage(usage)
             await insert_llm_log(
                 conn,
                 submission_id,
@@ -179,6 +179,7 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
                 prompt_tokens,
                 completion_tokens,
                 "success",
+                meta_data=usage_meta or None,
             )
 
             # Step 6. Update the status in submissions to success
@@ -194,9 +195,17 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
         except Exception as e:
             logger.error(f"PII and Abusive language detection failed: {e}")
             try:
-                prompt_tokens = len(full_prompt.split()) if full_prompt else 0
-                completion_tokens = len(response_text.split()) if response_text else 0
-                
+                # Real usage is only available if the API call itself succeeded (e.g. a
+                # later JSON-parse failure) — fall back to a word-count estimate only
+                # when we never got a response to report actual billed tokens for.
+                if usage:
+                    from app.services.llm import split_llm_usage
+                    prompt_tokens, completion_tokens, usage_meta = split_llm_usage(usage)
+                else:
+                    prompt_tokens = len(full_prompt.split()) if full_prompt else 0
+                    completion_tokens = len(response_text.split()) if response_text else 0
+                    usage_meta = None
+
                 await insert_llm_log(
                     conn,
                     submission_id,
@@ -207,7 +216,8 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
                     prompt_tokens,
                     completion_tokens,
                     "failed",
-                    error_message=str(e)
+                    error_message=str(e),
+                    meta_data=usage_meta
                 )
             except Exception as log_err:
                 logger.error(f"Failed to log error to llm_logs: {log_err}")

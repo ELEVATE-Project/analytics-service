@@ -375,6 +375,7 @@ async def _run_batched_llm_fallback(
     prompt_version_id = None
     full_prompt = ""
     response_text = ""
+    usage: Dict[str, Any] = {}
     items_by_index: Dict[int, List[Dict[str, Any]]] = {}
     llm_result = None
     batch_error_message = None
@@ -396,8 +397,8 @@ async def _run_batched_llm_fallback(
 
         full_prompt = f"{system_prompt}\n\n{user_prompt}"
 
-        from app.services.llm import openrouter_chat_completion
-        response_text = await asyncio.to_thread(
+        from app.services.llm import openrouter_chat_completion, split_llm_usage
+        response_text, usage = await asyncio.to_thread(
             openrouter_chat_completion,
             full_prompt, model=resolved_model, max_tokens=resolved_max_tokens, timeout=resolved_timeout,
         )
@@ -455,6 +456,7 @@ async def _run_batched_llm_fallback(
                 "justification": item.get("justification"),
             })
 
+        prompt_tokens, completion_tokens, usage_meta = split_llm_usage(usage)
         await insert_llm_log(
             conn,
             submission_id=submission_id,
@@ -462,9 +464,10 @@ async def _run_batched_llm_fallback(
             model_name=resolved_model or settings.OPENROUTER_MODEL,
             analysis_type=analysis_type,
             prompt_version_id=prompt_version_id,
-            prompt_tokens=len(full_prompt.split()),
-            completion_tokens=len(response_text.split()),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
             status="success",
+            meta_data=usage_meta or None,
         )
 
     except Exception as e:
@@ -472,6 +475,15 @@ async def _run_batched_llm_fallback(
         batch_error_message = str(e)
         if prompt_version_id is not None:
             try:
+                # Real usage is only available if the API call itself succeeded (e.g. a
+                # later JSON-parse failure) — fall back to a word-count estimate only
+                # when we never got a response to report actual billed tokens for.
+                if usage:
+                    prompt_tokens, completion_tokens, usage_meta = split_llm_usage(usage)
+                else:
+                    prompt_tokens = len(full_prompt.split()) if full_prompt else 0
+                    completion_tokens = len(response_text.split()) if response_text else 0
+                    usage_meta = None
                 await insert_llm_log(
                     conn,
                     submission_id=submission_id,
@@ -479,10 +491,11 @@ async def _run_batched_llm_fallback(
                     model_name=resolved_model or settings.OPENROUTER_MODEL,
                     analysis_type=analysis_type,
                     prompt_version_id=prompt_version_id,
-                    prompt_tokens=len(full_prompt.split()) if full_prompt else 0,
-                    completion_tokens=len(response_text.split()) if response_text else 0,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
                     status="failed",
                     error_message=str(e),
+                    meta_data=usage_meta,
                 )
             except Exception as log_err:
                 logger.error(f"[Thematic Pipeline] Failed to log batched LLM failure to llm_logs: {log_err}")

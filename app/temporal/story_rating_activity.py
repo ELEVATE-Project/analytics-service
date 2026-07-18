@@ -190,9 +190,10 @@ async def story_rating_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         full_prompt = f"{system_prompt}\n\n{user_prompt}"
 
         response_text = ""
+        usage = {}
         try:
-            from app.services.llm import openrouter_chat_completion
-            response_text = await asyncio.to_thread(
+            from app.services.llm import openrouter_chat_completion, split_llm_usage
+            response_text, usage = await asyncio.to_thread(
                 openrouter_chat_completion, full_prompt, model=resolved_model, max_tokens=resolved_max_tokens, timeout=resolved_timeout,
             )
 
@@ -249,6 +250,7 @@ async def story_rating_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 },
             )
 
+            prompt_tokens, completion_tokens, usage_meta = split_llm_usage(usage)
             await insert_llm_log(
                 conn,
                 submission_id=submission_id,
@@ -256,9 +258,10 @@ async def story_rating_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 model_name=resolved_model,
                 analysis_type="story_rating",
                 prompt_version_id=prompt_version_id,
-                prompt_tokens=len(full_prompt.split()),
-                completion_tokens=len(response_text.split()),
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
                 status="success",
+                meta_data=usage_meta or None,
             )
 
             logger.info(f"{log_prefix} Story rating success - Tier: {tier}, Composite Score: {composite_score} (source: {source})")
@@ -267,6 +270,17 @@ async def story_rating_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as e:
             logger.error(f"{log_prefix} Story rating failed: {e}")
             try:
+                # Real usage is only available if the API call itself succeeded — fall
+                # back to a word-count estimate only when we never got a response to
+                # report actual billed tokens for.
+                if usage:
+                    from app.services.llm import split_llm_usage
+                    prompt_tokens, completion_tokens, usage_meta = split_llm_usage(usage)
+                else:
+                    prompt_tokens = len(full_prompt.split()) if full_prompt else 0
+                    completion_tokens = len(response_text.split()) if response_text else 0
+                    usage_meta = None
+
                 await insert_llm_log(
                     conn,
                     submission_id=submission_id,
@@ -274,10 +288,11 @@ async def story_rating_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                     model_name=resolved_model,
                     analysis_type="story_rating",
                     prompt_version_id=prompt_version_id,
-                    prompt_tokens=len(full_prompt.split()) if full_prompt else 0,
-                    completion_tokens=len(response_text.split()) if response_text else 0,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
                     status="failed",
                     error_message=str(e),
+                    meta_data=usage_meta,
                 )
             except Exception as log_err:
                 logger.error(f"{log_prefix} Failed to log error to llm_logs: {log_err}")
