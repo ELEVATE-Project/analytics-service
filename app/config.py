@@ -91,24 +91,42 @@ class Settings(BaseSettings):
             return v.replace("postgresql+asyncpg://", "postgresql://")
         return v
 
+    @field_validator("PROCESS_CONFIG_STORY", "PROCESS_CONFIG_DISCUSSION")
+    @classmethod
+    def validate_process_config_json(cls, v: str, info) -> str:
+        try:
+            parsed = json.loads(v)
+            if not isinstance(parsed, list):
+                raise ValueError(f"{info.field_name} must be a valid JSON array of process steps.")
+        except (json.JSONDecodeError, TypeError) as e:
+            raise ValueError(f"Invalid JSON configuration for {info.field_name}: {e}") from e
+        return v
+
     def get_process_config(self, submission_type: str) -> List[Dict[str, Any]]:
         """
         Dynamically returns the process list configuration based on submission type.
+        Raises ValueError if JSON parsing fails or if config is not a list.
         """
-        raw_config = ""
         normalized_type = submission_type.lower().strip()
         if "story" in normalized_type:
             raw_config = self.PROCESS_CONFIG_STORY
         elif "discussion" in normalized_type:
             raw_config = self.PROCESS_CONFIG_DISCUSSION
         else:
-            # Fallback/Default config
+            # Fallback/Default config for unknown submission type
             return []
 
         try:
-            return json.loads(raw_config)
-        except (json.JSONDecodeError, TypeError):
-            return []
+            parsed = json.loads(raw_config)
+            if not isinstance(parsed, list):
+                raise ValueError(
+                    f"Process configuration for submission type {submission_type!r} must be a list, got {type(parsed).__name__}"
+                )
+            return parsed
+        except (json.JSONDecodeError, TypeError) as e:
+            raise ValueError(
+                f"Failed to parse process configuration JSON for submission type {submission_type!r}: {e}"
+            ) from e
 
 # Singleton instance
 settings = Settings()
