@@ -22,7 +22,10 @@ class IngestionConsumer:
             "bootstrap.servers": settings.KAFKA_BOOTSTRAP_SERVERS,
             "group.id": settings.KAFKA_GROUP_ID,
             "auto.offset.reset": "earliest",
-            "enable.auto.commit": True,
+            # Manual commit (see start()) — commit only after process_message()
+            # has actually completed, so a crash mid-processing leaves the offset
+            # uncommitted and the message is redelivered rather than silently lost.
+            "enable.auto.commit": False,
         }
         self.consumer = None
         self.temporal_client = None
@@ -215,7 +218,17 @@ class IngestionConsumer:
                         f"Payload: {raw_payload!r}. Error: {e}",
                         exc_info=True,
                     )
-                
+
+                # Commit only now that processing has been attempted (succeeded, or
+                # failed and was logged above) — never before. If the process crashes
+                # inside process_message(), this line never runs, the offset stays
+                # uncommitted, and the message is redelivered on restart instead of
+                # being silently dropped.
+                try:
+                    await asyncio.to_thread(self.consumer.commit, msg, asynchronous=False)
+                except Exception as commit_err:
+                    logger.error(f"Failed to commit Kafka offset: {commit_err}", exc_info=True)
+
         except asyncio.CancelledError:
             logger.info("Kafka consumer loop cancelled.")
         finally:
