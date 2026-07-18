@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from confluent_kafka import Consumer, KafkaError, KafkaException
+from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 from confluent_kafka.admin import AdminClient, NewTopic
 from temporalio.client import Client
 
@@ -27,15 +27,18 @@ class IngestionConsumer:
             # uncommitted and the message is redelivered rather than silently lost.
             "enable.auto.commit": False,
         }
+        self.dlq_topic = settings.KAFKA_TOPIC_INGESTION_DLQ
         self.consumer = None
+        self.dlq_producer = None
         self.temporal_client = None
         self.running = False
 
     async def initialize(self):
         """
-        Connects database pool and caching the Temporal client.
+        Connects database pool, caches the Temporal client, and sets up the DLQ producer.
         """
         await db.connect()
+        self.dlq_producer = Producer({"bootstrap.servers": settings.KAFKA_BOOTSTRAP_SERVERS})
         try:
             logger.info(f"Initializing Temporal client on {settings.TEMPORAL_HOST}...")
             self.temporal_client = await Client.connect(settings.TEMPORAL_HOST)
@@ -90,27 +93,65 @@ class IngestionConsumer:
                 logger.info("Detected connection issue with Temporal. Resetting client to trigger reconnect on next message.")
                 self.temporal_client = None
 
+    async def _send_to_dlq(self, raw_payload: str, reason: str) -> None:
+        """
+        Publishes a malformed/invalid message to the dead-letter topic instead of
+        silently dropping it, so it can be inspected or replayed later after the
+        producer-side bug that caused it is fixed.
+        """
+        if not self.dlq_producer:
+            logger.error(f"DLQ producer not initialized; dropping invalid message. Reason: {reason}. Payload: {raw_payload!r}")
+            return
+
+        def _produce():
+            self.dlq_producer.produce(
+                self.dlq_topic,
+                value=raw_payload.encode("utf-8"),
+                headers=[("reason", reason.encode("utf-8"))],
+            )
+            self.dlq_producer.poll(0)
+
+        try:
+            await asyncio.to_thread(_produce)
+            logger.warning(f"Sent invalid message to DLQ topic '{self.dlq_topic}'. Reason: {reason}. Payload: {raw_payload!r}")
+        except Exception as e:
+            logger.error(
+                f"Failed to publish message to DLQ topic '{self.dlq_topic}': {e}. Original payload: {raw_payload!r}",
+                exc_info=True,
+            )
+
     async def process_message(self, raw_payload: str) -> None:
         """
         Processes a single deserialized Kafka message, executing DB changes and routing.
+        Invalid messages (bad JSON, wrong shape, missing/null required keys, unsupported
+        eventType) are routed to the DLQ topic instead of being silently dropped.
         """
         try:
             event = json.loads(raw_payload)
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse Kafka message JSON: {raw_payload!r}. Error: {e}")
+            await self._send_to_dlq(raw_payload, f"Invalid JSON: {e}")
             return
 
         if not isinstance(event, dict):
+            reason = f"Expected a JSON object, got {type(event).__name__}"
             logger.error(f"Invalid Kafka message shape: expected an object but received {type(event).__name__}: {raw_payload!r}")
+            await self._send_to_dlq(raw_payload, reason)
             return
 
         event_type = event.get("eventType", "create").lower().strip()
-        submission_id = str(event.get("submissionId"))
+        submission_id_raw = event.get("submissionId")
+        # Keep None as None here (rather than str(None) == "None", which is truthy and
+        # would silently bypass the null/missing check below) so a null or absent
+        # submissionId is correctly caught as invalid.
+        submission_id = str(submission_id_raw) if submission_id_raw is not None else None
         tenant_code = event.get("tenantCode")
         submission_type = event.get("submissionType")
 
         if not submission_id or not tenant_code:
+            reason = "Missing or null submissionId/tenantCode"
             logger.error(f"Invalid Kafka message format. Missing submissionId or tenantCode: {event}")
+            await self._send_to_dlq(raw_payload, reason)
             return
 
         logger.info(f"Processing event '{event_type}' for submission {submission_id} (tenant: {tenant_code})")
@@ -154,16 +195,16 @@ class IngestionConsumer:
                 await delete_submission(conn, submission_id, tenant_code)
             else:
                 logger.error(f"Unsupported Kafka eventType: {event_type}")
+                await self._send_to_dlq(raw_payload, f"Unsupported eventType: {event_type}")
 
-    async def _ensure_topic_exists(self) -> None:
-        """Create the configured Kafka topic if it does not already exist."""
+    async def _ensure_topics_exist(self, topics: list) -> None:
+        """Create the given Kafka topics if they do not already exist."""
         admin_client = AdminClient({"bootstrap.servers": settings.KAFKA_BOOTSTRAP_SERVERS})
-        topic = settings.KAFKA_TOPIC_INGESTION
 
         try:
             futures = await asyncio.to_thread(
                 admin_client.create_topics,
-                [NewTopic(topic, num_partitions=1, replication_factor=1)],
+                [NewTopic(t, num_partitions=1, replication_factor=1) for t in topics],
             )
             for name, future in futures.items():
                 try:
@@ -176,14 +217,14 @@ class IngestionConsumer:
                     else:
                         logger.warning(f"Could not create Kafka topic '{name}': {exc}")
         except Exception as exc:
-            logger.warning(f"Kafka admin client failed while ensuring topic '{topic}': {exc}")
+            logger.warning(f"Kafka admin client failed while ensuring topics {topics}: {exc}")
 
     async def start(self) -> None:
         """
         Starts the polling loop using confluent-kafka inside an asyncio executor thread.
         """
         await self.initialize()
-        await self._ensure_topic_exists()
+        await self._ensure_topics_exist([settings.KAFKA_TOPIC_INGESTION, self.dlq_topic])
 
         self.consumer = Consumer(self.consumer_conf)
         self.consumer.subscribe([settings.KAFKA_TOPIC_INGESTION])
@@ -235,6 +276,8 @@ class IngestionConsumer:
             self.running = False
             if self.consumer:
                 self.consumer.close()
+            if self.dlq_producer:
+                await asyncio.to_thread(self.dlq_producer.flush, 10)
             await db.disconnect()
             logger.info("Kafka consumer stopped.")
 

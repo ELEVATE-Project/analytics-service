@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     # Kafka Configuration
     KAFKA_BOOTSTRAP_SERVERS: str = Field(default="localhost:9092")
     KAFKA_TOPIC_INGESTION: str = Field(default="analytics.ingestion.raw")
+    KAFKA_TOPIC_INGESTION_DLQ: str = Field(default="analytics.ingestion.raw.dlq")
     KAFKA_GROUP_ID: str = Field(default="analytics-ingestion-group")
 
     # Database Configuration
