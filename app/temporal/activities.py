@@ -19,8 +19,6 @@ def map_column_to_db_col(col: str, sub_type: str) -> str:
         return "action_steps"
     return col
 
-
-
 @activity.defn
 async def update_status_activity(params: Dict[str, Any]) -> None:
     """
@@ -37,13 +35,20 @@ async def update_status_activity(params: Dict[str, Any]) -> None:
 
 
 @activity.defn
-async def fetch_pending_submissions_activity() -> List[Dict[str, Any]]:
+async def fetch_pending_submissions_activity(params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """
-    Retrieves all submissions currently in a 'pending' state and attaches their config-driven process steps.
+    Retrieves up to `limit` submissions currently in a 'pending' state (oldest first)
+    and attaches their config-driven process steps. Bounded by `limit` (default
+    settings.BATCH_SIZE) so a large pending queue is never loaded into memory in one
+    go — BatchProcessingWorkflow calls this repeatedly in chunks instead.
     """
+    limit = (params or {}).get("limit") or settings.BATCH_SIZE
+
     async with db.pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT submission_id, tenant_code, submission_type FROM submissions WHERE status = 'pending'"
+            "SELECT submission_id, tenant_code, submission_type FROM submissions "
+            "WHERE status = 'pending' ORDER BY created_at ASC LIMIT $1",
+            limit
         )
         results = []
         for row in rows:

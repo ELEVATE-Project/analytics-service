@@ -5,6 +5,7 @@ from temporalio import workflow
 
 with workflow.unsafe.imports_passed_through():
     from temporalio.common import RetryPolicy
+    from app.config import settings
     from app.temporal.activities import (
         update_status_activity,
         fetch_pending_submissions_activity
@@ -203,38 +204,78 @@ class BatchProcessingWorkflow:
     @workflow.run
     async def run(self) -> Dict[str, Any]:
         """
-        Runs batch execution for all pending submissions.
-        Retrieves pending records and executes child workflows in parallel.
+        Runs batch execution for all pending submissions, fetching and fanning out
+        child workflows in bounded chunks (settings.BATCH_SIZE) rather than loading
+        the entire pending queue into memory and launching all child workflows at
+        once — at a few thousand pending submissions, doing it unbounded risks OOM
+        on the worker and overwhelming the Temporal cluster with concurrent starts.
         """
-        # Fetch all pending submissions and their dynamic configurations
-        pending_list: List[Dict[str, Any]] = await workflow.execute_activity(
-            fetch_pending_submissions_activity,
-            start_to_close_timeout=timedelta(minutes=2),
-            retry_policy=RetryPolicy(maximum_attempts=2)
-        )
+        batch_size = settings.BATCH_SIZE
+        # Safety cap on chunks processed in a single run — if this is ever hit, the
+        # remainder is picked up by the next scheduled run rather than looping forever.
+        max_chunks = 1000
 
-        if not pending_list:
-            return {"processed_count": 0, "message": "No pending submissions found."}
+        total_processed = 0
+        total_success = 0
+        total_failed = 0
+        chunk_index = 0
 
-        # Fan-out child workflows to process submissions in parallel
-        child_tasks = []
-        for pending in pending_list:
-            child_tasks.append(
+        while True:
+            pending_list: List[Dict[str, Any]] = await workflow.execute_activity(
+                fetch_pending_submissions_activity,
+                {"limit": batch_size},
+                start_to_close_timeout=timedelta(minutes=2),
+                retry_policy=RetryPolicy(maximum_attempts=2)
+            )
+
+            if not pending_list:
+                break
+
+            chunk_index += 1
+
+            # Fan-out child workflows for this chunk only, then wait for all of them
+            # before fetching the next chunk (so we never hold more than batch_size
+            # rows or concurrent child workflows at a time).
+            child_tasks = [
                 workflow.execute_child_workflow(
                     ConfigDrivenProcessingWorkflow.run,
                     pending,
                     id=f"batch-child-{pending['submission_id']}-{pending['tenant_code']}"
                 )
+                for pending in pending_list
+            ]
+            results = await asyncio.gather(*child_tasks, return_exceptions=True)
+
+            success_count = sum(1 for r in results if not isinstance(r, Exception))
+            failed_count = len(results) - success_count
+
+            total_processed += len(pending_list)
+            total_success += success_count
+            total_failed += failed_count
+
+            workflow.logger.info(
+                f"BatchProcessingWorkflow chunk {chunk_index}: {len(pending_list)} submissions "
+                f"({success_count} succeeded, {failed_count} failed); running total {total_processed}."
             )
 
-        # Wait for all child workflows to complete
-        results = await asyncio.gather(*child_tasks, return_exceptions=True)
-        
-        success_count = sum(1 for r in results if not isinstance(r, Exception))
-        failed_count = len(results) - success_count
+            # A short chunk means the pending queue is drained
+            if len(pending_list) < batch_size:
+                break
+
+            if chunk_index >= max_chunks:
+                workflow.logger.warning(
+                    f"BatchProcessingWorkflow hit max_chunks={max_chunks} "
+                    f"({total_processed} submissions processed this run) — stopping early; "
+                    f"remaining pending submissions will be picked up on the next scheduled run."
+                )
+                break
+
+        if total_processed == 0:
+            return {"processed_count": 0, "message": "No pending submissions found."}
 
         return {
-            "processed_count": len(pending_list),
-            "success_count": success_count,
-            "failed_count": failed_count
+            "processed_count": total_processed,
+            "success_count": total_success,
+            "failed_count": total_failed,
+            "chunks": chunk_index,
         }

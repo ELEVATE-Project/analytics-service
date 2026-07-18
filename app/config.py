@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     # Orchestration Mode: 'real-time' or 'batch'
     PROCESSING_MODE: str = Field(default="real-time")
     BATCH_SCHEDULE_CRON: str = Field(default="0 20 * * *")
+    # Max pending submissions fetched/fanned-out per chunk in BatchProcessingWorkflow —
+    # keeps memory and concurrent child-workflow count bounded regardless of queue size.
+    BATCH_SIZE: int = Field(default=100)
 
     # Optional full schema reset on startup
     RESET_DB: bool = Field(default=False)
