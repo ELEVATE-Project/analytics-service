@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     BATCH_SCHEDULE_CRON: str = Field(default="0 20 * * *")
     # Max pending submissions fetched/fanned-out per chunk in BatchProcessingWorkflow —
     # keeps memory and concurrent child-workflow count bounded regardless of queue size.
-    BATCH_SIZE: int = Field(default=100)
+    BATCH_SIZE: int = Field(default=100, gt=0)
 
     # Deployment environment — defaults to the safe option ('production') so a
     # missing/unset value never accidentally allows destructive operations like
@@ -53,9 +53,20 @@ class Settings(BaseSettings):
         default='[{"name": "pii_and_abusive_language_detection", "columns": ["challenges"]}, {"name": "thematic_classification", "columns": ["challenges"]}]'
     )
 
+    # Kafka ingestion-time field validation schema (JSON strings loaded from env).
+    # One entry per (create/update/delete) event type: "required" is a list of
+    # dot-notation paths (e.g. "tags.state", "data.pdfUrls.original") that must be
+    # present and non-empty; "optional" is informational only. "update" additionally
+    # sets newValuesNoEmpty so every key actually present in newValues must be non-empty.
+    STORY_KAFKA_PROCESS_SCHEMA: str = Field(
+        default='{"create": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt", "tags.state", "tags.district", "tags.organization", "tags.programId", "tags.programName", "tags.leaderCategoryId", "tags.leaderCategoryName", "data.title", "data.designation", "data.submissionDate", "data.pdfUrls.original", "data.pdfUrls.masked", "data.transcriptLink", "data.challenges", "data.objective", "data.actionSteps", "data.impact", "data.duration", "data.blurb", "data.content"], "optional": ["data.imageUrls"]}, "update": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"], "newValuesNoEmpty": true}, "delete": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"]}}'
+    )
+    DISCUSSION_KAFKA_PROCESS_SCHEMA: str = Field(
+        default='{"create": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt", "tags.state", "tags.district", "tags.organization", "tags.programId", "tags.programName", "tags.leaderCategoryId", "tags.leaderCategoryName", "data.title", "data.designation", "data.submissionDate", "data.pdfUrls.original", "data.pdfUrls.masked", "data.transcriptLink", "data.challenges", "data.solutions", "data.participantsData"], "optional": ["data.author", "data.language", "data.imageUrls"]}, "update": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"], "newValuesNoEmpty": true}, "delete": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"]}}'
+    )
+
     # Thematic Classification Configuration
     MINIMUM_THEME_WORD_COUNT: int = Field(default=5)
-    THEMATIC_STATEMENT_DELIMITER: str = Field(default="|")
     EMBEDDING_MODEL_NAME: str = Field(default="all-MiniLM-L6-v2")
     SIMILARITY_SCORE_THRESHOLD: float = Field(default=0.65)
     LLM_CONFIDENCE_SCORE_THRESHOLD: float = Field(default=0.8)
@@ -102,6 +113,19 @@ class Settings(BaseSettings):
             raise ValueError(f"Invalid JSON configuration for {info.field_name}: {e}") from e
         return v
 
+    @field_validator("STORY_KAFKA_PROCESS_SCHEMA", "DISCUSSION_KAFKA_PROCESS_SCHEMA")
+    @classmethod
+    def validate_kafka_ingestion_schema_json(cls, v: str, info) -> str:
+        try:
+            parsed = json.loads(v)
+            if not isinstance(parsed, dict) or not {"create", "update", "delete"} <= parsed.keys():
+                raise ValueError(
+                    f"{info.field_name} must be a JSON object with 'create', 'update', and 'delete' keys."
+                )
+        except (json.JSONDecodeError, TypeError) as e:
+            raise ValueError(f"Invalid JSON configuration for {info.field_name}: {e}") from e
+        return v
+
     def get_process_config(self, submission_type: str) -> List[Dict[str, Any]]:
         """
         Dynamically returns the process list configuration based on submission type.
@@ -126,6 +150,32 @@ class Settings(BaseSettings):
         except (json.JSONDecodeError, TypeError) as e:
             raise ValueError(
                 f"Failed to parse process configuration JSON for submission type {submission_type!r}: {e}"
+            ) from e
+
+    def get_kafka_ingestion_schema(self, submission_type: str) -> Dict[str, Any]:
+        """
+        Dynamically returns the ingestion-time required-fields schema for the given
+        submission type. Raises ValueError if JSON parsing fails, if the config is
+        not a dict, or if the submission type doesn't match 'story' or 'discussion'.
+        """
+        normalized_type = submission_type.lower().strip() if submission_type else ""
+        if "story" in normalized_type:
+            raw_schema = self.STORY_KAFKA_PROCESS_SCHEMA
+        elif "discussion" in normalized_type:
+            raw_schema = self.DISCUSSION_KAFKA_PROCESS_SCHEMA
+        else:
+            raise ValueError(f"No Kafka ingestion schema defined for submission type {submission_type!r}")
+
+        try:
+            parsed = json.loads(raw_schema)
+            if not isinstance(parsed, dict):
+                raise ValueError(
+                    f"Kafka ingestion schema for submission type {submission_type!r} must be a dict, got {type(parsed).__name__}"
+                )
+            return parsed
+        except (json.JSONDecodeError, TypeError) as e:
+            raise ValueError(
+                f"Failed to parse Kafka ingestion schema JSON for submission type {submission_type!r}: {e}"
             ) from e
 
 # Singleton instance
