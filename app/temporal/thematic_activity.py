@@ -237,11 +237,11 @@ async def _run_local_classification(
             category_type="Unknown/Unclear",
             meta_data=diagnostics,
         )
-        logger.info(f"[Thematic Pipeline] -> FAILED word-count/garbage gate. Marked Unknown/Unclear.")
+        logger.info("[Thematic Pipeline] -> FAILED word-count/garbage gate. Marked Unknown/Unclear.")
         return result, None
 
     diagnostics["word_count_check"]["passed"] = True
-    logger.info(f"[Thematic Pipeline] -> PASSED word-count/garbage gate.")
+    logger.info("[Thematic Pipeline] -> PASSED word-count/garbage gate.")
 
     # --- Step 3: Safety check ---
     logger.info(f"[Thematic Pipeline] Step 3: Checking statement safety (statement-level PII tag scan + column-level abuse flag for {statement_type})")
@@ -280,11 +280,11 @@ async def _run_local_classification(
         return result, None
 
     diagnostics["safety_check"]["passed"] = True
-    logger.info(f"[Thematic Pipeline] -> PASSED safety check.")
+    logger.info("[Thematic Pipeline] -> PASSED safety check.")
 
     # --- Step 5 (themes already fetched) ---
     # --- Step 6: Local embedding classification ---
-    logger.info(f"[Thematic Pipeline] Step 6: Comparing against approved themes using local SentenceTransformer embeddings")
+    logger.info("[Thematic Pipeline] Step 6: Comparing against approved themes using local SentenceTransformer embeddings")
     theme_similarities = get_theme_similarities(statement, theme_vectors)
     best_theme_id, best_similarity = theme_similarities[0] if theme_similarities else (None, 0.0)
     result["similarity_score"] = best_similarity
