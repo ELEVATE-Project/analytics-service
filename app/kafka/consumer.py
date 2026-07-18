@@ -152,15 +152,29 @@ class IngestionConsumer:
         producer-side bug that caused it is fixed. When available, submissionId/
         tenantCode/sessionId are attached as extra headers (and logged) so the
         message can be found directly, without hashing payloads.
+
+        Raises if the producer isn't initialized, or if delivery can't be confirmed
+        within the flush timeout — callers (and start()'s offset-commit logic) must
+        treat this message as NOT durably handled unless this returns without
+        raising, otherwise a failed/unconfirmed DLQ publish plus a committed offset
+        would lose the message with no trace of it anywhere.
         """
         identifiers = identifiers or {}
         id_str = _format_identifiers(identifiers)
 
         if not self.dlq_producer:
-            logger.error(f"DLQ producer not initialized; dropping invalid message. Reason: {reason}. Identifiers: {id_str}. Payload: {_payload_fingerprint(raw_payload)}")
-            return
+            raise RuntimeError(
+                f"DLQ producer not initialized; cannot durably route invalid message. "
+                f"Reason: {reason}. Identifiers: {id_str}"
+            )
 
         def _produce():
+            delivery_error = {}
+
+            def _on_delivery(err, _msg):
+                if err is not None:
+                    delivery_error["error"] = err
+
             headers = [("reason", reason.encode("utf-8"))]
             for key, value in identifiers.items():
                 if value is not None:
@@ -169,17 +183,21 @@ class IngestionConsumer:
                 self.dlq_topic,
                 value=raw_payload.encode("utf-8"),
                 headers=headers,
+                callback=_on_delivery,
             )
-            self.dlq_producer.poll(0)
+            # flush() polls until the delivery callback fires (or the timeout
+            # elapses) — only this guarantees we know the outcome before returning,
+            # unlike poll(0) which just services already-completed callbacks.
+            remaining = self.dlq_producer.flush(10)
+            if remaining > 0:
+                raise TimeoutError(
+                    f"Timed out waiting for DLQ delivery confirmation ({remaining} message(s) still in-flight)"
+                )
+            if "error" in delivery_error:
+                raise RuntimeError(f"DLQ delivery failed: {delivery_error['error']}")
 
-        try:
-            await asyncio.to_thread(_produce)
-            logger.warning(f"Sent invalid message to DLQ topic '{self.dlq_topic}'. Reason: {reason}. Identifiers: {id_str}. Payload: {_payload_fingerprint(raw_payload)}")
-        except Exception as e:
-            logger.error(
-                f"Failed to publish message to DLQ topic '{self.dlq_topic}': {e}. Identifiers: {id_str}. Original payload: {_payload_fingerprint(raw_payload)}",
-                exc_info=True,
-            )
+        await asyncio.to_thread(_produce)
+        logger.warning(f"Sent invalid message to DLQ topic '{self.dlq_topic}'. Reason: {reason}. Identifiers: {id_str}. Payload: {_payload_fingerprint(raw_payload)}")
 
     def _validate_ingestion_schema(self, event: dict, submission_type: str, event_type: str) -> list:
         """
@@ -353,22 +371,28 @@ class IngestionConsumer:
                 raw_payload = msg.value().decode("utf-8")
                 try:
                     await self.process_message(raw_payload)
+                    processed_ok = True
                 except Exception as e:
+                    processed_ok = False
                     logger.error(
-                        f"Unhandled error processing Kafka message, skipping it. "
+                        f"Unhandled error processing Kafka message — leaving offset "
+                        f"uncommitted so it is retried. "
                         f"Payload: {_payload_fingerprint(raw_payload)}. Error: {e}",
                         exc_info=True,
                     )
 
-                # Commit only now that processing has been attempted (succeeded, or
-                # failed and was logged above) — never before. If the process crashes
-                # inside process_message(), this line never runs, the offset stays
-                # uncommitted, and the message is redelivered on restart instead of
+                # Commit only when process_message() actually completed without
+                # raising — that covers both a successful DB/workflow write AND a
+                # confirmed DLQ delivery (process_message()'s DLQ paths call
+                # _send_to_dlq(), which itself raises on unconfirmed/failed delivery).
+                # If it raised for any other reason, the offset stays uncommitted and
+                # the message is redelivered on the next poll/restart instead of
                 # being silently dropped.
-                try:
-                    await asyncio.to_thread(self.consumer.commit, msg, asynchronous=False)
-                except Exception as commit_err:
-                    logger.error(f"Failed to commit Kafka offset: {commit_err}", exc_info=True)
+                if processed_ok:
+                    try:
+                        await asyncio.to_thread(self.consumer.commit, msg, asynchronous=False)
+                    except Exception as commit_err:
+                        logger.error(f"Failed to commit Kafka offset: {commit_err}", exc_info=True)
 
         except asyncio.CancelledError:
             logger.info("Kafka consumer loop cancelled.")
