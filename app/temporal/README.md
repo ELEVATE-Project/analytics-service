@@ -38,8 +38,8 @@ graph TD
 ### Step 1: Extract Text & Read Config
 Retrieves the submission text from target columns config (configured in `.env` under `PROCESS_CONFIG_STORY` and `PROCESS_CONFIG_DISCUSSION`).
 
-### Step 1b: Discussion Statement Splitting
-If the submission is a discussion, the column text is split by `THEMATIC_STATEMENT_DELIMITER` (default: `|`) into individual statements, allowing each segment to be analyzed independently.
+### Step 1b: Discussion Statement Extraction
+Discussion columns (`challenges`, `solutions`) are stored as `TEXT[]` — each array element is already a discrete statement and is analyzed independently, with no delimiter splitting or JSON parsing involved. This avoids the ambiguity of delimiter-splitting, since a statement could legitimately contain any given delimiter character itself.
 
 ### Step 2: Word-Count & Garbage Gate (`Unknown/Unclear`)
 Before classifying, statements are evaluated using fast, local heuristics to skip non-meaningful content:
@@ -89,7 +89,6 @@ Key parameters loaded from environment variables (`.env`):
 | Variable | Default | Purpose |
 | :--- | :--- | :--- |
 | `MINIMUM_THEME_WORD_COUNT` | `5` | Words threshold below which statements fail Step 2. |
-| `THEMATIC_STATEMENT_DELIMITER` | `\|` | Character used to split discussion rows into multiple statements. |
 | `EMBEDDING_MODEL_NAME` | `all-MiniLM-L6-v2` | Local model name for cosine similarity checks. |
 | `SIMILARITY_SCORE_THRESHOLD` | `0.65` | Cosine similarity threshold for Step 6. |
 | `LLM_CONFIDENCE_SCORE_THRESHOLD` | `0.8` | LLM confidence threshold for Step 8. |

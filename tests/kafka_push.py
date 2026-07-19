@@ -133,10 +133,15 @@ async def push_via_mock(payload: str) -> None:
     from app.database.db import db  # noqa: PLC0415
 
     consumer = IngestionConsumer()
-    await consumer.initialize()   # connects DB pool + Temporal client
+    await consumer.initialize()   # connects DB pool + Temporal client + DLQ producer
     try:
         await consumer.process_message(payload)
     finally:
+        # Producer.produce() only enqueues locally — without an explicit flush,
+        # this short-lived script can exit before librdkafka's background thread
+        # actually sends a DLQ message, silently losing it.
+        if consumer.dlq_producer:
+            await asyncio.to_thread(consumer.dlq_producer.flush, 10)
         await db.disconnect()
 
 
