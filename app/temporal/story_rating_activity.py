@@ -236,43 +236,47 @@ async def story_rating_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         overall_summary = result["overall_summary"]
 
         # --- Phase 4: persist results. Fresh connection scope, acquired only now
-        # that the LLM call has returned.
+        # that the LLM call has returned. The delete+insert+log sequence is wrapped
+        # in one transaction so a crash mid-sequence can't leave the submission with
+        # its old ranking deleted but no new one written (or a ranking with no
+        # matching llm_logs entry) — it's all-or-nothing.
         async with db.pool.acquire() as conn:
-            # Clear any previous rating for this submission before writing the new one
-            await conn.execute(
-                "DELETE FROM ranking WHERE submission_id = $1 AND tenant_code = $2",
-                submission_id, tenant_code
-            )
-            await insert_ranking_result(
-                conn,
-                submission_id=submission_id,
-                tenant_code=tenant_code,
-                criteria_data=criteria_data,
-                composite_score=composite_score,
-                tier=tier,
-                overall_summary=overall_summary,
-                meta_data={
-                    "content_source": source,
-                    "pdf_url": pdf_url,
-                    "llm_response": result,
-                    "total_pdf_text_chars": total_pdf_text_chars,
-                    "max_pdf_text_chars": settings.MAX_PDF_TEXT_CHARS,
-                },
-            )
+            async with conn.transaction():
+                # Clear any previous rating for this submission before writing the new one
+                await conn.execute(
+                    "DELETE FROM ranking WHERE submission_id = $1 AND tenant_code = $2",
+                    submission_id, tenant_code
+                )
+                await insert_ranking_result(
+                    conn,
+                    submission_id=submission_id,
+                    tenant_code=tenant_code,
+                    criteria_data=criteria_data,
+                    composite_score=composite_score,
+                    tier=tier,
+                    overall_summary=overall_summary,
+                    meta_data={
+                        "content_source": source,
+                        "pdf_url": pdf_url,
+                        "llm_response": result,
+                        "total_pdf_text_chars": total_pdf_text_chars,
+                        "max_pdf_text_chars": settings.MAX_PDF_TEXT_CHARS,
+                    },
+                )
 
-            prompt_tokens, completion_tokens, usage_meta = split_llm_usage(usage)
-            await insert_llm_log(
-                conn,
-                submission_id=submission_id,
-                tenant_code=tenant_code,
-                model_name=resolved_model,
-                analysis_type="story_rating",
-                prompt_version_id=prompt_version_id,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                status="success",
-                meta_data=usage_meta or None,
-            )
+                prompt_tokens, completion_tokens, usage_meta = split_llm_usage(usage)
+                await insert_llm_log(
+                    conn,
+                    submission_id=submission_id,
+                    tenant_code=tenant_code,
+                    model_name=resolved_model,
+                    analysis_type="story_rating",
+                    prompt_version_id=prompt_version_id,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    status="success",
+                    meta_data=usage_meta or None,
+                )
 
         logger.info(f"{log_prefix} Story rating success - Tier: {tier}, Composite Score: {composite_score} (source: {source})")
         return {"status": "success", "tier": tier, "composite_score": composite_score, "content_source": source}
