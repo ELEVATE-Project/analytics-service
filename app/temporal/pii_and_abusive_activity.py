@@ -143,7 +143,7 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
         try:
             llm_response_dict = json.loads(cleaned_response)
         except Exception as parse_err:
-            logger.error(f"Failed to parse LLM response JSON: {parse_err}\nRaw response:\n{response_text}\nCleaned response:\n{cleaned_response}")
+            logger.error(f"Failed to parse LLM response JSON: {parse_err} (response length={len(response_text)})")
             raise parse_err
 
         # Step 3 & 4. Store response in respective tables and update pii_masked, pii_masked_at, abusive_masked_at, meta_data

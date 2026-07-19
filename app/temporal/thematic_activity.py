@@ -450,7 +450,7 @@ async def _run_batched_llm_fallback(
         try:
             llm_result = json.loads(cleaned)
         except json.JSONDecodeError as jde:
-            logger.error(f"JSON parsing failed for batched LLM response. Error: {jde}. Cleaned response: {cleaned!r}. Raw response: {response_text!r}")
+            logger.error(f"JSON parsing failed for batched LLM response. Error: {jde} (response length={len(response_text)})")
             raise
 
         classified_items = []
