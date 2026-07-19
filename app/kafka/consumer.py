@@ -375,25 +375,58 @@ class IngestionConsumer:
                     raise KafkaException(msg.error())
                 
                 raw_payload = msg.value().decode("utf-8")
-                try:
-                    await self.process_message(raw_payload)
-                    processed_ok = True
-                except Exception as e:
-                    processed_ok = False
-                    logger.error(
-                        f"Unhandled error processing Kafka message — leaving offset "
-                        f"uncommitted so it is retried. "
-                        f"Payload: {_payload_fingerprint(raw_payload)}. Error: {e}",
-                        exc_info=True,
-                    )
 
-                # Commit only when process_message() actually completed without
-                # raising — that covers both a successful DB/workflow write AND a
-                # confirmed DLQ delivery (process_message()'s DLQ paths call
-                # _send_to_dlq(), which itself raises on unconfirmed/failed delivery).
-                # If it raised for any other reason, the offset stays uncommitted and
-                # the message is redelivered on the next poll/restart instead of
-                # being silently dropped.
+                # Retry THIS message in-place (with backoff) before ever polling
+                # again — leaving an offset uncommitted is not sufficient on its own:
+                # Kafka's commit(message=msg) sets the partition's committed pointer
+                # to msg.offset()+1 (an absolute position, not a per-message ledger),
+                # so if we moved on and a LATER message on this same partition got
+                # committed, that would silently advance the committed pointer past
+                # this still-unresolved one, permanently skipping it on any future
+                # restart. Resolving it (success or DLQ) before the next poll()
+                # guarantees no later commit can ever jump past an unresolved message.
+                processed_ok = False
+                last_error = None
+                max_attempts = 3
+                for attempt in range(1, max_attempts + 1):
+                    try:
+                        await self.process_message(raw_payload)
+                        processed_ok = True
+                        break
+                    except Exception as e:
+                        last_error = e
+                        logger.error(
+                            f"Error processing Kafka message (attempt {attempt}/{max_attempts}): {e}. "
+                            f"Payload: {_payload_fingerprint(raw_payload)}",
+                            exc_info=True,
+                        )
+                        if attempt < max_attempts:
+                            await asyncio.sleep(2 ** attempt)
+
+                if not processed_ok:
+                    # Retries exhausted — route to the DLQ rather than leave this
+                    # message to be silently skipped by a later commit on this
+                    # partition. Only once it's durably captured there is it safe
+                    # to let the offset advance past it.
+                    try:
+                        await self._send_to_dlq(
+                            raw_payload,
+                            f"Processing failed after {max_attempts} attempts: {last_error}",
+                        )
+                        processed_ok = True
+                    except Exception as dlq_err:
+                        logger.error(
+                            f"Failed to route unprocessable message to DLQ — leaving offset "
+                            f"uncommitted so it is retried. Payload: {_payload_fingerprint(raw_payload)}. "
+                            f"Error: {dlq_err}",
+                            exc_info=True,
+                        )
+
+                # Commit only once the message has been durably handled — either
+                # process_message() succeeded, or (after exhausting retries) it was
+                # confirmed delivered to the DLQ. If neither happened, the offset
+                # stays uncommitted and the message is redelivered on the next
+                # poll/restart instead of being silently dropped or skipped.
                 if processed_ok:
                     try:
                         await asyncio.to_thread(self.consumer.commit, msg, asynchronous=False)
