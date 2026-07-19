@@ -58,10 +58,10 @@ class Settings(BaseSettings):
     # dot-notation paths (e.g. "tags.state", "data.pdfUrls.original") that must be
     # present and non-empty; "optional" is informational only. "update" additionally
     # sets newValuesNoEmpty so every key actually present in newValues must be non-empty.
-    STORY_KAFKA_PROCESS_SCHEMA: str = Field(
+    STORY_KAFKA_SCHEMA: str = Field(
         default='{"create": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt", "tags.state", "tags.district", "tags.organization", "tags.programId", "tags.programName", "tags.leaderCategoryId", "tags.leaderCategoryName", "data.title", "data.designation", "data.submissionDate", "data.pdfUrls.original", "data.pdfUrls.masked", "data.transcriptLink", "data.challenges", "data.objective", "data.actionSteps", "data.impact", "data.duration", "data.blurb", "data.content"], "optional": ["data.imageUrls"]}, "update": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"], "newValuesNoEmpty": true}, "delete": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"]}}'
     )
-    DISCUSSION_KAFKA_PROCESS_SCHEMA: str = Field(
+    DISCUSSION_KAFKA_SCHEMA: str = Field(
         default='{"create": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt", "tags.state", "tags.district", "tags.organization", "tags.programId", "tags.programName", "tags.leaderCategoryId", "tags.leaderCategoryName", "data.title", "data.designation", "data.submissionDate", "data.pdfUrls.original", "data.pdfUrls.masked", "data.transcriptLink", "data.challenges", "data.solutions", "data.participantsData"], "optional": ["data.author", "data.language", "data.imageUrls"]}, "update": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"], "newValuesNoEmpty": true}, "delete": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"]}}'
     )
 
@@ -113,7 +113,7 @@ class Settings(BaseSettings):
             raise ValueError(f"Invalid JSON configuration for {info.field_name}: {e}") from e
         return v
 
-    @field_validator("STORY_KAFKA_PROCESS_SCHEMA", "DISCUSSION_KAFKA_PROCESS_SCHEMA")
+    @field_validator("STORY_KAFKA_SCHEMA", "DISCUSSION_KAFKA_SCHEMA")
     @classmethod
     def validate_kafka_ingestion_schema_json(cls, v: str, info) -> str:
         try:
@@ -184,9 +184,9 @@ class Settings(BaseSettings):
         """
         normalized_type = submission_type.lower().strip() if isinstance(submission_type, str) else ""
         if "story" in normalized_type:
-            raw_schema = self.STORY_KAFKA_PROCESS_SCHEMA
+            raw_schema = self.STORY_KAFKA_SCHEMA
         elif "discussion" in normalized_type:
-            raw_schema = self.DISCUSSION_KAFKA_PROCESS_SCHEMA
+            raw_schema = self.DISCUSSION_KAFKA_SCHEMA
         else:
             raise ValueError(f"No Kafka ingestion schema defined for submission type {submission_type!r}")
 
