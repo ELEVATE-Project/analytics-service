@@ -207,8 +207,12 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
 
             elif isinstance(col_res, dict):
                 masked_text = col_res.get("masked_text")
-                if masked_text is not None:
-                    updated_fields[db_col] = masked_text
+                if masked_text is None:
+                    raise ValueError(
+                        f"PII masking response for column {col} is missing 'masked_text'. "
+                        f"Refusing to report success with potentially unmasked PII."
+                    )
+                updated_fields[db_col] = masked_text
 
                 pii_found = col_res.get("pii_found", [])
                 abusive_language = col_res.get("abusive_language", False)
@@ -217,7 +221,11 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
                 if abusive_language:
                     abusive_masked_at_list.append(col)
             else:
-                logger.warning(f"Unexpected response structure for column {col}: {col_res}")
+                raise ValueError(
+                    f"PII masking response for column {col} was not an object (got "
+                    f"{type(col_res).__name__}). Refusing to report success with "
+                    f"potentially unmasked PII."
+                )
 
         # --- Phase 3: persist results. Fresh connection scope, acquired only now
         # that the LLM call has returned.
