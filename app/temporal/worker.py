@@ -110,6 +110,7 @@ async def start_worker():
                 schedule=Schedule(
                     action=ScheduleActionStartWorkflow(
                         BatchProcessingWorkflow.run,
+                        settings.BATCH_SIZE,
                         id="daily-batch-processing-run",
                         task_queue=settings.TEMPORAL_QUEUE,
                     ),
