@@ -9,9 +9,9 @@ import pandas as pd
 
 from app.config import settings
 from app.database.db import db
-from app.csv_pipeline import csv_upload_repo
-from app.csv_pipeline.processor import load_csv, rows_to_json, split_csv
-from app.csv_pipeline.validators import validate_columns
+from app.database import operations as csv_upload_repo
+from app.api.services.csv_upload_service import load_csv, rows_to_json, split_csv
+from app.api.validators.csv_upload import validate_columns
 from app.storage.gcs import fetch_csv
 from kafka import KafkaProducer
 
@@ -37,7 +37,7 @@ def _get_producer() -> KafkaProducer:
 def _push_row(payload: str, key: str | None = None) -> None:
     producer = _get_producer()
     future = producer.send(
-        settings.KAFKA_TOPIC_CSV_ROWS,
+        settings.KAFKA_TOPIC_INGESTION,
         value=payload,
         key=key.encode("utf-8") if key else None,
     )
@@ -52,14 +52,12 @@ def _flush_producer() -> None:
 @activity.defn
 async def csv_fetch_and_validate_activity(record_id: int) -> bool:
     """
-    Temporal activity to fetch the CSV file from cloud storage,
-    validate columns against the expected schema, and update status.
+    Temporal activity to fetch the CSV file from cloud storage and update status.
     """
     record = await csv_upload_repo.get_record(record_id)
     if not record:
         raise ValueError(f"Record {record_id} not found in database.")
 
-    report_type = record["report_type"]
     cloud_storage_path = record["cloud_storage_path"]
 
     try:
@@ -77,20 +75,18 @@ async def csv_fetch_and_validate_activity(record_id: int) -> bool:
         await csv_upload_repo.update_status(record_id, "on_hold", error_meta)
         return False
 
-    # Validate columns
-    is_valid, errors = validate_columns(df, report_type)
+    is_valid, errors = validate_columns(df, record["report_type"])
     if not is_valid:
         logger.warning("Validation failed for record %s: %s", record_id, errors)
         error_meta = {
             "stage": "CSV Column Validation",
             "error": "Invalid CSV schema",
-            "missing_columns": errors,
+            "validation_errors": errors,
             "timestamp": datetime.utcnow().isoformat() + "Z"
         }
         await csv_upload_repo.update_status(record_id, "on_hold", error_meta)
         return False
 
-    # Validation succeeded, flip status to in_progress
     await csv_upload_repo.update_status(record_id, "in_progress")
     return True
 
@@ -112,10 +108,31 @@ async def csv_push_to_kafka_activity(record_id: int) -> int:
     csv_file = fetch_csv(cloud_storage_path)
     df = load_csv(csv_file)
 
+    is_valid, errors = validate_columns(df, report_type)
+    if not is_valid:
+        logger.warning("Kafka push blocked for record %s due to invalid columns: %s", record_id, errors)
+        error_meta = {
+            "stage": "CSV Column Validation",
+            "error": "Invalid CSV schema - aborting Kafka push",
+            "validation_errors": errors,
+            "timestamp": datetime.utcnow().isoformat() + "Z"
+        }
+        await csv_upload_repo.update_status(record_id, "on_hold", error_meta)
+        raise ValueError("CSV validation failed for Kafka push")
+
     # Fetch programs / leader categories info from Postgres once for context mapping
     program_info = None
     leader_info = None
-    tenant_code = "mitra"
+    # Use tenant_code from the upload payload (stored in meta_data) as primary source,
+    # falling back to DB lookup and then to "mitra" as last resort.
+    record_meta = record.get("meta_data") or {}
+    if isinstance(record_meta, str):
+        import json as _json
+        try:
+            record_meta = _json.loads(record_meta)
+        except Exception:
+            record_meta = {}
+    tenant_code = record_meta.get("tenant_code") or "mitra"
 
     try:
         async with db.pool.acquire() as conn:
@@ -133,16 +150,14 @@ async def csv_push_to_kafka_activity(record_id: int) -> int:
 
             if leader_row:
                 program_row = await conn.fetchrow(
-                    "SELECT id, name, description FROM programs WHERE name = $1 AND leaders_id = $2 LIMIT 1",
+                    "SELECT id, name, description, tenant_code, leaders_id FROM programs WHERE name = $1 AND leaders_id = $2 LIMIT 1",
                     record.get("program_name"), leader_row["id"]
                 )
             else:
                 program_row = await conn.fetchrow(
-                    "SELECT id, name, description, tenant_code FROM programs WHERE name = $1 LIMIT 1",
+                    "SELECT id, name, description, tenant_code, leaders_id FROM programs WHERE name = $1 LIMIT 1",
                     record.get("program_name")
                 )
-                if program_row:
-                    tenant_code = program_row["tenant_code"]
 
             if program_row:
                 program_info = {
@@ -150,10 +165,24 @@ async def csv_push_to_kafka_activity(record_id: int) -> int:
                     "name": program_row["name"],
                     "description": program_row["description"],
                 }
+                tenant_code = program_row.get("tenant_code", tenant_code)
+
+            if program_row and not leader_info:
+                leader_row_from_program = await conn.fetchrow(
+                    "SELECT id, name, description, tenant_code FROM leader_category WHERE id = $1 LIMIT 1",
+                    program_row["leaders_id"]
+                )
+                if leader_row_from_program:
+                    leader_info = {
+                        "id": str(leader_row_from_program["id"]),
+                        "name": leader_row_from_program["name"],
+                        "description": leader_row_from_program["description"],
+                    }
+                    tenant_code = leader_row_from_program.get("tenant_code", tenant_code)
     except Exception as db_exc:
         logger.warning("Failed to query program/leader category metadata from DB: %s", db_exc)
 
-    # Fallbacks if DB query returned nothing or failed
+    # Fallbacks if DB query returned nothing
     if not leader_info:
         leader_info = {
             "id": str(uuid.uuid4()),

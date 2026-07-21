@@ -100,8 +100,8 @@ CREATE TABLE discussion_submissions (
     submission_id       TEXT NOT NULL,
     tenant_code         TEXT NOT NULL,
     title               TEXT,
-    challenges          TEXT[], -- one array element per discrete statement (see operations.py's _normalize_statement_list)
-    solutions           TEXT[], -- same format as challenges
+    challenges          TEXT,
+    solutions           TEXT,
     author              TEXT,
     language            TEXT,
     image_urls          TEXT[] DEFAULT '{}',
@@ -387,8 +387,7 @@ CREATE TABLE csv_uploads (
     file_size              BIGINT,
     cloud_storage_path     TEXT NOT NULL,
     meta_data              JSONB DEFAULT '{}'::jsonb,
-    status                 VARCHAR(20) NOT NULL DEFAULT 'pending'
-                             CHECK (status IN ('pending', 'in_progress', 'processed', 'on_hold')),
+    status                 VARCHAR(20) NOT NULL DEFAULT 'pending',
     created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
 );

@@ -18,16 +18,17 @@ class Database:
         self.pool = None
         self._connect_lock = None
         self._ref_count = 0
+        self._initialized = False
 
-    async def initialize_schema(self) -> None:
+    async def initialize_schema(self, pool) -> None:
         """
         Creates the required database tables if they do not already exist.
         This prevents startup failures when the configured PostgreSQL database is empty.
         """
-        if not self.pool:
-            raise RuntimeError("Database pool is not initialized. Call connect() first.")
+        if not pool:
+            raise RuntimeError("Database pool is not provided.")
 
-        async with self.pool.acquire() as conn:
+        async with pool.acquire() as conn:
             if settings.RESET_DB:
                 if settings.ENVIRONMENT.lower().strip() == "development":
                     await conn.execute("DROP SCHEMA IF EXISTS public CASCADE;")
@@ -73,9 +74,9 @@ class Database:
                 self.pool = await asyncpg.create_pool(
                     dsn=settings.DATABASE_URL,
                     min_size=2,
-                    max_size=10
+                    max_size=20
                 )
-                await self.initialize_schema()
+                self._initialized = True
                 logger.info("Database connection pool established successfully.")
             except Exception as e:
                 self._ref_count -= 1
@@ -96,6 +97,7 @@ class Database:
             if self._ref_count == 0 and self.pool:
                 await self.pool.close()
                 self.pool = None
+                self._initialized = False
                 logger.info("Database connection pool closed.")
 
     async def get_connection(self) -> asyncpg.Connection:

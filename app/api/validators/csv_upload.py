@@ -1,14 +1,30 @@
-"""
-Validates an uploaded CSV's columns against the expected schema
-defined in the environment variables (settings.STORY_CSV_COLUMN / settings.DISCUSSION_CSV_COLUMN).
-"""
-
 import json
 import logging
 import pandas as pd
+from app.api.exceptions import InvalidReportType, InvalidFileType, FileTooLarge, EmptyFile
 from app.config import settings
 
-logger = logging.getLogger("analytics_service.csv_pipeline.validators")
+logger = logging.getLogger("analytics_service.api.validators.csv_upload")
+
+
+def validate_report_type(report_type: str) -> None:
+    if not report_type:
+        raise InvalidReportType("Only 'story' or 'discussion' report types are accepted.")
+    normalized_type = report_type.lower().strip()
+    if normalized_type not in ("story", "discussion"):
+        raise InvalidReportType("Only 'story' or 'discussion' report types are accepted.")
+
+
+def validate_extension(filename: str | None) -> None:
+    if not filename or not filename.lower().endswith(".csv"):
+        raise InvalidFileType("Only .csv files are accepted")
+
+
+def validate_file_bytes(file_bytes: bytes) -> None:
+    if len(file_bytes) > settings.MAX_CSV_UPLOAD_BYTES:
+        raise FileTooLarge("Uploaded file is too large")
+    if not file_bytes:
+        raise EmptyFile("Uploaded file is empty")
 
 
 def validate_columns(df: pd.DataFrame, report_type: str) -> tuple[bool, list[str]]:

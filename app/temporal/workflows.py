@@ -319,7 +319,7 @@ class CsvProcessingWorkflow:
         Orchestrates processing for a single csv_upload record.
         1. Fetch CSV and validate columns.
         2. Publish each row to Kafka.
-        3. Mark as processed.
+        3. Mark as success.
         """
         retry_policy = RetryPolicy(
             maximum_attempts=3,
@@ -348,19 +348,19 @@ class CsvProcessingWorkflow:
             retry_policy=RetryPolicy(maximum_attempts=1) # No auto-retries for Kafka pushes to prevent duplicate writes
         )
 
-        # 3. Update status to 'processed'
+        # 3. Update status to 'success'
         await workflow.execute_activity(
             csv_update_status_activity,
             {
                 "record_id": record_id,
-                "status": "processed",
+                "status": "success",
                 "meta_data": {"rows_pushed": rows_pushed, "processed_at": workflow.now().isoformat()}
             },
             start_to_close_timeout=timedelta(seconds=10),
             retry_policy=retry_policy
         )
 
-        return {"status": "processed", "rows_pushed": rows_pushed}
+        return {"status": "success", "rows_pushed": rows_pushed}
 
 
 @workflow.defn

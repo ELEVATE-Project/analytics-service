@@ -8,8 +8,8 @@ import uvicorn
 from fastapi import FastAPI
 
 from app.api.bulk import router as bulk_router
-from app.api.routes import router as submissions_router
-from app.api.routes import csv_router as csv_upload_router
+from app.api.controllers.submission_controller import router as submissions_router
+from app.api.controllers.csv_upload_controller import csv_router as csv_upload_router
 from app.kafka.consumer import IngestionConsumer
 from app.temporal.worker import start_worker
 

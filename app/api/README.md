@@ -14,25 +14,25 @@ You can process CSV files in either **Real-Time** or **Batch** mode depending on
 graph TD
     %% Upload Phase
     A[Client Uploads CSV] -->|POST /v1/upload/| B[FastAPI Web Server]
-    B -->|Validate Schema & Columns| C{Is CSV Valid?}
-    C -->|No| D[Mark status='on_hold' in csv_uploads]
-    C -->|Yes| E[Upload CSV to Google Cloud Storage]
-    E --> F[Create row in csv_uploads table status='pending']
+    B -->|Upload CSV to Google Cloud Storage| C[Upload to GCS]
+    C -->|Create row status='pending'| D[csv_uploads Table]
 
     %% Ingestion Phase (Staggered Run 1)
     G[Temporal Schedule: 9:10 PM IST] -->|Triggers| H[CsvBatchProcessingWorkflow]
-    H -->|csv_fetch_and_validate_activity| I[Download CSV from GCS]
-    I -->|csv_push_to_kafka_activity| J[Split CSV into rows & push to Kafka]
-    J -->|Kafka Topic: analytics.ingestion.raw| K[IngestionConsumer]
-    K -->|Insert row to DB| L[submissions table status='pending']
-    H -->|Update status='processed'| M[csv_uploads Table]
+    H -->|csv_fetch_and_validate_activity| I[Download CSV from GCS & Validate Columns]
+    I -->|Is CSV Valid?| J{Valid?}
+    J -->|No| K[Mark status='on_hold' in csv_uploads]
+    J -->|Yes| L[csv_push_to_kafka_activity: Split CSV into rows & push to Kafka]
+    L -->|Kafka Topic: analytics.ingestion.raw| M[IngestionConsumer]
+    M -->|Insert row to DB| N[submissions table status='pending']
+    H -->|Update status='success'| O[csv_uploads Table]
 
     %% Analysis Phase (Staggered Run 2)
-    N[Temporal Schedule: 9:15 PM IST] -->|Triggers| O[BatchProcessingWorkflow]
-    O -->|Fetch pending submissions| P[ConfigDrivenProcessingWorkflow]
-    P -->|Activity 1: PII Masking| Q[Mask Abusive & Sensitive content]
-    P -->|Activity 2: Thematic Analysis| R[Map Statements to Taxonomy]
-    P -->|Update status='success'| S[submissions table]
+    P[Temporal Schedule: 9:15 PM IST] -->|Triggers| Q[BatchProcessingWorkflow]
+    Q -->|Fetch pending submissions| R[ConfigDrivenProcessingWorkflow]
+    R -->|Activity 1: PII Masking| S[Mask Abusive & Sensitive content]
+    R -->|Activity 2: Thematic Analysis| T[Map Statements to Taxonomy]
+    R -->|Update status='success'| U[submissions table]
 ```
 
 ### 2. Real-Time Mode Flowchart
@@ -41,15 +41,21 @@ graph TD
 graph TD
     %% Upload Phase
     A[Client Uploads CSV] -->|POST /v1/upload/| B[FastAPI Web Server]
-    B -->|Start Workflow| C[CsvProcessingWorkflow]
-    C -->|csv_fetch_and_validate_activity| D[Download CSV from GCS]
-    D -->|csv_push_to_kafka_activity| E[Split CSV into rows & push to Kafka]
-    E -->|Kafka Topic: analytics.ingestion.raw| F[IngestionConsumer]
-    F -->|Insert row to DB| G[submissions table status='processing']
-    F -->|Trigger| H[ConfigDrivenProcessingWorkflow]
-    H -->|Activity 1: PII Masking| I[Mask Abusive & Sensitive content]
-    H -->|Activity 2: Thematic Analysis| J[Map Statements to Taxonomy]
-    I & J -->|Update status='success'| K[submissions table]
+    B -->|Upload CSV to Google Cloud Storage| C[Upload to GCS]
+    C -->|Create row status='pending'| D[csv_uploads Table]
+    B -->|Start Workflow| E[CsvProcessingWorkflow]
+
+    %% Processing Phase
+    E -->|csv_fetch_and_validate_activity| F[Download CSV from GCS & Validate Columns]
+    F -->|Is CSV Valid?| G{Valid?}
+    G -->|No| H[Mark status='on_hold' in csv_uploads]
+    G -->|Yes| I[csv_push_to_kafka_activity: Split CSV into rows & push to Kafka]
+    I -->|Kafka Topic: analytics.ingestion.raw| J[IngestionConsumer]
+    J -->|Insert row to DB| K[submissions table status='processing']
+    J -->|Trigger| L[ConfigDrivenProcessingWorkflow]
+    L -->|Activity 1: PII Masking| M[Mask Abusive & Sensitive content]
+    L -->|Activity 2: Thematic Analysis| N[Map Statements to Taxonomy]
+    M & N -->|Update status='success'| O[submissions table]
 ```
 
 ---
@@ -80,6 +86,7 @@ The pipeline supports two execution modes governed by the `PROCESSING_MODE` envi
     *   `report_type`: Either `story` or `discussion` (case-insensitive)
     *   `program_name`: The name of the target program
     *   `leader_category`: The category of the target leaders
+    *   `tenant_code`: The identifier for the tenant (defaults to `mitra`)
     *   `file`: The `.csv` file upload
 *   **Behavior**: Validates columns, runs a duplicate file check, saves to GCS, and inserts a pending row into the tracking table.
 *   **Example curl Request**:
@@ -89,6 +96,7 @@ The pipeline supports two execution modes governed by the `PROCESSING_MODE` envi
       -F "report_type=discussion" \
       -F "program_name=My Program" \
       -F "leader_category=District Leader" \
+      -F "tenant_code=mitra" \
       -F "file=@sample.csv"
     ```
 
@@ -136,7 +144,7 @@ CREATE TABLE csv_uploads (
     cloud_storage_path     TEXT NOT NULL,
     meta_data              JSONB DEFAULT '{}'::jsonb,
     status                 VARCHAR(20) NOT NULL DEFAULT 'pending' 
-                             CHECK (status IN ('pending', 'in_progress', 'processed', 'on_hold')),
+                             CHECK (status IN ('pending', 'in_progress', 'success', 'on_hold')),
     created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -144,4 +152,4 @@ CREATE TABLE csv_uploads (
 *   `pending`: File is valid and queued for scheduled batch processing.
 *   `on_hold`: File failed validation (check `meta_data.validation_errors` for details) or encountered fetching errors.
 *   `in_progress`: The batch script is currently processing and pushing CSV rows.
-*   `processed`: Ingestion succeeded, rows are written to `submissions`.
+*   `success`: Ingestion succeeded, rows are written to `submissions`.

@@ -59,10 +59,10 @@ class Settings(BaseSettings):
     # present and non-empty; "optional" is informational only. "update" additionally
     # sets newValuesNoEmpty so every key actually present in newValues must be non-empty.
     STORY_KAFKA_SCHEMA: str = Field(
-        default='{"create": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt", "tags.state", "tags.district", "tags.organization", "tags.programId", "tags.programName", "tags.leaderCategoryId", "tags.leaderCategoryName", "data.title", "data.designation", "data.submissionDate", "data.pdfUrls.original", "data.pdfUrls.masked", "data.transcriptLink", "data.challenges", "data.objective", "data.actionSteps", "data.impact", "data.duration", "data.blurb", "data.content"], "optional": ["data.imageUrls"]}, "update": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"], "newValuesNoEmpty": true}, "delete": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"]}}'
+        default='{"create": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt", "tags.state", "tags.programId", "tags.programName", "tags.leaderCategoryId", "tags.leaderCategoryName", "data.title", "data.designation", "data.submissionDate", "data.challenges", "data.objective", "data.actionSteps", "data.impact", "data.duration", "data.blurb", "data.content"], "optional": ["tags.district", "tags.organization", "data.transcriptLink", "data.imageUrls", "data.pdfUrls.original", "data.pdfUrls.masked"]}, "update": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"], "newValuesNoEmpty": true}, "delete": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"]}}'
     )
     DISCUSSION_KAFKA_SCHEMA: str = Field(
-        default='{"create": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt", "tags.state", "tags.district", "tags.organization", "tags.programId", "tags.programName", "tags.leaderCategoryId", "tags.leaderCategoryName", "data.title", "data.designation", "data.submissionDate", "data.pdfUrls.original", "data.pdfUrls.masked", "data.transcriptLink", "data.challenges", "data.solutions", "data.participantsData"], "optional": ["data.author", "data.language", "data.imageUrls"]}, "update": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"], "newValuesNoEmpty": true}, "delete": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"]}}'
+        default='{"create": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt", "tags.state", "tags.programId", "tags.programName", "tags.leaderCategoryId", "tags.leaderCategoryName", "data.title", "data.designation", "data.submissionDate", "data.challenges", "data.solutions", "data.participantsData"], "optional": ["tags.district", "tags.organization", "data.transcriptLink", "data.author", "data.language", "data.imageUrls", "data.pdfUrls.original", "data.pdfUrls.masked"]}, "update": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"], "newValuesNoEmpty": true}, "delete": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"]}}'
     )
 
     # Thematic Classification Configuration
@@ -75,14 +75,16 @@ class Settings(BaseSettings):
     AUTH_TOKEN: str = Field(description="Bearer token for API authentication. Must be set via environment variable.")
     MAX_CSV_UPLOAD_BYTES: int = Field(default=10485760) # 10MB
     CSV_SCHEDULE_CRON_TIME: str = Field(default="0 20 * * *")
-    KAFKA_TOPIC_CSV_ROWS: str = Field(default="analytics.ingestion.raw")
+    DISCUSSION_PARTICIPANTS_MAP: str = Field(
+        default='{"men": "Men", "women": "Women", "children": "Children", "teacher": "Teacher", "participant count": "Participant Count"}'
+    )
 
     # CSV Column Schemas (stored as JSON arrays of column names)
     STORY_CSV_COLUMN: str = Field(
-        default='["id","Title","User name","Designation","Location","District","Organization","Report Created At","Objective","Challenges","Action Steps","Impact","Duration","Blurb","masked_blurb","Content","masked_content","Images","Pdf","Transcript Link"]'
+        default='["id","Title","User name","Designation","Location","District","Organization","Report Created At","Objective","Challenges","Action Steps","Impact","Duration","Blurb","masked_blurb","Content","masked_content","Images","Pdf","Transcript Link","Session ID"]'
     )
     DISCUSSION_CSV_COLUMN: str = Field(
-        default='["id","Title","User name","User Location","District","Participant Count","Men","Women","Children","Date of Discussion","Organization","Challenges","Solutions","Author","Language","Report Created At","Transcript Link","Image Urls","PDF Urls"]'
+        default='["id","Title","User name","User Location","District","Participant Count","Men","Women","Children","Date of Discussion","Organization","Challenges","Solutions","Author","Language","Report Created At","Transcript Link","Image Urls","PDF Urls","Session ID"]'
     )
 
     # GCP Credentials & Cloud Storage Config
@@ -97,7 +99,8 @@ class Settings(BaseSettings):
     AUTH_PROVIDER_X509_CERT_URL: str = Field(default="https://www.googleapis.com/oauth2/v1/certs")
     CLIENT_X509_CERT_URL: str = Field(default="")
     UNIVERSE_DOMAIN: str = Field(default="googleapis.com")
-    BUCKET_NAME: str = Field(description="GCS bucket name for CSV uploads. Must be set via environment variable.")
+    BUCKET_NAME: str = Field(description="GCS bucket name for file uploads. Must be set via environment variable.")
+    CSV_BLOB_UPLOADS: str = Field(default="mitra_dashboard_api_output")
     STORY_BLOB: str = Field(default="story_blurred_image")
     DISCUSSION_BLOB: str = Field(default="dicussion_blurred_image")
     MEDIA_BASE_URL: str = Field(default="https://mohini-static.shikshalokam.org")
@@ -114,6 +117,19 @@ class Settings(BaseSettings):
         # asyncpg requires postgresql:// or postgres:// scheme
         if v.startswith("postgresql+asyncpg://"):
             return v.replace("postgresql+asyncpg://", "postgresql://")
+        return v
+
+    @field_validator("DISCUSSION_PARTICIPANTS_MAP")
+    @classmethod
+    def validate_participants_map_json(cls, v: str) -> str:
+        if not v or not v.strip():
+            return v
+        try:
+            parsed = json.loads(v)
+            if not isinstance(parsed, dict):
+                raise ValueError("DISCUSSION_PARTICIPANTS_MAP must be a JSON object mapping role names to CSV column names.")
+        except (json.JSONDecodeError, TypeError) as e:
+            raise ValueError(f"Invalid JSON configuration for DISCUSSION_PARTICIPANTS_MAP: {e}") from e
         return v
 
     @field_validator("PROCESS_CONFIG_STORY", "PROCESS_CONFIG_DISCUSSION")
@@ -237,6 +253,28 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"Failed to parse Kafka ingestion schema JSON for submission type {submission_type!r}: {e}"
             ) from e
+
+    def get_discussion_participants_map(self) -> Dict[str, str]:
+        """
+        Dynamically returns the participant role-to-column mapping dictionary.
+        Falls back to empty dict if empty/invalid, or default if parsing fails.
+        """
+        raw_map = self.DISCUSSION_PARTICIPANTS_MAP
+        if not raw_map or not str(raw_map).strip():
+            return {}
+        try:
+            parsed = json.loads(raw_map)
+            if isinstance(parsed, dict):
+                return {str(k).strip(): str(v).strip() for k, v in parsed.items()}
+            return {}
+        except Exception:
+            return {
+                "men": "Men",
+                "women": "Women",
+                "children": "Children",
+                "teacher": "Teacher",
+                "participant count": "Participant Count"
+            }
 
 # Singleton instance
 settings = Settings()

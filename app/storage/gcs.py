@@ -50,18 +50,15 @@ def upload_csv(file_bytes: bytes, report_type: str, original_filename: str) -> s
     Returns the object key (cloud_storage_path) that gets stored in
     csv_upload.cloud_storage_path so we can fetch it later.
 
-    Object key format: [prefix/]<blob_folder>/<uuid>_<original_filename>
+    Object key format: <csv_uploads_prefix>/<uuid>_<original_filename>
     """
     bucket_name = settings.BUCKET_NAME
-    prefix = ""
-    if "/" in bucket_name:
-        parts = bucket_name.split("/", 1)
-        bucket_name = parts[0]
-        prefix = parts[1].strip("/") + "/"
+    if not bucket_name:
+        raise ValueError("BUCKET_NAME is not configured in settings.")
 
-    blob_folder = settings.STORY_BLOB if report_type.lower().strip() == "story" else settings.DISCUSSION_BLOB
-    object_key = f"{prefix}{blob_folder}/{uuid.uuid4()}_{original_filename}"
-    
+    prefix = settings.CSV_BLOB_UPLOADS.strip("/")
+    object_key = f"{prefix}/{uuid.uuid4()}_{original_filename}"
+
     client = _get_client()
     bucket = client.bucket(bucket_name)
     blob = bucket.blob(object_key)
@@ -76,8 +73,8 @@ def fetch_csv(bucket_path: str) -> io.BytesIO:
     Fetch a CSV back from the GCS bucket as an in-memory file-like object.
     """
     bucket_name = settings.BUCKET_NAME
-    if "/" in bucket_name:
-        bucket_name = bucket_name.split("/", 1)[0]
+    if not bucket_name:
+        raise ValueError("BUCKET_NAME is not configured in settings.")
 
     client = _get_client()
     bucket = client.bucket(bucket_name)

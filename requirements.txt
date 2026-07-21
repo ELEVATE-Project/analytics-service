@@ -23,7 +23,6 @@ langdetect
 google-cloud-storage>=2.14.0
 kafka-python>=2.0.2
 numpy>=1.24.0
-google-cloud-storage
 pypdf>=4.0.0
 
 

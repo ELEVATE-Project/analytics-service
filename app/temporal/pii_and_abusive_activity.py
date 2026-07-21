@@ -30,16 +30,6 @@ def _get_case_insensitive_key(d: dict, key: str) -> Any:
     return None
 
 
-def _parse_statement_list(raw_value: Any) -> Optional[List[str]]:
-    """
-    Returns raw_value if it's already a list — discussion columns like
-    challenges/solutions are stored as TEXT[] (per operations.py's
-    _normalize_statement_list), which asyncpg auto-decodes to a native Python list.
-    Returns None for scalar columns (a story's objective/challenge are plain text).
-    """
-    return raw_value if isinstance(raw_value, list) else None
-
-
 async def _get_pii_and_abusive_prompt(conn, analysis_type: str) -> Dict[str, Any]:
     row = await conn.fetchrow(
         """
@@ -108,16 +98,9 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
         # statement, per the prompt's list-input contract) rather than a flattened
         # string.
         input_text_dict = {}
-        column_statements: Dict[str, List[str]] = {}
         for col in target_columns:
             db_col = map_column_to_db_col(col, sub_type)
-            raw_value = payload.get(db_col) or ""
-            parsed_list = _parse_statement_list(raw_value)
-            if parsed_list is not None:
-                column_statements[col] = parsed_list
-                input_text_dict[col] = parsed_list
-            else:
-                input_text_dict[col] = raw_value
+            input_text_dict[col] = payload.get(db_col) or ""
 
         user_prompt = user_prompt_tmpl.replace("{{text}}", json.dumps(input_text_dict, ensure_ascii=False))
 
@@ -155,67 +138,17 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
             db_col = map_column_to_db_col(col, sub_type)
             col_res = _get_case_insensitive_key(llm_response_dict, col)
 
-            if col in column_statements:
-                # List-valued column — expect one masked entry per input statement.
-                original_statements = column_statements[col]
-                if not isinstance(col_res, list):
-                    raise ValueError(
-                        f"PII masking response for column {col} was not a list (got "
-                        f"{type(col_res).__name__}); expected one masked entry per of "
-                        f"{len(original_statements)} statement(s). Refusing to report success "
-                        f"with potentially unmasked PII."
-                    )
-
-                masked_by_index: Dict[int, str] = {}
-                col_pii_found = False
-                col_abusive = False
-                for entry in col_res:
-                    if not isinstance(entry, dict):
-                        continue
-                    idx = entry.get("statement_index")
-                    if not isinstance(idx, int) or not (0 <= idx < len(original_statements)):
-                        continue
-                    if idx in masked_by_index:
-                        raise ValueError(
-                            f"PII masking response for column {col} returned duplicate "
-                            f"statement_index {idx}. Refusing to report success with "
-                            f"potentially unmasked PII."
-                        )
-                    masked_text = entry.get("masked_text")
-                    masked_by_index[idx] = masked_text if masked_text is not None else original_statements[idx]
-                    if entry.get("pii_found"):
-                        col_pii_found = True
-                    if entry.get("abusive_language"):
-                        col_abusive = True
-
-                missing_indices = [i for i in range(len(original_statements)) if i not in masked_by_index]
-                if missing_indices:
-                    raise ValueError(
-                        f"PII masking for column {col} is missing masked entries for "
-                        f"statement_index {missing_indices} of {len(original_statements)} "
-                        f"statement(s). Refusing to report success with potentially unmasked PII."
-                    )
-
-                # Every index is now guaranteed to be covered exactly once above, so no
-                # fallback to original (unmasked) text is needed here.
-                masked_list = [masked_by_index[i] for i in range(len(original_statements))]
-                updated_fields[db_col] = masked_list
-                if col_pii_found:
-                    pii_masked_at_list.append(col)
-                if col_abusive:
-                    abusive_masked_at_list.append(col)
-
-            elif isinstance(col_res, dict):
+            if isinstance(col_res, dict):
                 masked_text = col_res.get("masked_text")
                 if masked_text is None:
                     raise ValueError(
                         f"PII masking response for column {col} is missing 'masked_text'. "
                         f"Refusing to report success with potentially unmasked PII."
                     )
-                        import re
-                        # Clean up XML-style wrapped tags generated by LLM non-determinism
-                        # (e.g., <INSULT>badword</INSULT> -> <INSULT>, <ID>Aadhaar 1234</ID> -> <ID>)
-                        masked_text = re.sub(r'<\s*(\w+)\s*>.*?<\s*/\s*\1\s*>', r'<\1>', str(masked_text))
+                import re
+                # Clean up XML-style wrapped tags generated by LLM non-determinism
+                # (e.g., <INSULT>badword</INSULT> -> <INSULT>, <ID>Aadhaar 1234</ID> -> <ID>)
+                masked_text = re.sub(r'<\s*(\w+)\s*>.*?<\s*/\s*\1\s*>', r'<\1>', str(masked_text))
                 updated_fields[db_col] = masked_text
 
                 pii_found = col_res.get("pii_found", [])
