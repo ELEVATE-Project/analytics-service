@@ -1,3 +1,4 @@
+import logging
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, File
 from fastapi.security import HTTPAuthorizationCredentials
 from app.api.deps import verify_auth_token
@@ -20,6 +21,8 @@ from app.api.exceptions import (
 from app.api.schemas.csv_upload import UploadResponse
 from app.config import settings
 
+logger = logging.getLogger("analytics_service.api.controllers.csv_upload_controller")
+
 csv_router = APIRouter(prefix="/v1", tags=["CSV Pipeline"])
 
 
@@ -40,7 +43,7 @@ async def upload_report(
     """
     # 1. Pure request-shape checks
     try:
-        validate_report_type(report_type)
+        report_type = validate_report_type(report_type)
     except InvalidReportType as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -71,7 +74,8 @@ async def upload_report(
     except DuplicateFile as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.exception("CSV upload failed")
+        raise HTTPException(status_code=500, detail="Internal server error") from exc
 
 
 @csv_router.post("/process/csv/{record_id}")
@@ -91,6 +95,7 @@ async def push_record(
     except RecordNotPending as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
+        logger.exception("Failed to start CSV processing workflow")
         raise HTTPException(
-            status_code=500, detail=f"Failed to start CSV processing workflow: {exc}"
-        )
+            status_code=500, detail="Failed to start CSV processing workflow"
+        ) from exc

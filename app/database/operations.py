@@ -695,26 +695,30 @@ async def insert_upload_record(
         await db.connect()
 
     async with db.pool.acquire() as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO csv_uploads
-                (report_type, program_name, leader_category, cloud_storage_path,
-                 file_name, file_size, meta_data, status)
-            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
-            RETURNING id
-            """,
-            report_type,
-            program_name,
-            leader_category,
-            cloud_storage_path,
-            file_name,
-            file_size,
-            json.dumps(meta_data or {}),
-            status,
-        )
-        record_id = row["id"]
-        logger.info("Inserted csv_uploads record %s (status=%s)", record_id, status)
-        return record_id
+        try:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO csv_uploads
+                    (report_type, program_name, leader_category, cloud_storage_path,
+                     file_name, file_size, meta_data, status)
+                VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+                RETURNING id
+                """,
+                report_type,
+                program_name,
+                leader_category,
+                cloud_storage_path,
+                file_name,
+                file_size,
+                json.dumps(meta_data or {}),
+                status,
+            )
+            record_id = row["id"]
+            logger.info("Inserted csv_uploads record %s (status=%s)", record_id, status)
+            return record_id
+        except asyncpg.UniqueViolationError:
+            from app.api.exceptions import DuplicateFile
+            raise DuplicateFile("FILE ALREADY EXISTS")
 
 
 async def claim_pending_records(batch_size: int) -> list[dict]:
@@ -781,7 +785,7 @@ async def update_status(
                 """
                 UPDATE csv_uploads
                 SET status = $1,
-                    meta_data = meta_data || $2::jsonb
+                    meta_data = COALESCE(meta_data, '{}'::jsonb) || $2::jsonb
                 WHERE id = $3
                 """,
                 status,

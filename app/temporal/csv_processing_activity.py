@@ -130,8 +130,12 @@ async def csv_push_to_kafka_activity(record_id: int) -> int:
         import json as _json
         try:
             record_meta = _json.loads(record_meta)
-        except Exception:
+        except _json.JSONDecodeError:
             record_meta = {}
+
+    if not isinstance(record_meta, dict):
+        record_meta = {}
+
     tenant_code = record_meta.get("tenant_code") or "mitra"
 
     try:

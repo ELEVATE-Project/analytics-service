@@ -15,7 +15,7 @@ class Settings(BaseSettings):
 
     # Orchestration Mode: 'real-time' or 'batch'
     PROCESSING_MODE: str = Field(default="real-time")
-    BATCH_SCHEDULE_CRON: str = Field(default="0 20 * * *")
+    BATCH_SCHEDULE_CRON: str = Field(default="45 15 * * *")
     # Max pending submissions fetched/fanned-out per chunk in BatchProcessingWorkflow —
     # keeps memory and concurrent child-workflow count bounded regardless of queue size.
     BATCH_SIZE: int = Field(default=100, gt=0)
@@ -62,7 +62,7 @@ class Settings(BaseSettings):
         default='{"create": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt", "tags.state", "tags.programId", "tags.programName", "tags.leaderCategoryId", "tags.leaderCategoryName", "data.title", "data.designation", "data.submissionDate", "data.challenges", "data.objective", "data.actionSteps", "data.impact", "data.duration", "data.blurb", "data.content"], "optional": ["tags.district", "tags.organization", "data.transcriptLink", "data.imageUrls", "data.pdfUrls.original", "data.pdfUrls.masked"]}, "update": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"], "newValuesNoEmpty": true}, "delete": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"]}}'
     )
     DISCUSSION_KAFKA_SCHEMA: str = Field(
-        default='{"create": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt", "tags.state", "tags.programId", "tags.programName", "tags.leaderCategoryId", "tags.leaderCategoryName", "data.title", "data.designation", "data.submissionDate", "data.challenges", "data.solutions", "data.participantsData"], "optional": ["tags.district", "tags.organization", "data.transcriptLink", "data.author", "data.language", "data.imageUrls", "data.pdfUrls.original", "data.pdfUrls.masked"]}, "update": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"], "newValuesNoEmpty": true}, "delete": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"]}}'
+        default='{"create": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt", "tags.state", "tags.programId", "tags.programName", "tags.leaderCategoryId", "tags.leaderCategoryName", "data.title", "data.designation", "data.submissionDate"], "optional": ["tags.district", "tags.organization", "data.transcriptLink", "data.author", "data.language", "data.imageUrls", "data.pdfUrls.original", "data.pdfUrls.masked", "data.challenges", "data.solutions", "data.participantsData"]}, "update": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"], "newValuesNoEmpty": true}, "delete": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"]}}'
     )
 
     # Thematic Classification Configuration
@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     # Auth Token Configuration
     AUTH_TOKEN: str = Field(description="Bearer token for API authentication. Must be set via environment variable.")
     MAX_CSV_UPLOAD_BYTES: int = Field(default=10485760) # 10MB
-    CSV_SCHEDULE_CRON_TIME: str = Field(default="0 20 * * *")
+    CSV_SCHEDULE_CRON_TIME: str = Field(default="40 15 * * *")
     DISCUSSION_PARTICIPANTS_MAP: str = Field(
         default='{"men": "Men", "women": "Women", "children": "Children", "teacher": "Teacher", "participant count": "Participant Count"}'
     )

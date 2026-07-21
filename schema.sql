@@ -389,7 +389,8 @@ CREATE TABLE csv_uploads (
     meta_data              JSONB DEFAULT '{}'::jsonb,
     status                 VARCHAR(20) NOT NULL DEFAULT 'pending',
     created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
+    updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_csv_uploads UNIQUE (program_name, leader_category, report_type, file_name, file_size)
 );
 
 CREATE INDEX idx_csv_uploads_status

@@ -7,12 +7,13 @@ from app.config import settings
 logger = logging.getLogger("analytics_service.api.validators.csv_upload")
 
 
-def validate_report_type(report_type: str) -> None:
+def validate_report_type(report_type: str) -> str:
     if not report_type:
         raise InvalidReportType("Only 'story' or 'discussion' report types are accepted.")
     normalized_type = report_type.lower().strip()
     if normalized_type not in ("story", "discussion"):
         raise InvalidReportType("Only 'story' or 'discussion' report types are accepted.")
+    return normalized_type
 
 
 def validate_extension(filename: str | None) -> None:
