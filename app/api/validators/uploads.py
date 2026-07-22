@@ -4,7 +4,7 @@ import pandas as pd
 from app.api.exceptions import InvalidReportType, InvalidFileType, FileTooLarge, EmptyFile
 from app.config import settings
 
-logger = logging.getLogger("analytics_service.api.validators.csv_upload")
+logger = logging.getLogger("analytics_service.api.validators.uploads")
 
 
 def validate_report_type(report_type: str) -> str:

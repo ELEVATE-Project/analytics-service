@@ -7,9 +7,8 @@ import threading
 import uvicorn
 from fastapi import FastAPI
 
-from app.api.bulk import router as bulk_router
-from app.api.controllers.submission_controller import router as submissions_router
-from app.api.controllers.csv_upload_controller import csv_router as csv_upload_router
+from app.api.router import api_router
+from app.api.exceptions import register_exception_handlers
 from app.kafka.consumer import IngestionConsumer
 from app.temporal.worker import start_worker
 
@@ -24,17 +23,14 @@ consumer_running = False
 worker_running = False
 
 
-async def run_web_async():
-    """Start the FastAPI web server asynchronously in the current loop."""
+def create_app() -> FastAPI:
     app = FastAPI(
         title="Analytics Service API Ingestion & Orchestration Layer",
         description="FastAPI ingestion endpoints and manual orchestration controls.",
         version="1.0.0",
     )
-
-    app.include_router(submissions_router)
-    app.include_router(bulk_router)
-    app.include_router(csv_upload_router)
+    register_exception_handlers(app)
+    app.include_router(api_router)
 
     @app.get("/health")
     def health_check():
@@ -44,6 +40,12 @@ async def run_web_async():
             "worker_running": worker_running,
         }
 
+    return app
+
+
+async def run_web_async():
+    """Start the FastAPI web server asynchronously in the current loop."""
+    app = create_app()
     logger.info("Starting FastAPI web server asynchronously...")
     config = uvicorn.Config(app, host="0.0.0.0", port=8000, loop="asyncio")
     server = uvicorn.Server(config)
@@ -52,24 +54,7 @@ async def run_web_async():
 
 def run_web():
     """Start the FastAPI web server."""
-    app = FastAPI(
-        title="Analytics Service API Ingestion & Orchestration Layer",
-        description="FastAPI ingestion endpoints and manual orchestration controls.",
-        version="1.0.0",
-    )
-
-    app.include_router(submissions_router)
-    app.include_router(bulk_router)
-    app.include_router(csv_upload_router)
-
-    @app.get("/health")
-    def health_check():
-        return {
-            "status": "healthy",
-            "consumer_running": consumer_running,
-            "worker_running": worker_running,
-        }
-
+    app = create_app()
     logger.info("Starting FastAPI web server...")
     uvicorn.run(app, host="0.0.0.0", port=8000)
 

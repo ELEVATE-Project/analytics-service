@@ -10,8 +10,8 @@ import pandas as pd
 from app.config import settings
 from app.database.db import db
 from app.database import operations as csv_upload_repo
-from app.api.services.csv_upload_service import load_csv, rows_to_json, split_csv
-from app.api.validators.csv_upload import validate_columns
+from app.api.services.uploads import load_csv, rows_to_json, split_csv
+from app.api.validators.uploads import validate_columns
 from app.storage.gcs import fetch_csv
 from kafka import KafkaProducer
 

@@ -1,1 +1,1 @@
-# Services layer initialization
+# API Services Package

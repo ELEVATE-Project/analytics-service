@@ -10,7 +10,7 @@ import pandas as pd
 from temporalio.client import Client
 
 from app.config import settings
-from app.api.validators.csv_upload import validate_columns
+from app.api.validators.uploads import validate_columns
 from app.storage.gcs import upload_csv
 from app.database import operations
 from app.api.exceptions import (
@@ -20,11 +20,11 @@ from app.api.exceptions import (
     RecordNotPending,
 )
 
-logger = logging.getLogger("analytics_service.api.services.csv_upload_service")
+logger = logging.getLogger("analytics_service.api.services.uploads")
 
 
 # ---------------------------------------------------------------------------
-# CSV Processing & Formatting Helpers (formerly in processor.py)
+# CSV Processing & Formatting Helpers
 # ---------------------------------------------------------------------------
 
 def load_csv(csv_file: io.BytesIO) -> pd.DataFrame:
@@ -51,7 +51,6 @@ def get_csv_value(row_dict: dict[str, Any], expected_cols: list[str], target_col
     and returns the corresponding value from row_dict case-insensitively.
     Falls back to alias matching for common CSV column name variations.
     """
-    # Known aliases: maps expected column name (lower) -> list of alternative CSV column names (lower)
     _ALIASES = {
         "district": ["matched_district"],
         "organization": ["detected_organization"],
@@ -79,7 +78,6 @@ def get_csv_value(row_dict: dict[str, Any], expected_cols: list[str], target_col
         if k.lower() == actual_lower:
             return v
 
-    # Fallback: check aliases for the target column
     aliases = _ALIASES.get(target_lower, [])
     for alias in aliases:
         for k, v in row_dict.items():
@@ -87,7 +85,6 @@ def get_csv_value(row_dict: dict[str, Any], expected_cols: list[str], target_col
                 return v
             
     return default
-
 
 
 def parse_csv_list(val) -> list[str]:
@@ -124,10 +121,8 @@ def get_url_field(val):
 def clean_segment(s: str) -> str:
     import re
     s = s.strip()
-    # Strip digit numbering (e.g. 1. or 1)) at start
     pattern_num = r'^\s*\d+[\.\)]\s*'
     s = re.sub(pattern_num, '', s).strip()
-    # Strip bullet points (e.g. - or * or •) at start
     pattern_bullet = r'^\s*[\-\*\u2022]\s*'
     s = re.sub(pattern_bullet, '', s).strip()
     return s
@@ -143,9 +138,6 @@ def parse_segments(val, delimiter="|") -> list[str]:
     elif "\n" in s:
         raw_segments = s.split("\n")
     else:
-        # Detect numbered patterns like "1. text 2. text", "1.text 2.text", or "1) text 2) text"
-        # Use (?!\d) after the dot to avoid false positives on decimals like "2.5"
-        # Require at least two numbered items to trigger splitting
         numbered_pattern = r'(?:^|\s)\d+(?:\.(?!\d)|\))\s*\S'
         has_numbering = len(re.findall(numbered_pattern, s)) >= 2
         if has_numbering:
@@ -179,9 +171,7 @@ def format_datetime(val, with_ms=True) -> str:
     return str(val)
 
 
-
 def _is_row_complete(row_dict: dict[str, Any], report_type: str) -> tuple[bool, list[str]]:
-    """Return whether the row has non-empty values for all expected CSV columns."""
     return True, []
 
 
@@ -191,12 +181,8 @@ def row_to_json(
     event_type: str = "create",
     metadata: dict | None = None,
 ) -> str:
-    """
-    Convert a single CSV row into the JSON payload pushed to Kafka.
-    """
     row_dict = {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
     
-    # Load expected columns from settings based on report type
     normalized_type = report_type.lower().strip()
     raw_cols = settings.STORY_CSV_COLUMN if normalized_type == "story" else settings.DISCUSSION_CSV_COLUMN
     try:
@@ -213,7 +199,6 @@ def row_to_json(
     if not session_id:
         session_id = generate_session_id()
     
-    # Extract metadata or default
     program_info = None
     leader_info = None
     tenant_code = "mitra"
@@ -223,23 +208,19 @@ def row_to_json(
         leader_info = metadata.get("LeaderCategoryInfo")
         tenant_code = metadata.get("tenantCode", "mitra")
         
-    # Get designation logic
     designation = None
     if normalized_type == "story":
         designation = get_csv_value(row_dict, expected_cols, "Designation")
     if not designation and leader_info and leader_info.get("name"):
         designation = leader_info["name"].split("(")[0].strip()
         
-    # Published date
     published_at_raw = get_csv_value(row_dict, expected_cols, "Report Created At")
     event_published_at = format_datetime(published_at_raw, with_ms=True)
     
-    # Common user variables
     user_name = get_csv_value(row_dict, expected_cols, "User name")
     organization = get_csv_value(row_dict, expected_cols, "Organization")
     district = get_csv_value(row_dict, expected_cols, "District")
     
-    # Resolve state
     state = None
     if normalized_type == "discussion":
         state_raw = get_csv_value(row_dict, expected_cols, "User Location")
@@ -252,7 +233,6 @@ def row_to_json(
             state_str = state_str.split(",")[-1].strip()
         state = state_str.title()
         
-    # Resolve userId
     user_id = None
     author_val = get_csv_value(row_dict, expected_cols, "Author")
     if normalized_type == "discussion":
@@ -263,21 +243,18 @@ def row_to_json(
             str(user_id_val) if user_id_val is not None else str(submission_id)
         )
         
-    # Resolve submissionDate
     if normalized_type == "discussion":
         submission_date_raw = get_csv_value(row_dict, expected_cols, "Date of Discussion")
         submission_date = format_datetime(submission_date_raw, with_ms=False)
     else:
         submission_date = format_datetime(published_at_raw, with_ms=False)
         
-    # Resolve PDF URLs (only original URLs are provided here; masking happens downstream)
     pdf_col = "Pdf" if normalized_type == "story" else "PDF Urls"
     original_pdf = get_url_field(get_csv_value(row_dict, expected_cols, pdf_col))
     pdf_urls = None
     if original_pdf:
         pdf_urls = {"original": original_pdf}
         
-    # Build tags
     tags = {
         "state": state,
         "district": district,
@@ -288,19 +265,16 @@ def row_to_json(
         "leaderCategoryName": leader_info.get("name") if leader_info else None,
     }
     
-    # Build data
     if normalized_type == "discussion":
         participants_data = []
         role_cols = settings.get_discussion_participants_map()
         
-        # Find the role representing total participant count
         total_role = None
         for role, col_name in role_cols.items():
             if role.lower() == "participant count" or (col_name and col_name.lower() == "participant count"):
                 total_role = role
                 break
                 
-        # First check the participant count
         total_count = None
         if total_role:
             col_name = role_cols[total_role]
@@ -312,11 +286,9 @@ def row_to_json(
                     except Exception:
                         pass
                         
-        # If participant count is present and > 0, process it and the other roles
         if total_count is not None and total_count > 0:
             participants_data.append({"role": total_role, "count": total_count})
             
-            # Process remaining roles
             for role, col_name in role_cols.items():
                 if role == total_role or not col_name:
                     continue
@@ -382,7 +354,6 @@ def rows_to_json(
     event_type: str = "create",
     metadata: dict | None = None,
 ):
-    """Generator yielding one JSON string per row."""
     for _, row in df.iterrows():
         row_dict = {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
         is_complete, missing_fields = _is_row_complete(row_dict, report_type)
@@ -407,10 +378,6 @@ async def handle_upload(
     file_name: str,
     file_bytes: bytes,
 ) -> dict:
-    """
-    Orchestrates the CSV report upload, duplicate checking, column validation,
-    GCS storage, tracking record insertion, and Temporal workflow triggering.
-    """
     normalized_type = report_type.lower().strip()
     file_size = len(file_bytes)
 
@@ -492,7 +459,6 @@ async def handle_upload(
         "message": "Successfully uploaded to cloud",
         "id": record_id,
         "status": status,
-        "cloud_storage_path": cloud_storage_path,
     }
     if not is_valid:
         response["errors"] = errors
@@ -501,11 +467,6 @@ async def handle_upload(
 
 
 async def handle_push(record_id: int) -> dict:
-    """
-    Manually trigger processing for a specific csv_upload record.
-    Works only if record is in 'pending' state.
-    """
-    # Fetch the record to inspect status first
     record = await operations.get_record(record_id)
     if not record:
         raise RecordNotFound("Record not found")
