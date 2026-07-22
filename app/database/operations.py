@@ -301,8 +301,8 @@ async def insert_or_update_submission(
                 "SELECT 1 FROM story_submissions WHERE submission_id = $1 AND tenant_code = $2",
                 submission_id, tenant_code
             )
-            challenges_joined = _normalize_string_list(data.get("challenges"))
-            action_steps_joined = _normalize_string_list(data.get("actionSteps"))
+            challenges_joined = _normalize_statement_list(data.get("challenges"))
+            action_steps_joined = _normalize_statement_list(data.get("actionSteps"))
             image_urls = _normalize_media_url_list(data.get("imageUrls"))
             pdf_urls, masked_pdf_urls = _normalize_pdf_urls(data.get("pdfUrls"))
 

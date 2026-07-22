@@ -126,8 +126,8 @@ CREATE TABLE story_submissions (
     tenant_code         TEXT NOT NULL,
     title               TEXT,
     objective           TEXT,
-    challenge           TEXT,
-    action_steps        TEXT,
+    challenge           TEXT[], -- one array element per discrete statement, same format as discussion_submissions.challenges (see operations.py's _normalize_statement_list)
+    action_steps        TEXT[], -- same format as challenge
     impact              TEXT,
     duration            TEXT,
     blurb               TEXT,
