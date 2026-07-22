@@ -90,5 +90,6 @@ async def start_worker():
         await db.disconnect()
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    from app.logging_config import configure_logging
+    configure_logging("worker")
     asyncio.run(start_worker())

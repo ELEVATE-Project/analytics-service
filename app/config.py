@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     # Story Rating Configuration
     MAX_PDF_TEXT_CHARS: int = Field(default=40000)
 
+    # Logging Configuration
+    LOG_DIR: str = Field(default="logs")
+    LOG_LEVEL: str = Field(default="INFO")
+    LOG_RETENTION_DAYS: int = Field(default=14, gt=0)
+
     # Scoped Ingestion Pipeline Configuration (JSON strings loaded from env)
     PROCESS_CONFIG_STORY: str = Field(
         default='[{"name": "pii_and_abusive_language_detection", "columns": ["objective"]}, {"name": "thematic_classification", "columns": ["objective"]}, {"name": "story_rating"}]'
