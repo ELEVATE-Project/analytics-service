@@ -34,6 +34,29 @@ class Settings(BaseSettings):
     TEMPORAL_HOST: str = Field(default="localhost:7233")
     TEMPORAL_QUEUE: str = Field(default="analytics-processing-queue")
 
+    # API Authentication — single shared Bearer token, checked via
+    # secrets.compare_digest in app/api/deps.py. Required (no default): the app
+    # will not start without it, since this is an eagerly-evaluated singleton.
+    AUTH_TOKEN: str = Field(description="Bearer token for API authentication. Must be set via environment variable.")
+
+    # CSV Upload / Processing Configuration
+    MAX_CSV_UPLOAD_BYTES: int = Field(default=10485760)  # 10MB
+    CSV_BLOB_UPLOADS: str = Field(default="mitra_dashboard_api_output")
+    CSV_SCHEDULE_CRON_TIME: str = Field(default="40 15 * * *")
+    # Expected CSV column headers per report type (JSON arrays of column names,
+    # matched case-insensitively against the uploaded file's header row).
+    STORY_CSV_COLUMN: str = Field(
+        default='["id","Title","User name","Designation","Location","District","Organization","Report Created At","Objective","Challenges","Action Steps","Impact","Duration","Blurb","masked_blurb","Content","masked_content","Images","Pdf","Transcript Link","Session ID"]'
+    )
+    DISCUSSION_CSV_COLUMN: str = Field(
+        default='["id","Title","User name","User Location","District","Participant Count","Men","Women","Children","Date of Discussion","Organization","Challenges","Solutions","Author","Language","Report Created At","Transcript Link","Image Urls","PDF Urls","Session ID"]'
+    )
+    # Maps a discussion participant "role" to the CSV column name holding its
+    # count (JSON object). See get_discussion_participants_map().
+    DISCUSSION_PARTICIPANTS_MAP: str = Field(
+        default='{"men": "Men", "women": "Women", "children": "Children", "teacher": "Teacher", "participant count": "Participant Count"}'
+    )
+
     # LLM / OpenRouter Configuration
     OPENROUTER_API_KEY: str = Field(default="")
     OPENROUTER_MODEL: str = Field(default="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free")
@@ -135,6 +158,30 @@ class Settings(BaseSettings):
             )
         return level
 
+    @field_validator("STORY_CSV_COLUMN", "DISCUSSION_CSV_COLUMN")
+    @classmethod
+    def validate_csv_column_json(cls, v: str, info) -> str:
+        try:
+            parsed = json.loads(v)
+            if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+                raise ValueError(f"{info.field_name} must be a JSON array of column-name strings.")
+        except (json.JSONDecodeError, TypeError) as e:
+            raise ValueError(f"Invalid JSON configuration for {info.field_name}: {e}") from e
+        return v
+
+    @field_validator("DISCUSSION_PARTICIPANTS_MAP")
+    @classmethod
+    def validate_participants_map_json(cls, v: str) -> str:
+        if not v or not v.strip():
+            return v
+        try:
+            parsed = json.loads(v)
+            if not isinstance(parsed, dict):
+                raise ValueError("DISCUSSION_PARTICIPANTS_MAP must be a JSON object mapping role names to CSV column names.")
+        except (json.JSONDecodeError, TypeError) as e:
+            raise ValueError(f"Invalid JSON configuration for DISCUSSION_PARTICIPANTS_MAP: {e}") from e
+        return v
+
     @field_validator("STORY_KAFKA_SCHEMA", "DISCUSSION_KAFKA_SCHEMA")
     @classmethod
     def validate_kafka_ingestion_schema_json(cls, v: str, info) -> str:
@@ -223,6 +270,28 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"Failed to parse Kafka ingestion schema JSON for submission type {submission_type!r}: {e}"
             ) from e
+
+    def get_discussion_participants_map(self) -> Dict[str, str]:
+        """
+        Dynamically returns the participant role-to-column mapping dictionary.
+        Falls back to empty dict if empty/invalid, or default if parsing fails.
+        """
+        raw_map = self.DISCUSSION_PARTICIPANTS_MAP
+        if not raw_map or not str(raw_map).strip():
+            return {}
+        try:
+            parsed = json.loads(raw_map)
+            if isinstance(parsed, dict):
+                return {str(k).strip(): str(v).strip() for k, v in parsed.items()}
+            return {}
+        except Exception:
+            return {
+                "men": "Men",
+                "women": "Women",
+                "children": "Children",
+                "teacher": "Teacher",
+                "participant count": "Participant Count"
+            }
 
 # Singleton instance
 settings = Settings()
