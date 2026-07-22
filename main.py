@@ -1,7 +1,6 @@
 import argparse
 import asyncio
 import logging
-import sys
 import threading
 
 import uvicorn
@@ -10,13 +9,9 @@ from fastapi import FastAPI
 from app.api.router import api_router
 from app.api.exceptions import register_exception_handlers
 from app.kafka.consumer import IngestionConsumer
+from app.logging_config import configure_logging
 from app.temporal.worker import start_worker
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
 logger = logging.getLogger("analytics_service.main")
 
 consumer_running = False
@@ -56,7 +51,7 @@ def run_web():
     """Start the FastAPI web server."""
     app = create_app()
     logger.info("Starting FastAPI web server...")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_config=None)
 
 
 async def run_consumer():
@@ -83,6 +78,8 @@ def main():
         help="Specify the service mode to start: 'consumer' (Kafka consumer), 'worker' (Temporal worker), 'web' (API server), or 'all' (run all three services).",
     )
     args = parser.parse_args()
+
+    configure_logging(args.mode)
 
     global consumer_running, worker_running
 

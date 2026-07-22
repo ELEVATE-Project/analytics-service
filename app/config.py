@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     # Story Rating Configuration
     MAX_PDF_TEXT_CHARS: int = Field(default=40000)
 
+    # Logging Configuration
+    LOG_DIR: str = Field(default="logs")
+    LOG_LEVEL: str = Field(default="INFO")
+    LOG_RETENTION_DAYS: int = Field(default=14, gt=0)
+
     # Scoped Ingestion Pipeline Configuration (JSON strings loaded from env)
     PROCESS_CONFIG_STORY: str = Field(
         default='[{"name": "pii_and_abusive_language_detection", "columns": ["objective"]}, {"name": "thematic_classification", "columns": ["objective"]}, {"name": "story_rating"}]'
@@ -142,6 +147,23 @@ class Settings(BaseSettings):
         except (json.JSONDecodeError, TypeError) as e:
             raise ValueError(f"Invalid JSON configuration for {info.field_name}: {e}") from e
         return v
+
+    @field_validator("LOG_DIR")
+    @classmethod
+    def validate_log_dir(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("LOG_DIR must not be blank.")
+        return v
+
+    @field_validator("LOG_LEVEL")
+    @classmethod
+    def validate_log_level(cls, v: str) -> str:
+        level = v.strip().upper()
+        if level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ValueError(
+                f"LOG_LEVEL must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL; got {v!r}."
+            )
+        return level
 
     @field_validator("STORY_KAFKA_SCHEMA", "DISCUSSION_KAFKA_SCHEMA")
     @classmethod
