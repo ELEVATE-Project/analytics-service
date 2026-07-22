@@ -118,6 +118,23 @@ class Settings(BaseSettings):
             raise ValueError(f"Invalid JSON configuration for {info.field_name}: {e}") from e
         return v
 
+    @field_validator("LOG_DIR")
+    @classmethod
+    def validate_log_dir(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("LOG_DIR must not be blank.")
+        return v
+
+    @field_validator("LOG_LEVEL")
+    @classmethod
+    def validate_log_level(cls, v: str) -> str:
+        level = v.strip().upper()
+        if level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ValueError(
+                f"LOG_LEVEL must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL; got {v!r}."
+            )
+        return level
+
     @field_validator("STORY_KAFKA_SCHEMA", "DISCUSSION_KAFKA_SCHEMA")
     @classmethod
     def validate_kafka_ingestion_schema_json(cls, v: str, info) -> str:
