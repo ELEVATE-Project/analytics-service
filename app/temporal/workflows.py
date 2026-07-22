@@ -1,6 +1,6 @@
 import asyncio
 from datetime import timedelta
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from temporalio import workflow
 
 with workflow.unsafe.imports_passed_through():
@@ -198,43 +198,108 @@ class ConfigDrivenProcessingWorkflow:
         }
 
 
+# Once a single workflow run has processed this many submissions, it calls
+# continue_as_new to reset its execution history rather than keep growing it.
+# Each processed submission contributes ~3 history events to this parent workflow
+# (child-workflow initiated/started/completed), so 2000 submissions is ~6000
+# events — a safe margin under Temporal's default history-size warning threshold
+# (~10,240 events), regardless of how large the pending queue actually is.
+MAX_SUBMISSIONS_PER_RUN = 2000
+
+
 @workflow.defn
 class BatchProcessingWorkflow:
     @workflow.run
-    async def run(self) -> Dict[str, Any]:
+    async def run(self, batch_size: int, carry_over: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        Runs batch execution for all pending submissions.
-        Retrieves pending records and executes child workflows in parallel.
+        Runs batch execution for all pending submissions, fetching and fanning out
+        child workflows in bounded chunks (batch_size) rather than loading the entire
+        pending queue into memory and launching all child workflows at once — at a few
+        thousand pending submissions, doing it unbounded risks OOM on the worker and
+        overwhelming the Temporal cluster with concurrent starts.
+
+        batch_size is passed in by the caller (rather than read from settings here)
+        so that replaying this workflow's history stays deterministic even if worker
+        configuration changes between the original run and a replay.
+
+        carry_over holds the running totals (total_processed/total_success/
+        total_failed/chunk_index) from a previous generation of this same logical
+        batch run, handed off via continue_as_new — absent on the very first
+        generation (the daily schedule starts this workflow with no carry_over).
         """
-        # Fetch all pending submissions and their dynamic configurations
-        pending_list: List[Dict[str, Any]] = await workflow.execute_activity(
-            fetch_pending_submissions_activity,
-            start_to_close_timeout=timedelta(minutes=2),
-            retry_policy=RetryPolicy(maximum_attempts=2)
-        )
+        carry_over = carry_over or {}
+        total_processed = carry_over.get("total_processed", 0)
+        total_success = carry_over.get("total_success", 0)
+        total_failed = carry_over.get("total_failed", 0)
+        chunk_index = carry_over.get("chunk_index", 0)
 
-        if not pending_list:
-            return {"processed_count": 0, "message": "No pending submissions found."}
+        # Tracks submissions processed by THIS generation only (unlike total_processed,
+        # which carries across continue_as_new calls) — this is what continue_as_new
+        # is triggered from, so the threshold is checked against fresh history each time.
+        processed_this_generation = 0
 
-        # Fan-out child workflows to process submissions in parallel
-        child_tasks = []
-        for pending in pending_list:
-            child_tasks.append(
+        while True:
+            pending_list: List[Dict[str, Any]] = await workflow.execute_activity(
+                fetch_pending_submissions_activity,
+                {"limit": batch_size},
+                start_to_close_timeout=timedelta(minutes=2),
+                retry_policy=RetryPolicy(maximum_attempts=2)
+            )
+
+            if not pending_list:
+                break
+
+            chunk_index += 1
+
+            # Fan-out child workflows for this chunk only, then wait for all of them
+            # before fetching the next chunk (so we never hold more than batch_size
+            # rows or concurrent child workflows at a time).
+            child_tasks = [
                 workflow.execute_child_workflow(
                     ConfigDrivenProcessingWorkflow.run,
                     pending,
                     id=f"batch-child-{pending['submission_id']}-{pending['tenant_code']}"
                 )
+                for pending in pending_list
+            ]
+            results = await asyncio.gather(*child_tasks, return_exceptions=True)
+
+            success_count = sum(1 for r in results if not isinstance(r, Exception))
+            failed_count = len(results) - success_count
+
+            total_processed += len(pending_list)
+            total_success += success_count
+            total_failed += failed_count
+            processed_this_generation += len(pending_list)
+
+            workflow.logger.info(
+                f"BatchProcessingWorkflow chunk {chunk_index}: {len(pending_list)} submissions "
+                f"({success_count} succeeded, {failed_count} failed); running total {total_processed}."
             )
 
-        # Wait for all child workflows to complete
-        results = await asyncio.gather(*child_tasks, return_exceptions=True)
-        
-        success_count = sum(1 for r in results if not isinstance(r, Exception))
-        failed_count = len(results) - success_count
+            # A short chunk means the pending queue is drained
+            if len(pending_list) < batch_size:
+                break
+
+            if processed_this_generation >= MAX_SUBMISSIONS_PER_RUN:
+                workflow.logger.info(
+                    f"BatchProcessingWorkflow processed {processed_this_generation} submissions in "
+                    f"this generation (running total {total_processed}) — continuing as new to keep "
+                    f"workflow history bounded. Remaining pending submissions continue in the next generation."
+                )
+                workflow.continue_as_new(args=[batch_size, {
+                    "total_processed": total_processed,
+                    "total_success": total_success,
+                    "total_failed": total_failed,
+                    "chunk_index": chunk_index,
+                }])
+
+        if total_processed == 0:
+            return {"processed_count": 0, "message": "No pending submissions found."}
 
         return {
-            "processed_count": len(pending_list),
-            "success_count": success_count,
-            "failed_count": failed_count
+            "processed_count": total_processed,
+            "success_count": total_success,
+            "failed_count": total_failed,
+            "chunks": chunk_index,
         }

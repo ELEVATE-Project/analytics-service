@@ -2,7 +2,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
-from typing import Optional
+from typing import Any, Dict, Optional, Tuple
 from app.config import settings
 
 logger = logging.getLogger("analytics_service.services.llm")
@@ -12,13 +12,17 @@ def openrouter_chat_completion(
     model: Optional[str] = None,
     max_tokens: Optional[int] = None,
     timeout: Optional[int] = None,
-) -> str:
+) -> Tuple[str, Dict[str, Any]]:
     """
     Makes a synchronous HTTP request to OpenRouter to generate content.
     Independent of Temporal and can be called from CLI/scripts.
 
     model/max_tokens/timeout override the global settings for this call only;
     omit (or pass None) to fall back to OPENROUTER_MODEL/LLM_MAX_TOKENS/LLM_TIMEOUT_SECONDS.
+
+    Returns (content, usage) — usage is OpenRouter's raw `usage` object (exact
+    prompt_tokens/completion_tokens/total_tokens, cost, and provider-specific
+    breakdowns), or {} in the unexpected case the response omitted it.
     """
     api_key = settings.OPENROUTER_API_KEY
     model = model or settings.OPENROUTER_MODEL
@@ -81,4 +85,20 @@ def openrouter_chat_completion(
     if not content:
         raise RuntimeError("OpenRouter response did not include content.")
 
-    return content.strip()
+    usage = response_data.get("usage") or {}
+    return content.strip(), usage
+
+
+def split_llm_usage(usage: Optional[Dict[str, Any]]) -> Tuple[int, int, Dict[str, Any]]:
+    """
+    Splits an OpenRouter `usage` object into (prompt_tokens, completion_tokens, meta_data)
+    for llm_logs: the first two map to their own dedicated columns (total_tokens is a
+    DB-generated column, derived automatically from those two — not stored directly).
+    Everything else (cost, cached/reasoning token breakdowns, etc.) goes into meta_data
+    for the full audit trail.
+    """
+    usage = usage or {}
+    prompt_tokens = int(usage.get("prompt_tokens") or 0)
+    completion_tokens = int(usage.get("completion_tokens") or 0)
+    meta_data = {k: v for k, v in usage.items() if k not in ("prompt_tokens", "completion_tokens", "total_tokens")}
+    return prompt_tokens, completion_tokens, meta_data

@@ -28,22 +28,21 @@ class Database:
 
         async with self.pool.acquire() as conn:
             if settings.RESET_DB:
-                await conn.execute("DROP SCHEMA IF EXISTS public CASCADE;")
-                await conn.execute("CREATE SCHEMA public;")
-                logger.warning("Database schema reset requested; dropped and recreated public schema.")
+                if settings.ENVIRONMENT.lower().strip() == "development":
+                    await conn.execute("DROP SCHEMA IF EXISTS public CASCADE;")
+                    await conn.execute("CREATE SCHEMA public;")
+                    logger.warning("Database schema reset requested; dropped and recreated public schema.")
+                else:
+                    logger.error(
+                        f"RESET_DB=True was requested but ENVIRONMENT={settings.ENVIRONMENT!r} is not "
+                        "'development' — refusing to drop the schema. Set ENVIRONMENT=development if "
+                        "this is intentional."
+                    )
 
             schema_sql = SCHEMA_FILE.read_text(encoding="utf-8")
             schema_sql = schema_sql.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ")
             schema_sql = schema_sql.replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ")
             await conn.execute(schema_sql)
-
-            # Dynamic migrations — add new columns to existing tables if they don't exist
-            await conn.execute(
-                "ALTER TABLE analysis_results ADD COLUMN IF NOT EXISTS category_type TEXT;"
-            )
-            await conn.execute(
-                "ALTER TABLE analysis_results ADD COLUMN IF NOT EXISTS similarity_score FLOAT;"
-            )
 
             # Always run the seed script to keep prompts in sync with seed_prompts.sql
             seed_sql = SEED_PROMPTS_FILE.read_text(encoding="utf-8")

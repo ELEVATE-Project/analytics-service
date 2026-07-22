@@ -42,6 +42,9 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 
+# Logs
+logs/
+
 # Environments and Secrets
 .env
 .venv
