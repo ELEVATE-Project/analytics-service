@@ -62,14 +62,30 @@ def _truncate_text(text: str, max_chars: int = settings.MAX_PDF_TEXT_CHARS) -> s
     return text[:max_chars] + "\n\n[... content truncated ...]"
 
 
-def _build_fallback_text(challenge: Optional[str], action_steps: Optional[str], impact: Optional[str]) -> str:
+def _stringify_field(value: Any) -> str:
+    """
+    Renders a submission field as display text for the fallback prompt. challenge/
+    action_steps are stored as TEXT[] (one element per discrete statement, see
+    operations.py's _normalize_statement_list) and come back from asyncpg as a
+    native Python list — joined here with newlines purely for human-readable
+    display, not for storage, so no round-trip ambiguity is introduced.
+    """
+    if isinstance(value, list):
+        return "\n".join(str(v).strip() for v in value if v and str(v).strip())
+    return str(value).strip() if value else ""
+
+
+def _build_fallback_text(challenge: Any, action_steps: Any, impact: Optional[str]) -> str:
     parts = []
-    if challenge and str(challenge).strip():
-        parts.append(f"Challenges and Issues:\n{str(challenge).strip()}\n")
-    if action_steps and str(action_steps).strip():
-        parts.append(f"Action Steps Taken:\n{str(action_steps).strip()}\n")
-    if impact and str(impact).strip():
-        parts.append(f"Impact and Outcomes:\n{str(impact).strip()}\n")
+    challenge_text = _stringify_field(challenge)
+    if challenge_text:
+        parts.append(f"Challenges and Issues:\n{challenge_text}\n")
+    action_steps_text = _stringify_field(action_steps)
+    if action_steps_text:
+        parts.append(f"Action Steps Taken:\n{action_steps_text}\n")
+    impact_text = _stringify_field(impact)
+    if impact_text:
+        parts.append(f"Impact and Outcomes:\n{impact_text}\n")
     return "\n".join(parts)
 
 

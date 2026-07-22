@@ -32,10 +32,11 @@ def _get_case_insensitive_key(d: dict, key: str) -> Any:
 
 def _parse_statement_list(raw_value: Any) -> Optional[List[str]]:
     """
-    Returns raw_value if it's already a list — discussion columns like
-    challenges/solutions are stored as TEXT[] (per operations.py's
-    _normalize_statement_list), which asyncpg auto-decodes to a native Python list.
-    Returns None for scalar columns (a story's objective/challenge are plain text).
+    Returns raw_value if it's already a list — statement columns like
+    discussion's challenges/solutions and story's challenge/action_steps are
+    stored as TEXT[] (per operations.py's _normalize_statement_list), which
+    asyncpg auto-decodes to a native Python list. Returns None for scalar
+    columns (e.g. a story's objective, which is plain text).
     """
     return raw_value if isinstance(raw_value, list) else None
 

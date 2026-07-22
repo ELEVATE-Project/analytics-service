@@ -126,8 +126,8 @@ CREATE TABLE story_submissions (
     tenant_code         TEXT NOT NULL,
     title               TEXT,
     objective           TEXT,
-    challenge           TEXT,
-    action_steps        TEXT,
+    challenge           TEXT[], -- one array element per discrete statement, same format as discussion_submissions.challenges (see operations.py's _normalize_statement_list)
+    action_steps        TEXT[], -- same format as challenge
     impact              TEXT,
     duration            TEXT,
     blurb               TEXT,
@@ -256,6 +256,43 @@ CREATE TABLE submission_metrics (
     FOREIGN KEY (submission_id, tenant_code) 
         REFERENCES submissions(submission_id, tenant_code) ON DELETE CASCADE
 );
+
+-- =========================================================================
+-- 11. CSV UPLOAD TRACKING
+-- =========================================================================
+
+CREATE TABLE csv_uploads (
+    id                     SERIAL PRIMARY KEY,
+    report_type            VARCHAR(100) NOT NULL,
+    program_name           VARCHAR(255),
+    leader_category        VARCHAR(255),
+    file_name              VARCHAR(500),
+    file_size              BIGINT,
+    cloud_storage_path     TEXT NOT NULL,
+    meta_data              JSONB DEFAULT '{}'::jsonb,
+    status                 VARCHAR(20) NOT NULL DEFAULT 'pending',
+    created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_csv_uploads UNIQUE (program_name, leader_category, report_type, file_name, file_size)
+);
+
+CREATE INDEX idx_csv_uploads_status
+    ON csv_uploads (status);
+
+-- Keep updated_at fresh automatically
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = now();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_csv_uploads_updated_at ON csv_uploads;
+CREATE TRIGGER trg_csv_uploads_updated_at
+    BEFORE UPDATE ON csv_uploads
+    FOR EACH ROW
+    EXECUTE FUNCTION set_updated_at();
 
 -- =========================================================================
 -- INDEXES FOR HIGH-PERFORMANCE ANALYTICS

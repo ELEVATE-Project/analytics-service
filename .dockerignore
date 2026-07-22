@@ -1,0 +1,10 @@
+thematic_analysis/
+.git
+logs/
+downloads/
+outputs/
+.env
+tests/
+__pycache__/
+.pytest_cache/
+.DS_Store
