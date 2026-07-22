@@ -48,17 +48,26 @@ def upload_to_gcp(local_file_path: str, blob_name: str) -> str:
     try:
         credentials = get_gcp_credentials()
         client = storage.Client(credentials=credentials, project=settings.PROJECT_ID)
-        bucket = client.bucket(settings.BUCKET_NAME)
+        
+        bucket_name = settings.BUCKET_NAME
+        prefix = ""
+        if "/" in bucket_name:
+            parts = bucket_name.split("/", 1)
+            bucket_name = parts[0]
+            prefix = parts[1].strip("/") + "/"
+            
+        bucket = client.bucket(bucket_name)
+        full_blob_name = f"{prefix}{blob_name}"
         
         # Upload
-        blob = bucket.blob(blob_name)
+        blob = bucket.blob(full_blob_name)
         blob.upload_from_filename(local_file_path)
         
-        logger.info(f"Successfully uploaded {local_file_path} to {settings.BUCKET_NAME}/{blob_name}")
+        logger.info(f"Successfully uploaded {local_file_path} to {bucket_name}/{full_blob_name}")
         
         # Return the relative path
         # e.g., /bucket-name/blob-name
-        return f"/{settings.BUCKET_NAME}/{blob_name}"
+        return f"/{bucket_name}/{full_blob_name}"
     except Exception as e:
         logger.error(f"Failed to upload {local_file_path} to GCP bucket {settings.BUCKET_NAME}: {e}")
         raise

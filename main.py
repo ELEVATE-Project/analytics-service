@@ -6,8 +6,8 @@ import threading
 import uvicorn
 from fastapi import FastAPI
 
-from app.api.bulk import router as bulk_router
-from app.api.routes import router as submissions_router
+from app.api.router import api_router
+from app.api.exceptions import register_exception_handlers
 from app.kafka.consumer import IngestionConsumer
 from app.logging_config import configure_logging
 from app.temporal.worker import start_worker
@@ -18,16 +18,14 @@ consumer_running = False
 worker_running = False
 
 
-def run_web():
-    """Start the FastAPI web server."""
+def create_app() -> FastAPI:
     app = FastAPI(
         title="Analytics Service API Ingestion & Orchestration Layer",
         description="FastAPI ingestion endpoints and manual orchestration controls.",
         version="1.0.0",
     )
-
-    app.include_router(submissions_router)
-    app.include_router(bulk_router)
+    register_exception_handlers(app)
+    app.include_router(api_router)
 
     @app.get("/health")
     def health_check():
@@ -37,6 +35,21 @@ def run_web():
             "worker_running": worker_running,
         }
 
+    return app
+
+
+async def run_web_async():
+    """Start the FastAPI web server asynchronously in the current loop."""
+    app = create_app()
+    logger.info("Starting FastAPI web server asynchronously...")
+    config = uvicorn.Config(app, host="0.0.0.0", port=8000, loop="asyncio")
+    server = uvicorn.Server(config)
+    await server.serve()
+
+
+def run_web():
+    """Start the FastAPI web server."""
+    app = create_app()
     logger.info("Starting FastAPI web server...")
     uvicorn.run(app, host="0.0.0.0", port=8000, log_config=None)
 
@@ -89,14 +102,11 @@ def main():
         finally:
             worker_running = False
     elif args.mode == "all":
-        web_thread = threading.Thread(target=run_web, daemon=True)
-        web_thread.start()
-
         async def run_all_services():
             global consumer_running, worker_running
             consumer_running = True
             worker_running = True
-            await asyncio.gather(run_consumer(), run_worker())
+            await asyncio.gather(run_web_async(), run_consumer(), run_worker())
 
         try:
             asyncio.run(run_all_services())
