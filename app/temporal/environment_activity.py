@@ -43,6 +43,13 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
     resolved_max_tokens = params.get("max_tokens") or settings.LLM_MAX_TOKENS
     resolved_timeout = params.get("llm_timeout_seconds") or settings.LLM_TIMEOUT_SECONDS
 
+    # Enforce that the LLM timeout is strictly less than the Temporal activity deadline (leave 15s for DB writes/parsing)
+    # This prevents orphaned threads blocking forever if Temporal times out the activity.
+    info = activity.info()
+    if info.start_to_close_timeout:
+        max_safe_timeout = int(info.start_to_close_timeout.total_seconds()) - 15
+        resolved_timeout = min(resolved_timeout, max_safe_timeout)
+
     prompt_version_id = None
     full_prompt = ""
     response_text = ""
@@ -63,7 +70,11 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
         user_prompt_tmpl = prompt_data["user_prompt"]
 
         # Extract relevant fields dynamically based on the configured columns
-        config_columns = params.get("columns", ["actionSteps", "content"])
+        config_columns = (
+            params.get("target_columns")
+            or params.get("columns")
+            or ["actionSteps", "content"]
+        )
         
         input_text_dict = {"id": submission_id}
         statements_parts = []
@@ -71,7 +82,7 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
         for col in config_columns:
             val = payload.get(col)
             if isinstance(val, list):
-                val_str = "\\n".join(str(v) for v in val if v)
+                val_str = "\n".join(str(v) for v in val if v)
                 db_str = "\n".join(str(v) for v in val if v)
             else:
                 val_str = str(val or "")
@@ -84,7 +95,11 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
         json_data = json.dumps(input_text_dict, ensure_ascii=False)
         statements_str = "\n\n".join(statements_parts)
         
-        user_prompt = user_prompt_tmpl.replace("{{csv_data}}", json_data).replace("{csv_data}", json_data).replace("{{text}}", json_data).replace("{text}", json_data)
+        user_prompt = re.sub(
+            r"\{\{?(?:csv_data|text)\}?\}",
+            lambda _: json_data,
+            user_prompt_tmpl,
+        )
 
         full_prompt = f"{system_prompt}\n\n{user_prompt}"
 
@@ -121,7 +136,7 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
         if raw_score is not None:
             try:
                 confidence_score = float(raw_score)
-            except ValueError:
+            except (TypeError, ValueError):
                 confidence_score = None
 
         meta_data = {
@@ -130,34 +145,41 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
         }
 
         async with db.pool.acquire() as conn:
-            await insert_analysis_result(
-                conn,
-                submission_id=submission_id,
-                tenant_code=tenant_code,
-                theme_id=None,
-                analysis_type=analysis_type,
-                statements=statements_str,
-                statement_type="action_steps",
-                confidence_score=confidence_score,
-                justification=rationale,
-                category_type=None,
-                improvement_environment=new_env,
-                meta_data=meta_data
-            )
+            async with conn.transaction():
+                # Make idempotent: remove any existing results for this specific analysis type on this submission
+                await conn.execute(
+                    "DELETE FROM analysis_results WHERE submission_id = $1 AND tenant_code = $2 AND analysis_type = $3",
+                    submission_id, tenant_code, analysis_type
+                )
+                
+                await insert_analysis_result(
+                    conn,
+                    submission_id=submission_id,
+                    tenant_code=tenant_code,
+                    theme_id=None,
+                    analysis_type=analysis_type,
+                    statements=statements_str,
+                    statement_type="action_steps",
+                    confidence_score=confidence_score,
+                    justification=rationale,
+                    category_type=None,
+                    improvement_environment=new_env,
+                    meta_data=meta_data
+                )
 
-            prompt_tokens, completion_tokens, usage_meta = split_llm_usage(usage)
-            await insert_llm_log(
-                conn,
-                submission_id,
-                tenant_code,
-                resolved_model,
-                analysis_type,
-                prompt_version_id,
-                prompt_tokens,
-                completion_tokens,
-                "success",
-                meta_data=usage_meta or None,
-            )
+                prompt_tokens, completion_tokens, usage_meta = split_llm_usage(usage)
+                await insert_llm_log(
+                    conn,
+                    submission_id,
+                    tenant_code,
+                    resolved_model,
+                    analysis_type,
+                    prompt_version_id,
+                    prompt_tokens,
+                    completion_tokens,
+                    "success",
+                    meta_data=usage_meta or None,
+                )
 
         return {
             "status": "success",
