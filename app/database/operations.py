@@ -519,7 +519,8 @@ async def insert_analysis_result(
     category_type: Optional[str] = None,
     similarity_score: Optional[float] = None,
     multi_theme_mapped: bool = False,
-    meta_data: Optional[Dict[str, Any]] = None
+    meta_data: Optional[Dict[str, Any]] = None,
+    improvement_environment: Optional[str] = None
 ) -> None:
     """
     Saves theme/environmental extraction analysis output to database.
@@ -532,9 +533,9 @@ async def insert_analysis_result(
         INSERT INTO analysis_results (
             submission_id, tenant_code, theme_id, analysis_type, statements,
             statement_type, confidence_score, justification, category_type,
-            similarity_score, multi_theme_mapped, meta_data
+            similarity_score, multi_theme_mapped, meta_data, improvement_environment
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         """,
         submission_id,
         tenant_code,
@@ -547,7 +548,8 @@ async def insert_analysis_result(
         category_type,
         similarity_score,
         multi_theme_mapped,
-        meta_json
+        meta_json,
+        improvement_environment
     )
 
 
