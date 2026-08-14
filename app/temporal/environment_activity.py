@@ -1,8 +1,6 @@
 import asyncio
 import json
 import logging
-import csv
-import io
 import re
 from typing import Dict, Any, List, Optional
 from temporalio import activity
@@ -34,31 +32,7 @@ async def _get_environment_prompt(conn, analysis_type: str) -> Dict[str, Any]:
         raise RuntimeError(f"No active {analysis_type} prompt version found in the database.")
     return dict(row)
 
-def _parse_llm_table_output(response_text: str) -> Dict[str, Any]:
-    # Look for a markdown table
-    lines = response_text.strip().split('\n')
-    table_lines = [line.strip() for line in lines if line.strip().startswith('|') and line.strip().endswith('|')]
-    
-    if not table_lines:
-        raise ValueError("Could not find a valid markdown table in the LLM response.")
-    
-    # We expect headers, a separator line (e.g. |---|---|), and then data rows
-    if len(table_lines) < 3:
-        raise ValueError("Markdown table does not have enough rows (header, separator, data).")
-    
-    headers = [h.strip() for h in table_lines[0].split('|')[1:-1]]
-    
-    # Take the first data row (we only pass one row in)
-    data_row_parts = table_lines[2].split('|')[1:-1]
-    
-    if len(headers) != len(data_row_parts):
-        # Handle cases where pipes inside content break the split. 
-        # For a single row, a robust approach is to look for the last 4 columns assuming the first ones might be merged
-        # But this is a basic implementation
-        logger.warning(f"Header length ({len(headers)}) does not match data length ({len(data_row_parts)})")
-    
-    row_data = {headers[i].strip(): data_row_parts[i].strip() if i < len(data_row_parts) else "" for i in range(len(headers))}
-    return row_data
+
 
 @activity.defn
 async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -88,24 +62,29 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
         system_prompt = prompt_data["system_prompt"]
         user_prompt_tmpl = prompt_data["user_prompt"]
 
-        # Extract relevant fields
-        action_steps_val = payload.get("action_steps") or payload.get("actionSteps")
-        if isinstance(action_steps_val, list):
-            action_steps = "\\n".join(action_steps_val)
-        else:
-            action_steps = str(action_steps_val or "")
-            
-        content = str(payload.get("content") or payload.get("objective") or "")
-
-        # We construct a CSV format for the single row
-        output = io.StringIO()
-        writer = csv.writer(output, quoting=csv.QUOTE_MINIMAL)
-        # Headers the prompt expects: `id`, `action_steps`, and `content`
-        writer.writerow(["id", "action_steps", "content"])
-        writer.writerow([submission_id, action_steps, content])
+        # Extract relevant fields dynamically based on the configured columns
+        config_columns = params.get("columns", ["actionSteps", "content"])
         
-        csv_data = output.getvalue()
-        user_prompt = user_prompt_tmpl.replace("{{csv_data}}", csv_data).replace("{csv_data}", csv_data)
+        input_text_dict = {"id": submission_id}
+        statements_parts = []
+        
+        for col in config_columns:
+            val = payload.get(col)
+            if isinstance(val, list):
+                val_str = "\\n".join(str(v) for v in val if v)
+                db_str = "\n".join(str(v) for v in val if v)
+            else:
+                val_str = str(val or "")
+                db_str = val_str
+                
+            input_text_dict[col] = val_str
+            if db_str.strip():
+                statements_parts.append(f"{col}:\n{db_str}")
+                
+        json_data = json.dumps(input_text_dict, ensure_ascii=False)
+        statements_str = "\n\n".join(statements_parts)
+        
+        user_prompt = user_prompt_tmpl.replace("{{csv_data}}", json_data).replace("{csv_data}", json_data).replace("{{text}}", json_data).replace("{text}", json_data)
 
         full_prompt = f"{system_prompt}\n\n{user_prompt}"
 
@@ -116,17 +95,34 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
             full_prompt, model=resolved_model, max_tokens=resolved_max_tokens, timeout=resolved_timeout,
         )
 
+        # Clean/parse LLM response as JSON
+        cleaned_response = response_text.strip()
+        if cleaned_response.startswith("```"):
+            lines = cleaned_response.splitlines()
+            if lines[0].startswith("```json") or lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            cleaned_response = "\n".join(lines).strip()
+
         try:
-            parsed_data = _parse_llm_table_output(response_text)
+            parsed_data = json.loads(cleaned_response)
         except Exception as parse_err:
-            logger.error(f"Failed to parse LLM table response: {parse_err}")
+            logger.error(f"Failed to parse LLM response JSON: {parse_err} (response length={len(response_text)})")
             raise parse_err
 
         new_env = parsed_data.get("new_environment_classification", "Unknown")
         rationale = parsed_data.get("rationale", "")
         keywords = parsed_data.get("keywords_considered", "")
         
+        # Safely parse the confidence score if it exists, otherwise leave as None
+        raw_score = parsed_data.get("confidence_score")
         confidence_score = None
+        if raw_score is not None:
+            try:
+                confidence_score = float(raw_score)
+            except ValueError:
+                confidence_score = None
 
         meta_data = {
             "keywords_considered": keywords,
@@ -134,14 +130,13 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
         }
 
         async with db.pool.acquire() as conn:
-            # According to user request: store rationale in justification, keywords_considered in meta_data, statement_type = "action_steps"
             await insert_analysis_result(
                 conn,
                 submission_id=submission_id,
                 tenant_code=tenant_code,
                 theme_id=None,
                 analysis_type=analysis_type,
-                statements=f"action_steps:\n{action_steps}\n\ncontent:\n{content}",
+                statements=statements_str,
                 statement_type="action_steps",
                 confidence_score=confidence_score,
                 justification=rationale,
