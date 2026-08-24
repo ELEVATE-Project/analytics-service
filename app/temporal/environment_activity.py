@@ -70,11 +70,7 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
         user_prompt_tmpl = prompt_data["user_prompt"]
 
         # Extract relevant fields dynamically based on the configured columns
-        config_columns = (
-            params.get("target_columns")
-            or params.get("columns")
-            or ["actionSteps", "content"]
-        )
+        config_columns = (params.get("target_columns"))
         
         input_text_dict = {"id": submission_id}
         statements_parts = []
@@ -95,11 +91,7 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
         json_data = json.dumps(input_text_dict, ensure_ascii=False)
         statements_str = "\n\n".join(statements_parts)
         
-        user_prompt = re.sub(
-            r"\{\{?(?:csv_data|text)\}?\}",
-            lambda _: json_data,
-            user_prompt_tmpl,
-        )
+        user_prompt = user_prompt_tmpl.replace("{{text}}",json_data)
 
         full_prompt = f"{system_prompt}\n\n{user_prompt}"
 
@@ -126,7 +118,7 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
             logger.error(f"Failed to parse LLM response JSON: {parse_err} (response length={len(response_text)})")
             raise parse_err
 
-        new_env = parsed_data.get("new_environment_classification", "Unknown")
+        new_env = parsed_data.get("environment_classification")
         rationale = parsed_data.get("rationale", "")
         keywords = parsed_data.get("keywords_considered", "")
         

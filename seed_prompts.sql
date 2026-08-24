@@ -386,13 +386,13 @@ You will be provided with a JSON object containing educational initiatives. The 
 
 You must carefully evaluate the data by analyzing both the `action_steps` and `content` keys. Your goal is to generate **3 new fields**:
 1. `keywords_considered`: The specific list of keywords or phrases *you* evaluated from the text to determine the environment.
-2. `new_environment_classification`: The environment(s) you are mapping this improvement into (`Classroom`, `School`, `Community`, or multiple separated by a comma).
+2. `environment_classification`: The environment(s) you are mapping this improvement into (`Classroom`, `School`, `Community`, or multiple separated by a comma).
 3. `rationale`: A concise, objective explanation justifying why this environment was chosen based on where the child''s experience shifted.
 4. `confidence_score`: A float between 0.0 and 1.0 representing your certainty of this classification.
 
 ## Rules
 
-1. **Strictly Object-Driven (Do Not Assume):** Base your judgment entirely on the text provided in `action_steps` and `content`. If the text lacks explicit details to confidently identify where the shift happened, do not guess; mark the `new_environment_classification` as "Requires Review".
+1. **Strictly Object-Driven (Do Not Assume):** Base your judgment entirely on the text provided in `action_steps` and `content`. If the text lacks explicit details to confidently identify where the shift happened, do not guess; mark the `environment_classification` as "Requires Review".
 2. **Ignore the Persona Driving the Change:** Always prioritize *where the child experiences the change*. If a community leader funds school benches, it is a `School` improvement. If a teacher visits a home to alter a parent''s mindset, it is a `Community` improvement.
 3. **Output Format:** Return ONLY a valid JSON object structure (strict JSON only, no explanation outside JSON).
 4. **Confidence Score:** Assign a `confidence_score` between 0.0 and 1.0 representing your certainty of this classification.
@@ -401,7 +401,7 @@ You must carefully evaluate the data by analyzing both the `action_steps` and `c
 
 Output a single JSON object with the following structure:
 {
-  "new_environment_classification": "...",
+  "environment_classification": "...",
   "keywords_considered": "...",
   "rationale": "...",
   "confidence_score": 0.0
