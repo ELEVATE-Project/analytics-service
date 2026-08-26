@@ -118,18 +118,35 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
             logger.error(f"Failed to parse LLM response JSON: {parse_err} (response length={len(response_text)})")
             raise parse_err
 
+        if not isinstance(parsed_data, dict):
+            raise ValueError("LLM response must be a JSON object")
+
+        required_fields = ["environment_classification", "rationale", "keywords_considered", "confidence_score"]
+        for field in required_fields:
+            if field not in parsed_data:
+                raise ValueError(f"Missing required field in LLM response: {field}")
+
         new_env = parsed_data.get("environment_classification")
-        rationale = parsed_data.get("rationale", "")
-        keywords = parsed_data.get("keywords_considered", "")
+        if not new_env or not isinstance(new_env, str):
+            raise ValueError(f"Invalid or missing environment_classification: {new_env}")
+
+        allowed_envs = {"Classroom", "School", "Community"}
+        if new_env != "Requires Review":
+            envs = [e.strip() for e in new_env.split(",")]
+            for e in envs:
+                if e not in allowed_envs:
+                    raise ValueError(f"Invalid environment value '{e}'. Allowed values are: {', '.join(allowed_envs)} or 'Requires Review'.")
+
+        rationale = str(parsed_data.get("rationale", ""))
+        keywords = str(parsed_data.get("keywords_considered", ""))
         
-        # Safely parse the confidence score if it exists, otherwise leave as None
         raw_score = parsed_data.get("confidence_score")
-        confidence_score = None
-        if raw_score is not None:
-            try:
-                confidence_score = float(raw_score)
-            except (TypeError, ValueError):
-                confidence_score = None
+        try:
+            confidence_score = float(raw_score)
+            if not (0.0 <= confidence_score <= 1.0):
+                raise ValueError("confidence_score must be a finite float between 0.0 and 1.0")
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid confidence_score: {raw_score}. Must be a float between 0.0 and 1.0.")
 
         meta_data = {
             "keywords_considered": keywords,
