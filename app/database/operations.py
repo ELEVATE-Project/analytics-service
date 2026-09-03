@@ -638,6 +638,7 @@ async def insert_analysis_result(
     multi_theme_mapped: bool = False,
     category_type: Optional[str] = None,
     meta_data: Optional[Dict[str, Any]] = None,
+    improvement_environment: Optional[str] = None,
 ) -> None:
     """
     Single unified database function to insert rows into analysis_results.
@@ -650,10 +651,20 @@ async def insert_analysis_result(
     # Map statement_type to analysis_column if analysis_column not explicitly passed
     if analysis_column is None and statement_type is not None:
         analysis_column = [statement_type]
+        
+    if llm_prediction is None and improvement_environment is not None:
+        llm_prediction = improvement_environment
+        
+    if statements is not None:
+        meta_data = meta_data or {}
+        meta_data["statements"] = statements
 
-    # Map legacy confidence score to model_confidence_score only if explicitly not set
+    # Map legacy confidence score to both model_confidence_score and llm_confidence_score only if explicitly not set
     if model_confidence_score is None and confidence_score is not None:
         model_confidence_score = confidence_score
+        
+    if llm_confidence_score is None and confidence_score is not None:
+        llm_confidence_score = confidence_score
     # NOTE: similarity_score (cosine embedding similarity) is intentionally NOT aliased
     # to model_confidence_score — they are distinct concepts.
 

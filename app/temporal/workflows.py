@@ -11,6 +11,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from app.temporal.deface_blur_activity import deface_blur_activity
     from app.temporal.pii_and_abusive_activity import pii_and_abusive_language_detection_activity
+    from app.temporal.environment_activity import environment_detection_activity
     from app.temporal.thematic_activity import thematic_classification_activity
     from app.temporal.story_rating_activity import story_rating_activity
     from app.temporal.csv_processing_activity import (
@@ -103,6 +104,25 @@ class ConfigDrivenProcessingWorkflow:
                     steps_execution[idx]["status"] = status_val
                     steps_execution[idx]["completed_timestamp"] = workflow.now().isoformat()
                     completed_steps.append("thematic_classification")
+                    workflow.logger.info(f"Completed workflow step: '{step_name}' with status: {status_val}")
+
+                elif step_name == "environment_detection":
+                    res = await workflow.execute_activity(
+                        environment_detection_activity,
+                        {
+                            "submission_id": submission_id,
+                            "tenant_code": tenant_code,
+                            "analysis_type": step_name,
+                            "target_columns": target_columns,
+                            **llm_overrides,
+                        },
+                        start_to_close_timeout=timedelta(minutes=5),
+                        retry_policy=retry_policy
+                    )
+                    status_val = res.get("status", "success") if isinstance(res, dict) else "success"
+                    steps_execution[idx]["status"] = status_val
+                    steps_execution[idx]["completed_timestamp"] = workflow.now().isoformat()
+                    completed_steps.append("environment_detection")
                     workflow.logger.info(f"Completed workflow step: '{step_name}' with status: {status_val}")
 
                 elif step_name in ("image_blur", "image_blurring"):
