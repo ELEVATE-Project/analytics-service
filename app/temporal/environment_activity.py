@@ -16,20 +16,23 @@ from app.database.operations import (
 
 logger = logging.getLogger("analytics_service.temporal.activities")
 
-async def _get_environment_prompt(conn, analysis_type: str) -> Dict[str, Any]:
+ENVIRONMENT_PROMPT_NAME = "Environment Detection"
+
+
+async def _get_environment_prompt(conn) -> Dict[str, Any]:
     row = await conn.fetchrow(
         """
         SELECT pv.id, pv.system_prompt, pv.user_prompt
         FROM prompt_version pv
         JOIN prompts p ON p.id = pv.prompt_id
-        WHERE p.analysis_type = $1 AND pv.is_active = TRUE
+        WHERE p.name = $1 AND pv.is_active = TRUE
         ORDER BY pv.created_at DESC
         LIMIT 1
         """,
-        analysis_type
+        ENVIRONMENT_PROMPT_NAME
     )
     if not row:
-        raise RuntimeError(f"No active {analysis_type} prompt version found in the database.")
+        raise RuntimeError(f"No active {ENVIRONMENT_PROMPT_NAME} prompt version found in the database.")
     return dict(row)
 
 
@@ -42,13 +45,10 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
     resolved_model = params.get("llm_model") or settings.OPENROUTER_MODEL
     resolved_max_tokens = params.get("max_tokens") or settings.LLM_MAX_TOKENS
     resolved_timeout = params.get("llm_timeout_seconds") or settings.LLM_TIMEOUT_SECONDS
+    config_columns = params.get("target_columns") or []
 
-    # Enforce that the LLM timeout is strictly less than the Temporal activity deadline (leave 15s for DB writes/parsing)
-    # This prevents orphaned threads blocking forever if Temporal times out the activity.
-    info = activity.info()
-    if info.start_to_close_timeout:
-        max_safe_timeout = int(info.start_to_close_timeout.total_seconds()) - 15
-        resolved_timeout = min(resolved_timeout, max_safe_timeout)
+    if not config_columns:
+        return {"status": "skipped", "reason": "no columns specified"}
 
     prompt_version_id = None
     full_prompt = ""
@@ -63,31 +63,32 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
                 logger.info(f"Skipping environment detection for non-story submission {submission_id}")
                 return {"status": "skipped", "reason": "not a story submission"}
 
-            prompt_data = await _get_environment_prompt(conn, analysis_type)
+            # Extract relevant fields dynamically based on the configured columns.
+            input_text_dict = {"id": submission_id}
+            statements_parts = []
+
+            for col in config_columns:
+                val = payload.get(col)
+                if isinstance(val, list):
+                    val_str = "\n".join(str(v) for v in val if v)
+                    db_str = "\n".join(str(v) for v in val if v)
+                else:
+                    val_str = str(val or "")
+                    db_str = val_str
+
+                input_text_dict[col] = val_str
+                if db_str.strip():
+                    statements_parts.append(f"{col}:\n{db_str}")
+
+            if not statements_parts:
+                return {"status": "skipped", "reason": "no source text available"}
+
+            prompt_data = await _get_environment_prompt(conn)
 
         prompt_version_id = str(prompt_data["id"])
         system_prompt = prompt_data["system_prompt"]
         user_prompt_tmpl = prompt_data["user_prompt"]
 
-        # Extract relevant fields dynamically based on the configured columns
-        config_columns = (params.get("target_columns"))
-        
-        input_text_dict = {"id": submission_id}
-        statements_parts = []
-        
-        for col in config_columns:
-            val = payload.get(col)
-            if isinstance(val, list):
-                val_str = "\n".join(str(v) for v in val if v)
-                db_str = "\n".join(str(v) for v in val if v)
-            else:
-                val_str = str(val or "")
-                db_str = val_str
-                
-            input_text_dict[col] = val_str
-            if db_str.strip():
-                statements_parts.append(f"{col}:\n{db_str}")
-                
         json_data = json.dumps(input_text_dict, ensure_ascii=False)
         statements_str = "\n\n".join(statements_parts)
         
@@ -97,6 +98,14 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
 
         # Call the LLM
         from app.services.llm import openrouter_chat_completion, split_llm_usage
+
+        # Enforce that the LLM timeout is strictly less than the Temporal activity deadline (leave 15s for DB writes/parsing)
+        # This prevents orphaned threads blocking forever if Temporal times out the activity.
+        info = activity.info()
+        if info.start_to_close_timeout:
+            max_safe_timeout = int(info.start_to_close_timeout.total_seconds()) - 15
+            resolved_timeout = min(resolved_timeout, max_safe_timeout)
+
         response_text, usage = await asyncio.to_thread(
             openrouter_chat_completion,
             full_prompt, model=resolved_model, max_tokens=resolved_max_tokens, timeout=resolved_timeout,

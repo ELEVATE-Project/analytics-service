@@ -112,11 +112,13 @@ async def insert_statement_with_parent_check(
         SELECT id
         FROM statements
         WHERE LOWER(raw_statement) = LOWER($1)
+          AND tenant_code = $2
           AND parent_id IS NULL
         ORDER BY created_at ASC
         LIMIT 1
         """,
         cleaned,
+        tenant_code,
     )
 
     # Insert with parent_id already set if a duplicate root was found — no UPDATE needed.
@@ -432,6 +434,10 @@ async def insert_or_update_submission(
                 )
 
             # Extract challenges for story submission into statements table
+            await conn.execute(
+                "DELETE FROM statements WHERE submission_id = $1 AND tenant_code = $2",
+                submission_id, tenant_code
+            )
             raw_story_challenges = data.get("challenges") or []
             if isinstance(raw_story_challenges, list):
                 for raw_challenge in raw_story_challenges:
@@ -514,6 +520,10 @@ async def insert_or_update_submission(
                 )
 
             # Extract challenges and solutions for discussion submission into statements table
+            await conn.execute(
+                "DELETE FROM statements WHERE submission_id = $1 AND tenant_code = $2",
+                submission_id, tenant_code
+            )
             raw_challenges = data.get("challenges") or []
             if isinstance(raw_challenges, list):
                 for raw_challenge in raw_challenges:

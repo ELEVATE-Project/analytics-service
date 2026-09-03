@@ -412,5 +412,5 @@ Output a single JSON object with the following structure:
   'Seeded Environment Detection prompt',
   now()
 FROM prompts p
-WHERE p.analysis_type = 'environment_detection'
+WHERE p.name = 'Environment Detection'
 ON CONFLICT (prompt_id, version) DO UPDATE SET system_prompt = EXCLUDED.system_prompt, user_prompt = EXCLUDED.user_prompt;
