@@ -112,13 +112,11 @@ async def insert_statement_with_parent_check(
         SELECT id
         FROM statements
         WHERE LOWER(raw_statement) = LOWER($1)
-          AND tenant_code = $2
           AND parent_id IS NULL
         ORDER BY created_at ASC
         LIMIT 1
         """,
         cleaned,
-        tenant_code,
     )
 
     # Insert with parent_id already set if a duplicate root was found — no UPDATE needed.
