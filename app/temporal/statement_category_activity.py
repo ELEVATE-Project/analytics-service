@@ -134,14 +134,33 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             )
             try:
                 llm_result, usage = await asyncio.to_thread(_llm_classify, stmt["raw_statement"])
-                llm_pred = llm_result.get("category")
-                llm_conf = llm_result.get("confidence")
-                justification = llm_result.get("justification")
+                if not isinstance(llm_result, dict):
+                    raise ValueError(f"LLM response is not a dict: {type(llm_result)}")
+
+                raw_cat = llm_result.get("category")
+                raw_conf = llm_result.get("confidence")
+                raw_just = llm_result.get("justification")
+
+                if not isinstance(raw_cat, str) or not raw_cat.strip():
+                    raise ValueError(f"Invalid LLM category: {raw_cat!r}")
+
+                import math
+                conf_float = float(raw_conf)
+                if not math.isfinite(conf_float) or not (0.0 <= conf_float <= 1.0):
+                    raise ValueError(f"LLM confidence score out of range [0.0, 1.0]: {raw_conf!r}")
+
+                if raw_just is not None and not isinstance(raw_just, str):
+                    raw_just = str(raw_just)
+
+                llm_pred = raw_cat.strip()
+                llm_conf = conf_float
+                justification = raw_just
             except Exception as e:
                 logger.error("LLM fallback failed for statement [%s]: %s", stmt["id"], e)
                 llm_pred = "Other"
                 llm_conf = 0.0
                 justification = f"LLM error: {e}"
+
 
         final_category = llm_pred if llm_pred else model_pred
 
