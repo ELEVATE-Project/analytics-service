@@ -18,44 +18,32 @@ from app.services.classifier import load_setfit_model, predict_setfit_batch
 logger = logging.getLogger("analytics_service.temporal.statement_category")
 
 
-# -------------------------------------------------------------------------
-# LLM fallback prompt — used when SetFit confidence is below threshold.
-# -------------------------------------------------------------------------
-LLM_CATEGORIZATION_PROMPT = """You are an expert data annotator and ML data cleaner. Your task is to categorize sentences from community discussions about education and social issues into exactly one of three categories: Challenge, Solution or Action, or Other.
-
-You must be completely consistent and follow these strict guidelines:
-
-Category 1: Challenge
-Definition: The sentence describes a problem, obstacle, barrier, hardship, or a lack of resources that prevents a positive outcome (like going to school).
-Key Indicators: "cannot", "unable to", "due to lack of", "problem", "difficult", "far away" (without a means to travel).
-Example: "She is not going to school because she does not have a bicycle."
-Example: "Many girls cannot study because schools are far away."
-
-Category 2: Solution or Action
-Definition: The sentence describes a step taken, an action performed, a suggestion given, or a resource provided to solve a problem or improve a situation.
-Crucial Rule: If a sentence mentions a problem, but ALSO mentions how it is being solved, overcome, or addressed (e.g., "The school is far, BUT the government gave bicycles"), it MUST be categorized as Solution or Action.
-Key Indicators: "decided to", "arranged for", "motivated", "advised", "providing", "can go by".
-Example: "If it is far away, you can go to school by bicycle." (Proposing a solution)
-Example: "The community decided to get Aadhaar cards made for the children." (Action taken)
-Example: "Due to the school being far away, I will arrange for a bicycle." (Action taken to overcome a challenge)
-
-Category 3: Other
-Definition: The sentence is a general statement, a fact, greetings, or contextual information that does not clearly articulate a specific barrier nor a specific action/solution.
-Example: "The members told the people sitting there that they can go home but listen for 5 minutes."
-Example: "Some people are aware about education."
-
-Text: "{text}"
-
-Return ONLY a valid JSON object matching this format (no markdown, no extra text):
-{{"category": "Challenge or Solution or Action or Other", "confidence": 0.XX, "justification": "Brief reason"}}"""
+async def _get_statement_category_prompt(conn, analysis_type: str = "statement_category") -> Dict[str, Any]:
+    """Fetch the active statement_category prompt version from the database."""
+    row = await conn.fetchrow(
+        """
+        SELECT pv.id, pv.system_prompt, pv.user_prompt
+        FROM prompt_version pv
+        JOIN prompts p ON p.id = pv.prompt_id
+        WHERE p.analysis_type = $1 AND pv.is_active = TRUE
+        ORDER BY pv.created_at DESC
+        LIMIT 1
+        """,
+        analysis_type,
+    )
+    if not row:
+        raise RuntimeError(f"No active {analysis_type} prompt version found in database.")
+    return dict(row)
 
 
-def _llm_classify(text: str):
-    """Call the LLM to classify a single statement (blocking)."""
+def _llm_classify(text: str, system_prompt: str, user_prompt: str):
+    """Call the LLM to classify a single statement using prompts from database (blocking)."""
     from app.services.llm import openrouter_chat_completion
 
-    prompt = LLM_CATEGORIZATION_PROMPT.replace("{text}", text)
-    response_text, usage = openrouter_chat_completion(prompt)
+    formatted_user_prompt = user_prompt.replace("{{text}}", text)
+    full_prompt = f"{system_prompt}\n\n{formatted_user_prompt}"
+
+    response_text, usage = openrouter_chat_completion(full_prompt)
 
     # Clean markdown wrappers if present
     cleaned = response_text.strip()
@@ -95,9 +83,10 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         submission_id, tenant_code, threshold,
     )
 
-    # 1. Fetch original statements (skip duplicates with parent_id set)
+    # 1. Fetch original statements and active prompt from DB
     async with db.pool.acquire() as conn:
         statements = await fetch_statements_for_submission(conn, submission_id, tenant_code)
+        prompt_data = await _get_statement_category_prompt(conn)
 
     if not statements:
         logger.info("No statements found for submission=%s — skipping.", submission_id)
@@ -133,7 +122,13 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 stmt["id"], model_conf, threshold,
             )
             try:
-                llm_result, usage = await asyncio.to_thread(_llm_classify, stmt["raw_statement"])
+                llm_result, usage = await asyncio.to_thread(
+                    _llm_classify,
+                    stmt["raw_statement"],
+                    prompt_data["system_prompt"],
+                    prompt_data["user_prompt"],
+                )
+
                 if not isinstance(llm_result, dict):
                     raise ValueError(f"LLM response is not a dict: {type(llm_result)}")
 

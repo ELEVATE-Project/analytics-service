@@ -7,8 +7,10 @@ INSERT INTO prompts (name, analysis_type, created_at, updated_at)
 VALUES
   ('PII and Abusive-Language Detection', 'pii_and_abusive_language_detection', now(), now()),
   ('Theme Classification', 'thematic_classification', now(), now()),
-  ('Story Rating', 'story_rating', now(), now())
+  ('Story Rating', 'story_rating', now(), now()),
+  ('Statement Categorization', 'statement_category', now(), now())
 ON CONFLICT (name) DO NOTHING;
+
 
 -- =========================================================================
 -- 2. Seed prompt versions with system_prompt / user_prompt split
@@ -348,3 +350,59 @@ Return every column in {columns}, even if empty (empty arrays, false, no missing
 FROM prompts p
 WHERE p.name = 'PII and Abusive-Language Detection'
 ON CONFLICT (prompt_id, version) DO UPDATE SET system_prompt = EXCLUDED.system_prompt, user_prompt = EXCLUDED.user_prompt;
+
+
+-- 2d. Statement Categorization prompt
+INSERT INTO prompt_version (prompt_id, version, system_prompt, user_prompt, is_active, change_note, created_at)
+SELECT
+  p.id,
+  1,
+  -- system_prompt: role definition, classification guidelines, category definitions, examples, output format
+  E'# Statement Categorization Prompt
+
+## Overview
+
+You are an expert data annotator and ML data cleaner. Your task is to categorize sentences from community discussions about education and social issues into exactly one of three categories: Challenge, Solution or Action, or Other.
+
+## Categorization Guidelines
+
+You must be completely consistent and follow these strict guidelines:
+
+### Category 1: Challenge
+- **Definition**: The sentence describes a problem, obstacle, barrier, hardship, or a lack of resources that prevents a positive outcome (like going to school).
+- **Key Indicators**: "cannot", "unable to", "due to lack of", "problem", "difficult", "far away" (without a means to travel).
+- **Example**: "She is not going to school because she does not have a bicycle."
+- **Example**: "Many girls cannot study because schools are far away."
+
+### Category 2: Solution or Action
+- **Definition**: The sentence describes a step taken, an action performed, a suggestion given, or a resource provided to solve a problem or improve a situation.
+- **Crucial Rule**: If a sentence mentions a problem, but ALSO mentions how it is being solved, overcome, or addressed (e.g., "The school is far, BUT the government gave bicycles"), it MUST be categorized as Solution or Action.
+- **Key Indicators**: "decided to", "arranged for", "motivated", "advised", "providing", "can go by".
+- **Example**: "If it is far away, you can go to school by bicycle." (Proposing a solution)
+- **Example**: "The community decided to get Aadhaar cards made for the children." (Action taken)
+- **Example**: "Due to the school being far away, I will arrange for a bicycle." (Action taken to overcome a challenge)
+
+### Category 3: Other
+- **Definition**: The sentence is a general statement, a fact, greetings, or contextual information that does not clearly articulate a specific barrier nor a specific action/solution.
+- **Example**: "The members told the people sitting there that they can go home but listen for 5 minutes."
+- **Example**: "Some people are aware about education."
+
+## Output Format
+
+Return ONLY a valid JSON object matching this format (no markdown, no extra text):
+
+{
+  "category": "Challenge or Solution or Action or Other",
+  "confidence": 0.XX,
+  "justification": "Brief reason"
+}',
+  -- user_prompt: input text placeholder
+  E'Text to classify:
+"{{text}}"',
+  TRUE,
+  'Seeded statement categorization prompt v1 — system/user split',
+  now()
+FROM prompts p
+WHERE p.name = 'Statement Categorization'
+ON CONFLICT (prompt_id, version) DO UPDATE SET system_prompt = EXCLUDED.system_prompt, user_prompt = EXCLUDED.user_prompt;
+
