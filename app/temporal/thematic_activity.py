@@ -634,7 +634,8 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
             statement      = stmt["raw_statement"]
             statement_type = stmt["statement_type"]
             statement_id   = stmt["statement_id"]
-            is_discussion  = True
+            sub_type       = str(stmt.get("submission_type") or "").lower()
+            is_discussion  = "discussion" in sub_type
 
             if conf >= settings.SETFIT_THEME_CONFIDENCE_THRESHOLD:
                 has_pii_tag = bool(re.search(r'<[A-Z]+>', statement))

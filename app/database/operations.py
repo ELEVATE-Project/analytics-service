@@ -980,7 +980,8 @@ async def fetch_challenge_statements_for_submission(
         SELECT
             ar.statement_id,
             s.raw_statement,
-            s.statement_type
+            s.statement_type,
+            s.submission_type
         FROM analysis_results ar
         JOIN statements s ON s.id = ar.statement_id
         WHERE ar.submission_id  = $1
