@@ -244,7 +244,6 @@ async def _run_local_classification(
             statement_id=statement_id,
             theme_id=None,
             analysis_type="theme",
-            statements=statement,
             statement_type=statement_type,
             category_type="Unknown/Unclear",
             meta_data=diagnostics,
@@ -281,11 +280,11 @@ async def _run_local_classification(
             statement_id=statement_id,
             theme_id=None,
             analysis_type="theme",
-            statements=statement,
             statement_type=statement_type,
             category_type="Flagged",
             meta_data=diagnostics,
         )
+
         reason = "contains a PII mask tag" if has_pii_tag else f"column {statement_type} was flagged for abusive content"
         logger.info(f"[Thematic Pipeline] -> FAILED safety check. Statement {reason}.")
         return result, None
