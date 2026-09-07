@@ -956,7 +956,7 @@ async def fetch_statements_for_submission(
     return [dict(row) for row in rows]
 
 
-async def fetch_challenge_statements_for_submission(
+async def fetch_challenge_and_solution_statements_for_submission(
     conn: asyncpg.Connection,
     submission_id: str,
     tenant_code: str,
@@ -968,7 +968,7 @@ async def fetch_challenge_statements_for_submission(
     Effective-category resolution rule (applied in SQL):
       - If llm_prediction IS NOT NULL  → use llm_prediction
       - Else                           → use model_prediction
-    Only rows where the effective category is 'Challenge', 'Solution', or 'Solution or Action' are returned.
+    Only rows where the effective category is 'Challenge' or 'Solution or Action' are returned.
 
     Each row contains:
       statement_id  (UUID, FK into statements)
@@ -987,11 +987,42 @@ async def fetch_challenge_statements_for_submission(
           AND ar.tenant_code    = $2
           AND ar.analysis_type  = 'statement_category'
           AND (
-              (ar.llm_prediction IS NULL     AND LOWER(ar.model_prediction) IN ('challenge', 'solution', 'solution or action'))
-           OR (ar.llm_prediction IS NOT NULL AND LOWER(ar.llm_prediction)   IN ('challenge', 'solution', 'solution or action'))
+              (ar.llm_prediction IS NULL     AND LOWER(ar.model_prediction) IN ('challenge', 'solution or action'))
+           OR (ar.llm_prediction IS NOT NULL AND LOWER(ar.llm_prediction)   IN ('challenge', 'solution or action'))
           )
         ORDER BY ar.created_at ASC
         """,
         str(submission_id), tenant_code,
+    )
+    return [dict(row) for row in rows]
+
+
+async def fetch_child_statements(
+    conn: asyncpg.Connection,
+    parent_statement_id: Any,
+    submission_id: str,
+    tenant_code: str,
+) -> List[Dict[str, Any]]:
+    """
+    Fetches all duplicate (child) statements whose parent_id equals the given
+    parent_statement_id within the same submission.
+
+    These are statements that were deduplicated at insert time and therefore
+    skipped during analysis. Their analysis_results rows should be copied from
+    the parent after the parent is processed.
+
+    Returns rows with: id (the child statement_id), statement_type.
+    Returns an empty list when no children exist.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT id, statement_type
+        FROM statements
+        WHERE parent_id   = $1
+          AND submission_id = $2
+          AND tenant_code   = $3
+        ORDER BY created_at ASC
+        """,
+        str(parent_statement_id), str(submission_id), tenant_code,
     )
     return [dict(row) for row in rows]

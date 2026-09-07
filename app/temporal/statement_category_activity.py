@@ -8,6 +8,7 @@ from temporalio import activity
 from app.config import settings
 from app.database.db import db
 from app.database.operations import (
+    fetch_child_statements,
     fetch_statements_for_submission,
     insert_analysis_result,
     update_submission_status,
@@ -18,43 +19,25 @@ from app.services.classifier import load_setfit_model, predict_setfit_batch
 logger = logging.getLogger("analytics_service.temporal.statement_category")
 
 
-# -------------------------------------------------------------------------
-# LLM fallback prompt — used when SetFit confidence is below threshold.
-# -------------------------------------------------------------------------
-LLM_CATEGORIZATION_PROMPT = """You are an expert data annotator and ML data cleaner. Your task is to categorize sentences from community discussions about education and social issues into exactly one of three categories: Challenge, Solution or Action, or Other.
-
-You must be completely consistent and follow these strict guidelines:
-
-Category 1: Challenge
-Definition: The sentence describes a problem, obstacle, barrier, hardship, or a lack of resources that prevents a positive outcome (like going to school).
-Key Indicators: "cannot", "unable to", "due to lack of", "problem", "difficult", "far away" (without a means to travel).
-Example: "She is not going to school because she does not have a bicycle."
-Example: "Many girls cannot study because schools are far away."
-
-Category 2: Solution or Action
-Definition: The sentence describes a step taken, an action performed, a suggestion given, or a resource provided to solve a problem or improve a situation.
-Crucial Rule: If a sentence mentions a problem, but ALSO mentions how it is being solved, overcome, or addressed (e.g., "The school is far, BUT the government gave bicycles"), it MUST be categorized as Solution or Action.
-Key Indicators: "decided to", "arranged for", "motivated", "advised", "providing", "can go by".
-Example: "If it is far away, you can go to school by bicycle." (Proposing a solution)
-Example: "The community decided to get Aadhaar cards made for the children." (Action taken)
-Example: "Due to the school being far away, I will arrange for a bicycle." (Action taken to overcome a challenge)
-
-Category 3: Other
-Definition: The sentence is a general statement, a fact, greetings, or contextual information that does not clearly articulate a specific barrier nor a specific action/solution.
-Example: "The members told the people sitting there that they can go home but listen for 5 minutes."
-Example: "Some people are aware about education."
-
-Text: "{text}"
-
-Return ONLY a valid JSON object matching this format (no markdown, no extra text):
-{{"category": "Challenge or Solution or Action or Other", "confidence": 0.XX, "justification": "Brief reason"}}"""
+async def _get_statement_category_prompt(conn) -> Dict[str, Any]:
+    row = await conn.fetchrow("""
+        SELECT pv.id, pv.system_prompt, pv.user_prompt
+        FROM prompt_version pv
+        JOIN prompts p ON p.id = pv.prompt_id
+        WHERE p.name = 'Statement Category' AND pv.is_active = TRUE
+        ORDER BY pv.created_at DESC LIMIT 1
+    """)
+    if not row:
+        raise RuntimeError("No active statement category prompt version found in the database.")
+    return dict(row)
 
 
-def _llm_classify(text: str):
+def _llm_classify(text: str, system_prompt: str, user_prompt: str):
     """Call the LLM to classify a single statement (blocking)."""
     from app.services.llm import openrouter_chat_completion
 
-    prompt = LLM_CATEGORIZATION_PROMPT.replace("{text}", text)
+    u_prompt = user_prompt.replace("{{text}}", text)
+    prompt = f"{system_prompt}\n\n{u_prompt}"
     response_text, usage = openrouter_chat_completion(prompt)
 
     # Clean markdown wrappers if present
@@ -88,11 +71,11 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     """
     submission_id = params["submission_id"]
     tenant_code = params["tenant_code"]
-    threshold = settings.SETFIT_CONFIDENCE_THRESHOLD
+    thresholds = settings.SETFIT_CONFIDENCE_THRESHOLD
 
     logger.info(
-        "Starting statement categorization for submission=%s tenant=%s (threshold=%.2f)",
-        submission_id, tenant_code, threshold,
+        "Starting statement categorization for submission=%s tenant=%s (thresholds=%s)",
+        submission_id, tenant_code, thresholds,
     )
 
     # 1. Fetch original statements (skip duplicates with parent_id set)
@@ -104,6 +87,12 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "skipped", "reason": "no statements found"}
 
     logger.info("Found %d statements to classify for submission=%s", len(statements), submission_id)
+
+    # 1.5. Fetch the LLM prompt from database
+    async with db.pool.acquire() as conn:
+        prompt_data = await _get_statement_category_prompt(conn)
+    system_prompt = prompt_data["system_prompt"]
+    user_prompt = prompt_data["user_prompt"]
 
     # 2. Load the SetFit model (blocking — run in thread)
     model = await asyncio.to_thread(
@@ -122,18 +111,21 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         model_pred = str(predictions[i])
         model_conf = float(confidence_scores[i])
 
+        category_key = model_pred.lower()
+        current_threshold = thresholds.get(category_key, 0.80)
+
         llm_pred = None
         llm_conf = None
         justification = None
 
-        if model_conf < threshold:
+        if model_conf < current_threshold:
             # LLM fallback
             logger.info(
                 "Statement [%s] confidence %.2f < threshold %.2f — calling LLM fallback.",
-                stmt["id"], model_conf, threshold,
+                stmt["id"], model_conf, current_threshold,
             )
             try:
-                llm_result, usage = await asyncio.to_thread(_llm_classify, stmt["raw_statement"])
+                llm_result, usage = await asyncio.to_thread(_llm_classify, stmt["raw_statement"], system_prompt, user_prompt)
                 llm_pred = llm_result.get("category")
                 llm_conf = llm_result.get("confidence")
                 justification = llm_result.get("justification")
@@ -154,9 +146,11 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             "llm_conf": llm_conf,
             "justification": justification,
             "final_category": final_category,
+            "current_threshold": current_threshold,
         })
 
-    # 5. Bulk insert into analysis_results
+    # 5. Bulk insert into analysis_results (parent statements only)
+    child_copy_count = 0
     async with db.pool.acquire() as conn:
         for r in results:
             await insert_analysis_result(
@@ -172,16 +166,49 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 model_prediction=r["model_pred"],
                 llm_confidence_score=r["llm_conf"],
                 llm_prediction=r["llm_pred"],
-                threshold=threshold,
+                threshold=r.get("current_threshold", 0.80),
                 justification=r["justification"],
             )
+
+            # 5a. Propagate the same result to any duplicate (child) statements so
+            #     every statement_id has its own analysis_results row.  Consumers
+            #     never need to walk parent_id chains to read classification output.
+            children = await fetch_child_statements(
+                conn,
+                parent_statement_id=r["statement_id"],
+                submission_id=submission_id,
+                tenant_code=tenant_code,
+            )
+            for child in children:
+                await insert_analysis_result(
+                    conn,
+                    submission_id=submission_id,
+                    tenant_code=tenant_code,
+                    statement_id=child["id"],
+                    analysis_type="statement_category",
+                    analysis_column=[child["statement_type"]],
+                    ml_model_name=settings.SETFIT_MODEL_ID,
+                    ml_model_version=settings.SETFIT_MODEL_VERSION,
+                    model_confidence_score=r["model_conf"],
+                    model_prediction=r["model_pred"],
+                    llm_confidence_score=r["llm_conf"],
+                    llm_prediction=r["llm_pred"],
+                    threshold=r.get("current_threshold", 0.80),
+                    justification=r["justification"],
+                    meta_data={"deduped_from": str(r["statement_id"])},
+                )
+                child_copy_count += 1
+                logger.debug(
+                    "Copied statement_category result from parent [%s] to child [%s]",
+                    r["statement_id"], child["id"],
+                )
 
     model_only_count = sum(1 for r in results if not r["llm_pred"])
     llm_fallback_count = sum(1 for r in results if r["llm_pred"])
 
     logger.info(
-        "Statement categorization complete for submission=%s: %d total, %d model-only, %d LLM-fallback",
-        submission_id, len(results), model_only_count, llm_fallback_count,
+        "Statement categorization complete for submission=%s: %d total, %d model-only, %d LLM-fallback, %d child copies",
+        submission_id, len(results), model_only_count, llm_fallback_count, child_copy_count,
     )
 
     return {
@@ -189,4 +216,5 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         "total": len(results),
         "model_only": model_only_count,
         "llm_fallback": llm_fallback_count,
+        "child_copies": child_copy_count,
     }

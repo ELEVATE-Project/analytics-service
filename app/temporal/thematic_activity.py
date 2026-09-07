@@ -1,3 +1,4 @@
+from app.database.operations import fetch_challenge_and_solution_statements_for_submission
 import asyncio
 import json
 import logging
@@ -10,9 +11,9 @@ from temporalio import activity
 from app.config import settings
 from app.database.db import db
 from app.database.operations import (
+    fetch_child_statements,
     insert_llm_log,
     insert_analysis_result,
-    fetch_challenge_statements_for_submission,
 )
 from app.services.classifier import load_setfit_model, predict_setfit_batch
 from app.services.llm import openrouter_chat_completion, split_llm_usage
@@ -93,7 +94,7 @@ async def _get_theme_classification_prompt(conn, analysis_type: str) -> dict:
         SELECT pv.id, pv.system_prompt, pv.user_prompt
         FROM prompt_version pv
         JOIN prompts p ON p.id = pv.prompt_id
-        WHERE (p.analysis_type = $1 OR p.analysis_type = 'thematic_classification' OR p.analysis_type = 'theme')
+        WHERE (p.analysis_type = $1 OR p.analysis_type = 'thematic_classification')
           AND pv.is_active = TRUE
         ORDER BY pv.created_at DESC
         LIMIT 1
@@ -153,8 +154,7 @@ def _finalize_qualifying_themes(
 ) -> List[Dict[str, Any]]:
     """
     Dedupes resolved LLM classification items by theme_id (keeping the highest-confidence
-    instance per theme), filters to those clearing LLM_CONFIDENCE_SCORE_THRESHOLD, and caps
-    to a single theme for stories (or MAX_MULTI_THEME_MATCHES for discussions).
+    instance per theme) and caps to a single theme for stories (or MAX_MULTI_THEME_MATCHES for discussions).
     """
     best_by_theme: Dict[str, Dict[str, Any]] = {}
     for item in resolved_items:
@@ -162,8 +162,6 @@ def _finalize_qualifying_themes(
         if not tid:
             continue
         conf = item["confidence_score"]
-        if conf < settings.LLM_CONFIDENCE_SCORE_THRESHOLD:
-            continue
         existing = best_by_theme.get(tid)
         if existing is None or conf > existing["confidence_score"]:
             best_by_theme[tid] = item
@@ -243,8 +241,7 @@ async def _run_local_classification(
             tenant_code=tenant_code,
             statement_id=statement_id,
             theme_id=None,
-            analysis_type="theme",
-            statements=statement,
+            analysis_type="thematic_classification",
             statement_type=statement_type,
             category_type="Unknown/Unclear",
             meta_data=diagnostics,
@@ -280,7 +277,7 @@ async def _run_local_classification(
             tenant_code=tenant_code,
             statement_id=statement_id,
             theme_id=None,
-            analysis_type="theme",
+            analysis_type="thematic_classification",
             statements=statement,
             statement_type=statement_type,
             category_type="Flagged",
@@ -499,20 +496,23 @@ async def _run_batched_llm_fallback(
                 ]
 
                 for item in qualifying_llm:
+                    setfit_pred = pending.get("setfit_pred")
+                    setfit_threshold = settings.get_setfit_theme_threshold(setfit_pred) if setfit_pred else None
                     await insert_analysis_result(
                         conn,
                         submission_id=submission_id,
                         tenant_code=tenant_code,
                         statement_id=pending.get("statement_id"),
                         theme_id=item["theme_id"],
-                        analysis_type="theme",
+                        analysis_type="thematic_classification",
                         statement_type=statement_type,
                         category_type="Standard",
-                        ml_model_name=resolved_model or settings.OPENROUTER_MODEL,
+                        ml_model_name=settings.SETFIT_THEME_MODEL_ID,
+                        ml_model_version=settings.SETFIT_THEME_MODEL_VERSION,
                         model_confidence_score=pending.get("setfit_conf"),
-                        model_prediction=pending.get("setfit_pred"),
+                        model_prediction=setfit_pred,
                         llm_prediction=item["theme_name"],
-                        threshold=settings.SETFIT_THEME_CONFIDENCE_THRESHOLD,
+                        threshold=setfit_threshold,
                         llm_confidence_score=item["confidence_score"],
                         justification=item["justification"],
                         multi_theme_mapped=is_multi,
@@ -524,26 +524,82 @@ async def _run_batched_llm_fallback(
                     f"LLM match{'es' if is_multi else ''} (batched): '{statement[:60]}...' → {theme_names} "
                     f"(conf={[round(item['confidence_score'], 2) for item in qualifying_llm]})"
                 )
+                # Propagate each qualifying theme result to duplicate (child) statements
+                parent_stmt_id = pending.get("statement_id")
+                _children = await fetch_child_statements(conn, parent_stmt_id, submission_id, tenant_code)
+                for _child in _children:
+                    for item in qualifying_llm:
+                        setfit_pred = pending.get("setfit_pred")
+                        setfit_threshold = settings.get_setfit_theme_threshold(setfit_pred) if setfit_pred else None
+                        await insert_analysis_result(
+                            conn,
+                            submission_id=submission_id,
+                            tenant_code=tenant_code,
+                            statement_id=_child["id"],
+                            theme_id=item["theme_id"],
+                            analysis_type="thematic_classification",
+                            statement_type=_child["statement_type"],
+                            category_type="Standard",
+                            ml_model_name=settings.SETFIT_THEME_MODEL_ID,
+                            ml_model_version=settings.SETFIT_THEME_MODEL_VERSION,
+                            model_confidence_score=pending.get("setfit_conf"),
+                            model_prediction=setfit_pred,
+                            llm_prediction=item["theme_name"],
+                            threshold=setfit_threshold,
+                            llm_confidence_score=item["confidence_score"],
+                            justification=item["justification"],
+                            multi_theme_mapped=is_multi,
+                            meta_data={"deduped_from": str(parent_stmt_id)},
+                        )
+                    logger.debug("[Thematic Pipeline] Copied LLM Standard result from parent [%s] to child [%s]", parent_stmt_id, _child["id"])
             else:
                 result["category_type"] = "Others"
+                setfit_pred = pending.get("setfit_pred")
+                setfit_threshold = settings.get_setfit_theme_threshold(setfit_pred) if setfit_pred else None
                 await insert_analysis_result(
                     conn,
                     submission_id=submission_id,
                     tenant_code=tenant_code,
                     statement_id=pending.get("statement_id"),
                     theme_id=None,
-                    analysis_type="theme",
+                    analysis_type="thematic_classification",
                     statement_type=statement_type,
                     category_type="Others",
-                    ml_model_name=resolved_model or settings.OPENROUTER_MODEL,
+                    ml_model_name=settings.SETFIT_THEME_MODEL_ID,
+                    ml_model_version=settings.SETFIT_THEME_MODEL_VERSION,
                     model_confidence_score=pending.get("setfit_conf"),
-                    model_prediction=pending.get("setfit_pred"),
-                    threshold=settings.SETFIT_THEME_CONFIDENCE_THRESHOLD,
+                    model_prediction=setfit_pred,
+                    threshold=setfit_threshold,
                     llm_confidence_score=llm_confidence,
                     justification=llm_justification,
                     meta_data=diagnostics,
                 )
                 logger.info(f"Statement marked Others (low confidence, batched): {statement[:80]}...")
+                # Propagate Others result to duplicate (child) statements
+                parent_stmt_id = pending.get("statement_id")
+                _children = await fetch_child_statements(conn, parent_stmt_id, submission_id, tenant_code)
+                for _child in _children:
+                    setfit_pred = pending.get("setfit_pred")
+                    setfit_threshold = settings.get_setfit_theme_threshold(setfit_pred) if setfit_pred else None
+                    await insert_analysis_result(
+                        conn,
+                        submission_id=submission_id,
+                        tenant_code=tenant_code,
+                        statement_id=_child["id"],
+                        theme_id=None,
+                        analysis_type="thematic_classification",
+                        statement_type=_child["statement_type"],
+                        category_type="Others",
+                        ml_model_name=settings.SETFIT_THEME_MODEL_ID,
+                        ml_model_version=settings.SETFIT_THEME_MODEL_VERSION,
+                        model_confidence_score=pending.get("setfit_conf"),
+                        model_prediction=setfit_pred,
+                        threshold=setfit_threshold,
+                        llm_confidence_score=llm_confidence,
+                        justification=llm_justification,
+                        meta_data={"deduped_from": str(parent_stmt_id)},
+                    )
+                    logger.debug("[Thematic Pipeline] Copied Others result from parent [%s] to child [%s]", parent_stmt_id, _child["id"])
 
             results.append(result)
 
@@ -553,11 +609,11 @@ async def _run_batched_llm_fallback(
 @activity.defn
 async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Temporal activity that performs thematic classification on Challenge statements.
+    Temporal activity that performs thematic classification on Challenge and solution statements.
 
     Logic:
       1. Fetch Challenge-classified statements from analysis_results + statements.
-      2. Run SetFit batch inference (PrashantG6838/theme_tagging).
+      2. Run SetFit batch inference.
       3. Confident SetFit hits (>= 0.80) are safety-checked and inserted as Standard/Flagged.
       4. Low-confidence statements (< 0.80) pass word-count and safety gates in _run_local_classification.
       5. Statements passing both gates are batched into ONE LLM fallback call.
@@ -574,8 +630,8 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
     logger.info(f"[Thematic Pipeline] Starting activity for submission={submission_id}, tenant={tenant_code}")
 
     async with db.pool.acquire() as conn:
-        challenge_statements = await fetch_challenge_statements_for_submission(conn, submission_id, tenant_code)
-        if not challenge_statements:
+        statements = await fetch_challenge_and_solution_statements_for_submission(conn, submission_id, tenant_code)
+        if not statements:
             logger.info(f"[Thematic Pipeline] No Challenge/Solution statements found for submission={submission_id}.")
             return {
                 "status": "success",
@@ -623,7 +679,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
         settings.SETFIT_THEME_MODEL_ID,
         settings.SETFIT_THEME_MODEL_VERSION,
     )
-    texts = [s["raw_statement"] for s in challenge_statements]
+    texts = [s["raw_statement"] for s in statements]
     setfit_preds, setfit_confs = await asyncio.to_thread(predict_setfit_batch, setfit_model, texts)
 
     setfit_resolved_count = 0
@@ -631,13 +687,14 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
     all_results: List[Dict] = []
 
     async with db.pool.acquire() as conn:
-        for stmt, pred, conf in zip(challenge_statements, setfit_preds, setfit_confs):
+        for stmt, pred, conf in zip(statements, setfit_preds, setfit_confs):
             statement      = stmt["raw_statement"]
             statement_type = stmt["statement_type"]
             statement_id   = stmt["statement_id"]
             is_discussion  = True
 
-            if conf >= settings.SETFIT_THEME_CONFIDENCE_THRESHOLD:
+            theme_threshold = settings.get_setfit_theme_threshold(str(pred))
+            if conf >= theme_threshold:
                 has_pii_tag = bool(re.search(r'<[A-Z]+>', statement))
                 is_abusive_flagged_column = statement_type in abusive_masked_at
                 flagged = has_pii_tag or is_abusive_flagged_column
@@ -650,11 +707,34 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                         submission_id=submission_id,
                         tenant_code=tenant_code,
                         statement_id=statement_id,
-                        analysis_type="theme",
+                        analysis_type="thematic_classification",
                         statement_type=statement_type,
                         category_type="Flagged",
-                        threshold=settings.SETFIT_THEME_CONFIDENCE_THRESHOLD,
+                        ml_model_name=settings.SETFIT_THEME_MODEL_ID,
+                        ml_model_version=settings.SETFIT_THEME_MODEL_VERSION,
+                        model_confidence_score=conf,
+                        model_prediction=pred,
+                        threshold=theme_threshold,
                     )
+                    # Propagate result to duplicate (child) statements
+                    _children = await fetch_child_statements(conn, statement_id, submission_id, tenant_code)
+                    for _child in _children:
+                        await insert_analysis_result(
+                            conn,
+                            submission_id=submission_id,
+                            tenant_code=tenant_code,
+                            statement_id=_child["id"],
+                            analysis_type="thematic_classification",
+                            statement_type=_child["statement_type"],
+                            category_type="Flagged",
+                            ml_model_name=settings.SETFIT_THEME_MODEL_ID,
+                            ml_model_version=settings.SETFIT_THEME_MODEL_VERSION,
+                            model_confidence_score=conf,
+                            model_prediction=pred,
+                            threshold=theme_threshold,
+                            meta_data={"deduped_from": str(statement_id)},
+                        )
+                        logger.debug("[Thematic Pipeline] Copied Flagged result from parent [%s] to child [%s]", statement_id, _child["id"])
                     all_results.append({"statement": statement, "category_type": "Flagged"})
                     setfit_resolved_count += 1
                     continue
@@ -670,7 +750,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                     submission_id=submission_id,
                     tenant_code=tenant_code,
                     statement_id=statement_id,
-                    analysis_type="theme",
+                    analysis_type="thematic_classification",
                     statement_type=statement_type,
                     theme_id=resolved_theme_id,
                     category_type=cat_type,
@@ -678,8 +758,28 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                     ml_model_version=settings.SETFIT_THEME_MODEL_VERSION,
                     model_confidence_score=conf,
                     model_prediction=pred,
-                    threshold=settings.SETFIT_THEME_CONFIDENCE_THRESHOLD,
+                    threshold=theme_threshold,
                 )
+                # Propagate result to duplicate (child) statements
+                _children = await fetch_child_statements(conn, statement_id, submission_id, tenant_code)
+                for _child in _children:
+                    await insert_analysis_result(
+                        conn,
+                        submission_id=submission_id,
+                        tenant_code=tenant_code,
+                        statement_id=_child["id"],
+                        analysis_type="thematic_classification",
+                        statement_type=_child["statement_type"],
+                        theme_id=resolved_theme_id,
+                        category_type=cat_type,
+                        ml_model_name=settings.SETFIT_THEME_MODEL_ID,
+                        ml_model_version=settings.SETFIT_THEME_MODEL_VERSION,
+                        model_confidence_score=conf,
+                        model_prediction=pred,
+                        threshold=theme_threshold,
+                        meta_data={"deduped_from": str(statement_id)},
+                    )
+                    logger.debug("[Thematic Pipeline] Copied %s result from parent [%s] to child [%s]", cat_type, statement_id, _child["id"])
                 all_results.append({
                     "statement": statement,
                     "category_type": cat_type,
@@ -689,7 +789,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
 
             else:
                 logger.info(
-                    f"[Thematic Pipeline] SetFit conf {conf:.3f} < threshold {settings.SETFIT_THEME_CONFIDENCE_THRESHOLD:.3f} for '{statement[:60]}' — queued for local pipeline."
+                    f"[Thematic Pipeline] SetFit conf {conf:.3f} < threshold {theme_threshold:.3f} for theme '{pred}' on statement '{statement[:60]}' — queued for local pipeline."
                 )
                 finished_result, pending_item = await _run_local_classification(
                     conn=conn,
@@ -716,7 +816,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
             theme_id_to_info=theme_id_to_info,
             submission_id=submission_id,
             tenant_code=tenant_code,
-            analysis_type="theme",
+            analysis_type="thematic_classification",
             resolved_model=resolved_model,
             resolved_max_tokens=resolved_max_tokens,
             resolved_timeout=resolved_timeout,
