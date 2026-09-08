@@ -259,14 +259,7 @@ BEGIN
             UPDATE statements
             SET parent_id = new_parent_id
             WHERE parent_id = OLD.id AND id != new_parent_id;
-
-            -- Repoint analysis_results from the deleted parent (OLD.id) to the new parent (new_parent_id)
-            -- and update submission_id & tenant_code to the child's submission so ON DELETE CASCADE doesn't wipe it
-            UPDATE analysis_results
-            SET statement_id = new_parent_id,
-                submission_id = new_sub_id,
-                tenant_code = new_tenant
-            WHERE statement_id = OLD.id;
+            
         END IF;
     END IF;
 

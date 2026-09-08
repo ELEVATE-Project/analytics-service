@@ -32,13 +32,25 @@ async def _get_statement_category_prompt(conn) -> Dict[str, Any]:
     return dict(row)
 
 
-def _llm_classify(text: str, system_prompt: str, user_prompt: str):
+def _llm_classify(
+    text: str,
+    system_prompt: str,
+    user_prompt: str,
+    model: str = None,
+    max_tokens: int = None,
+    timeout: int = None,
+):
     """Call the LLM to classify a single statement (blocking)."""
     from app.services.llm import openrouter_chat_completion
 
     u_prompt = user_prompt.replace("{{text}}", text)
     prompt = f"{system_prompt}\n\n{u_prompt}"
-    response_text, usage = openrouter_chat_completion(prompt)
+    response_text, usage = openrouter_chat_completion(
+        prompt,
+        model=model,
+        max_tokens=max_tokens,
+        timeout=timeout,
+    )
 
     # Clean markdown wrappers if present
     cleaned = response_text.strip()
@@ -71,6 +83,9 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     """
     submission_id = params["submission_id"]
     tenant_code = params["tenant_code"]
+    llm_model = params.get("llm_model")
+    max_tokens = params.get("max_tokens")
+    llm_timeout_seconds = params.get("llm_timeout_seconds")
     thresholds = settings.SETFIT_CONFIDENCE_THRESHOLD
 
     logger.info(
@@ -105,8 +120,29 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     texts = [s["raw_statement"] for s in statements]
     predictions, confidence_scores = await asyncio.to_thread(predict_setfit_batch, model, texts)
 
-    # 4. Process each result — LLM fallback if below threshold
+    # 4. Identify statements needing LLM fallback
     results = []
+    fallback_tasks = []
+    fallback_indices = []
+    semaphore = asyncio.Semaphore(5)
+
+    async def _bounded_llm_call(stmt_id, text, sys_prompt, usr_prompt, model, max_tok, timeout):
+        async with semaphore:
+            try:
+                res, _ = await asyncio.to_thread(
+                    _llm_classify,
+                    text,
+                    sys_prompt,
+                    usr_prompt,
+                    model,
+                    max_tok,
+                    timeout,
+                )
+                return res
+            except Exception as e:
+                logger.error("LLM fallback failed for statement [%s]: %s", stmt_id, e)
+                return {"category": "Other", "confidence": 0.0, "justification": f"LLM error: {e}"}
+
     for i, stmt in enumerate(statements):
         model_pred = str(predictions[i])
         model_conf = float(confidence_scores[i])
@@ -114,45 +150,88 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         category_key = model_pred.lower()
         current_threshold = thresholds.get(category_key, 0.80)
 
-        llm_pred = None
-        llm_conf = None
-        justification = None
-
-        if model_conf < current_threshold:
-            # LLM fallback
-            logger.info(
-                "Statement [%s] confidence %.2f < threshold %.2f — calling LLM fallback.",
-                stmt["id"], model_conf, current_threshold,
-            )
-            try:
-                llm_result, usage = await asyncio.to_thread(_llm_classify, stmt["raw_statement"], system_prompt, user_prompt)
-                llm_pred = llm_result.get("category")
-                llm_conf = llm_result.get("confidence")
-                justification = llm_result.get("justification")
-            except Exception as e:
-                logger.error("LLM fallback failed for statement [%s]: %s", stmt["id"], e)
-                llm_pred = "Other"
-                llm_conf = 0.0
-                justification = f"LLM error: {e}"
-
-        final_category = llm_pred if llm_pred else model_pred
-
-        results.append({
+        # Initialize result template
+        result_dict = {
             "statement_id": stmt["id"],
             "statement_type": stmt["statement_type"],
             "model_pred": model_pred,
             "model_conf": model_conf,
-            "llm_pred": llm_pred,
-            "llm_conf": llm_conf,
-            "justification": justification,
-            "final_category": final_category,
+            "llm_pred": None,
+            "llm_conf": None,
+            "justification": None,
+            "final_category": model_pred,
             "current_threshold": current_threshold,
-        })
+        }
+        results.append(result_dict)
+
+        if model_conf < current_threshold:
+            logger.info(
+                "Statement [%s] confidence %.2f < threshold %.2f — scheduling LLM fallback.",
+                stmt["id"], model_conf, current_threshold,
+            )
+            fallback_indices.append(i)
+            fallback_tasks.append(
+                _bounded_llm_call(
+                    stmt["id"],
+                    stmt["raw_statement"],
+                    system_prompt,
+                    user_prompt,
+                    llm_model,
+                    max_tokens,
+                    llm_timeout_seconds,
+                )
+            )
+
+    VALID_CATEGORIES = {"Challenge", "Solution or Action", "Other"}
+
+    # 4.5 Execute LLM fallbacks concurrently
+    if fallback_tasks:
+        logger.info("Executing %d LLM fallback calls concurrently...", len(fallback_tasks))
+        fallback_results = await asyncio.gather(*fallback_tasks)
+        
+        # Merge back into results
+        for fallback_idx, llm_res in zip(fallback_indices, fallback_results):
+            stmt_id = results[fallback_idx]["statement_id"]
+            
+            # Validate Category
+            raw_pred = str(llm_res.get("category") or "").strip()
+            llm_pred = raw_pred if raw_pred in VALID_CATEGORIES else "Other"
+            if llm_pred != raw_pred:
+                logger.warning(
+                    "LLM returned unknown category %r for statement [%s] — defaulting to 'Other'.",
+                    raw_pred, stmt_id,
+                )
+            
+            # Validate Confidence
+            try:
+                llm_conf = min(max(float(llm_res.get("confidence") or 0.0), 0.0), 1.0)
+            except (TypeError, ValueError):
+                llm_conf = 0.0
+
+            results[fallback_idx]["llm_pred"] = llm_pred
+            results[fallback_idx]["llm_conf"] = llm_conf
+            results[fallback_idx]["justification"] = llm_res.get("justification")
+            
+            if llm_pred:
+                results[fallback_idx]["final_category"] = llm_pred
 
     # 5. Bulk insert into analysis_results (parent statements only)
     child_copy_count = 0
     async with db.pool.acquire() as conn:
-        for r in results:
+        async with conn.transaction():
+            # Idempotency: Clear any existing statement_category results for this submission
+            await conn.execute(
+                """
+                DELETE FROM analysis_results 
+                WHERE submission_id = $1 
+                  AND tenant_code = $2 
+                  AND analysis_type = 'statement_category'
+                """,
+                submission_id,
+                tenant_code,
+            )
+
+            for r in results:
             await insert_analysis_result(
                 conn,
                 submission_id=submission_id,

@@ -389,12 +389,12 @@ Example: "Some people are aware about education."
 ## Output Format
 
 Return ONLY a valid JSON object matching this format (no markdown, no extra text):
-{"category": "Challenge or Solution or Action or Other", "confidence": 0.XX, "justification": "Brief reason"}',
+{"category": "<one of exactly: \'Challenge\' | \'Solution or Action\' | \'Other\'>", "confidence": 0.XX, "justification": "Brief reason"}',
   -- user_prompt: text placeholder
   E'Text: "{{text}}"
 
 Return ONLY a valid JSON object matching this format (no markdown, no extra text):
-{"category": "Challenge or Solution or Action or Other", "confidence": 0.XX, "justification": "Brief reason"}',
+{"category": "<one of exactly: \'Challenge\' | \'Solution or Action\' | \'Other\'>", "confidence": 0.XX, "justification": "Brief reason"}',
   TRUE,
   'Seeded statement category prompt v1',
   now()

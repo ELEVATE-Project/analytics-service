@@ -21,12 +21,6 @@ from app.services.llm import openrouter_chat_completion, split_llm_usage
 logger = logging.getLogger("analytics_service.temporal.activities")
 
 
-# Discussion statements may legitimately cover several distinct barriers in one
-# sentence, so they're allowed to map to multiple themes. Story objectives are
-# a single narrative and stay single-theme regardless of how many themes qualify.
-MAX_MULTI_THEME_MATCHES = 3
-
-
 def _is_garbage_or_spam(text: str) -> bool:
     """
     Detects spam/garbage text patterns beyond the word-count gate.
@@ -149,12 +143,11 @@ def _resolve_theme_id(theme_name: Optional[str], theme_id_to_info: dict) -> Opti
 
 
 def _finalize_qualifying_themes(
-    resolved_items: List[Dict[str, Any]],
-    is_discussion: bool,
+    resolved_items: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
     """
     Dedupes resolved LLM classification items by theme_id (keeping the highest-confidence
-    instance per theme) and caps to a single theme for stories (or MAX_MULTI_THEME_MATCHES for discussions).
+    instance per theme) and caps to a single theme.
     """
     best_by_theme: Dict[str, Dict[str, Any]] = {}
     for item in resolved_items:
@@ -167,14 +160,7 @@ def _finalize_qualifying_themes(
             best_by_theme[tid] = item
 
     qualifying = sorted(best_by_theme.values(), key=lambda x: x["confidence_score"], reverse=True)
-    if not is_discussion:
-        qualifying = qualifying[:1]
-    elif len(qualifying) > MAX_MULTI_THEME_MATCHES:
-        logger.warning(
-            f"[Thematic Pipeline] LLM match found {len(qualifying)} themes above threshold; capping to top {MAX_MULTI_THEME_MATCHES}."
-        )
-        qualifying = qualifying[:MAX_MULTI_THEME_MATCHES]
-    return qualifying
+    return qualifying[:1]
 
 
 async def _run_local_classification(
@@ -278,7 +264,6 @@ async def _run_local_classification(
             statement_id=statement_id,
             theme_id=None,
             analysis_type="thematic_classification",
-            statements=statement,
             statement_type=statement_type,
             category_type="Flagged",
             meta_data=diagnostics,
@@ -459,7 +444,6 @@ async def _run_batched_llm_fallback(
         for idx, pending in enumerate(pending_items):
             statement = pending["statement"]
             statement_type = pending["statement_type"]
-            is_discussion = pending["is_discussion"]
             diagnostics = pending["diagnostics"]
 
             result = {
@@ -479,7 +463,7 @@ async def _run_batched_llm_fallback(
                 best_item = max(resolved_items, key=lambda x: x["confidence_score"])
                 llm_confidence = best_item["confidence_score"]
                 llm_justification = best_item["justification"]
-                qualifying_llm = _finalize_qualifying_themes(resolved_items, is_discussion)
+                qualifying_llm = _finalize_qualifying_themes(resolved_items)
 
             result["confidence_score"] = llm_confidence
             diagnostics["llm_fallback"]["confidence_score"] = llm_confidence
@@ -620,9 +604,9 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
     """
     submission_id = params.get("submission_id")
     tenant_code = params.get("tenant_code")
-    resolved_model = params.get("model") or settings.OPENROUTER_MODEL
+    resolved_model = params.get("llm_model") or params.get("model") or settings.OPENROUTER_MODEL
     resolved_max_tokens = params.get("max_tokens") or settings.LLM_MAX_TOKENS
-    resolved_timeout = params.get("timeout") or params.get("llm_timeout_seconds") or settings.LLM_TIMEOUT_SECONDS
+    resolved_timeout = params.get("llm_timeout_seconds") or params.get("timeout") or settings.LLM_TIMEOUT_SECONDS
 
     if not submission_id or not tenant_code:
         raise ValueError("submission_id and tenant_code are required.")
@@ -669,7 +653,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
     # Clear previous theme analysis_results for idempotency
     async with db.pool.acquire() as conn:
         await conn.execute(
-            "DELETE FROM analysis_results WHERE submission_id = $1 AND tenant_code = $2 AND analysis_type = 'theme'",
+            "DELETE FROM analysis_results WHERE submission_id = $1 AND tenant_code = $2 AND analysis_type = 'thematic_classification'",
             submission_id, tenant_code,
         )
 
@@ -691,7 +675,6 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
             statement      = stmt["raw_statement"]
             statement_type = stmt["statement_type"]
             statement_id   = stmt["statement_id"]
-            is_discussion  = True
 
             theme_threshold = settings.get_setfit_theme_threshold(str(pred))
             if conf >= theme_threshold:
@@ -806,7 +789,6 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                     all_results.append(finished_result)
                 else:
                     pending_item["statement_id"] = statement_id
-                    pending_item["is_discussion"] = is_discussion
                     pending_items.append(pending_item)
 
     if pending_items:
