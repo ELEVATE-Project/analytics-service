@@ -188,27 +188,142 @@ CREATE TABLE themes (
 );
 
 -- =========================================================================
--- 8. THEMATIC & ENVIRONMENTAL EXTRACTION OUTPUTS
+-- 8. STATEMENT EXTRACTION
+-- Individual statements extracted from a submission (challenges, solutions,
+-- questions, answers). parent_id links related statements, e.g. a challenge
+-- that already exists will be set as the parent of the duplicate.
+-- =========================================================================
+
+CREATE TABLE statements (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+    submission_id    TEXT NOT NULL,
+    tenant_code      TEXT NOT NULL,
+
+    submission_type  TEXT NOT NULL,
+    statement_type   TEXT NOT NULL,
+    raw_statement    TEXT NOT NULL,
+
+    parent_id        UUID,
+
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    FOREIGN KEY (submission_id, tenant_code)
+        REFERENCES submissions(submission_id, tenant_code)
+        ON DELETE CASCADE,
+
+    FOREIGN KEY (parent_id)
+        REFERENCES statements(id)
+        ON DELETE SET NULL
+);
+
+-- Expression index for fast case-insensitive deduplication (matches LOWER() query).
+CREATE INDEX idx_statements_raw_lower
+    ON statements (LOWER(raw_statement));
+
+-- Submission lookup + cascade delete path.
+CREATE INDEX idx_statements_submission_parent ON statements (submission_id, parent_id);
+CREATE INDEX idx_statements_parent ON statements (parent_id) WHERE parent_id IS NOT NULL;
+
+-- =========================================================================
+-- Trigger: automatically promote a duplicate child to be the new parent
+-- whenever the current root (parent_id IS NULL) statement is deleted.
+-- This keeps the hierarchy flat — no orphaned chains.
+-- =========================================================================
+
+CREATE OR REPLACE FUNCTION promote_statement_child()
+RETURNS TRIGGER AS $$
+DECLARE
+    new_parent_id UUID;
+    new_sub_id TEXT;
+    new_tenant TEXT;
+BEGIN
+    -- Only act if the statement being deleted is a root (parent)
+    IF OLD.parent_id IS NULL THEN
+        -- Find one child to become the new parent (the oldest duplicate)
+        SELECT id, submission_id, tenant_code
+        INTO new_parent_id, new_sub_id, new_tenant
+        FROM statements
+        WHERE parent_id = OLD.id
+        ORDER BY created_at ASC
+        LIMIT 1;
+
+        IF new_parent_id IS NOT NULL THEN
+            -- Make the chosen child a root (new parent)
+            UPDATE statements
+            SET parent_id = NULL
+            WHERE id = new_parent_id;
+
+            -- Repoint all remaining children to the new parent
+            UPDATE statements
+            SET parent_id = new_parent_id
+            WHERE parent_id = OLD.id AND id != new_parent_id;
+            
+        END IF;
+    END IF;
+
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_promote_statement_child ON statements;
+CREATE TRIGGER trg_promote_statement_child
+    BEFORE DELETE ON statements
+    FOR EACH ROW
+    EXECUTE FUNCTION promote_statement_child();
+
+-- =========================================================================
+-- 8a. THEMATIC & ENVIRONMENTAL EXTRACTION OUTPUTS
 -- =========================================================================
 
 CREATE TABLE analysis_results (
     id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     submission_id           TEXT NOT NULL,
     tenant_code             TEXT NOT NULL,
-    theme_id                UUID REFERENCES themes(id) ON DELETE SET NULL, -- Nullable for environmental analysis
-    analysis_type           TEXT NOT NULL, -- 'theme', 'environment'
-    statements              TEXT,
-    statement_type          TEXT, -- Column/context identifier (e.g. 'challenges', 'solutions', 'objective')
-    improvement_environment TEXT,
-    similarity_score        FLOAT, -- Cosine similarity from local embedding match
-    confidence_score        FLOAT, -- Confidence score from local embedding match
+    statement_id            UUID,
+
+    analysis_type           TEXT NOT NULL,
+    -- 'theme', 'environment', 'statement_category'
+
+    analysis_column         TEXT[],
+
+    ml_model_name           TEXT,
+    ml_model_version        TEXT,
+
+    model_confidence_score  FLOAT,
+    llm_confidence_score    FLOAT,
+
+    threshold               FLOAT,
+
+    model_prediction        TEXT,
+    llm_prediction          TEXT,
+
+    theme_id                UUID,
+
     justification           TEXT,
+
     multi_theme_mapped      BOOLEAN NOT NULL DEFAULT FALSE,
-    category_type           TEXT, -- 'Standard', 'Others', 'Unknown/Unclear', 'Flagged'
+
+    category_type           TEXT,
+    -- 'Standard', 'Others', 'Unknown/Unclear', 'Flagged'
+
     meta_data               JSONB,
-    
-    FOREIGN KEY (submission_id, tenant_code)    
-        REFERENCES submissions(submission_id, tenant_code) ON DELETE CASCADE
+
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    FOREIGN KEY (submission_id, tenant_code)
+        REFERENCES submissions(submission_id, tenant_code)
+        ON DELETE CASCADE,
+
+    FOREIGN KEY (statement_id)
+        REFERENCES statements(id)
+        ON DELETE CASCADE,
+
+    FOREIGN KEY (theme_id)
+        REFERENCES themes(id)
+        ON DELETE SET NULL
 );
 
 -- =========================================================================
@@ -310,6 +425,7 @@ CREATE INDEX idx_submission_metrics_tenant ON submission_metrics (tenant_code);
 -- Composite query mapping indexes (Foreign key performance optimization)
 CREATE INDEX idx_discussion_submission_mapping ON discussion_submissions (submission_id, tenant_code);
 CREATE INDEX idx_story_submission_mapping ON story_submissions (submission_id, tenant_code);
+CREATE INDEX idx_statements_submission_mapping ON statements (submission_id);
 CREATE INDEX idx_llm_logs_submission_mapping ON llm_logs (submission_id, tenant_code);
 CREATE INDEX idx_analysis_results_submission_mapping ON analysis_results (submission_id, tenant_code);
 CREATE INDEX idx_ranking_submission_mapping ON ranking (submission_id, tenant_code);
@@ -323,6 +439,7 @@ CREATE INDEX idx_programs_leader ON programs (leaders_id);
 -- Theme-specific analytics
 CREATE INDEX idx_analysis_results_theme ON analysis_results (theme_id) WHERE theme_id IS NOT NULL;
 CREATE INDEX idx_analysis_results_type ON analysis_results (analysis_type);
+CREATE INDEX idx_analysis_results_statement ON analysis_results (statement_id) WHERE statement_id IS NOT NULL;
 
 -- Prompt version active check
 CREATE INDEX idx_prompt_version_active ON prompt_version (prompt_id) WHERE is_active = TRUE;
