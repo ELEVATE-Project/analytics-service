@@ -232,40 +232,13 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             )
 
             for r in results:
-            await insert_analysis_result(
-                conn,
-                submission_id=submission_id,
-                tenant_code=tenant_code,
-                statement_id=r["statement_id"],
-                analysis_type="statement_category",
-                analysis_column=[r["statement_type"]],
-                ml_model_name=settings.SETFIT_MODEL_ID,
-                ml_model_version=settings.SETFIT_MODEL_VERSION,
-                model_confidence_score=r["model_conf"],
-                model_prediction=r["model_pred"],
-                llm_confidence_score=r["llm_conf"],
-                llm_prediction=r["llm_pred"],
-                threshold=r.get("current_threshold", 0.80),
-                justification=r["justification"],
-            )
-
-            # 5a. Propagate the same result to any duplicate (child) statements so
-            #     every statement_id has its own analysis_results row.  Consumers
-            #     never need to walk parent_id chains to read classification output.
-            children = await fetch_child_statements(
-                conn,
-                parent_statement_id=r["statement_id"],
-                submission_id=submission_id,
-                tenant_code=tenant_code,
-            )
-            for child in children:
                 await insert_analysis_result(
                     conn,
                     submission_id=submission_id,
                     tenant_code=tenant_code,
-                    statement_id=child["id"],
+                    statement_id=r["statement_id"],
                     analysis_type="statement_category",
-                    analysis_column=[child["statement_type"]],
+                    analysis_column=[r["statement_type"]],
                     ml_model_name=settings.SETFIT_MODEL_ID,
                     ml_model_version=settings.SETFIT_MODEL_VERSION,
                     model_confidence_score=r["model_conf"],
@@ -274,13 +247,40 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                     llm_prediction=r["llm_pred"],
                     threshold=r.get("current_threshold", 0.80),
                     justification=r["justification"],
-                    meta_data={"deduped_from": str(r["statement_id"])},
                 )
-                child_copy_count += 1
-                logger.debug(
-                    "Copied statement_category result from parent [%s] to child [%s]",
-                    r["statement_id"], child["id"],
+
+                # 5a. Propagate the same result to any duplicate (child) statements so
+                #     every statement_id has its own analysis_results row.  Consumers
+                #     never need to walk parent_id chains to read classification output.
+                children = await fetch_child_statements(
+                    conn,
+                    parent_statement_id=r["statement_id"],
+                    submission_id=submission_id,
+                    tenant_code=tenant_code,
                 )
+                for child in children:
+                    await insert_analysis_result(
+                        conn,
+                        submission_id=submission_id,
+                        tenant_code=tenant_code,
+                        statement_id=child["id"],
+                        analysis_type="statement_category",
+                        analysis_column=[child["statement_type"]],
+                        ml_model_name=settings.SETFIT_MODEL_ID,
+                        ml_model_version=settings.SETFIT_MODEL_VERSION,
+                        model_confidence_score=r["model_conf"],
+                        model_prediction=r["model_pred"],
+                        llm_confidence_score=r["llm_conf"],
+                        llm_prediction=r["llm_pred"],
+                        threshold=r.get("current_threshold", 0.80),
+                        justification=r["justification"],
+                        meta_data={"deduped_from": str(r["statement_id"])},
+                    )
+                    child_copy_count += 1
+                    logger.debug(
+                        "Copied statement_category result from parent [%s] to child [%s]",
+                        r["statement_id"], child["id"],
+                    )
 
     model_only_count = sum(1 for r in results if not r["llm_pred"])
     llm_fallback_count = sum(1 for r in results if r["llm_pred"])

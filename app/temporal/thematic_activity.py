@@ -187,21 +187,14 @@ async def _run_local_classification(
         "word_count_check": {
             "passed": False,
             "word_count": 0,
-            "threshold": settings.MINIMUM_THEME_WORD_COUNT,
         },
         "safety_check": {
             "passed": False,
             "is_flagged": False
         },
-        "local_embedding_compare": {
-            "similarity_score": 0.0,
-            "threshold": settings.SIMILARITY_SCORE_THRESHOLD,
-            "passed": False,
-        },
         "llm_fallback": {
             "executed": False,
             "confidence_score": None,
-            "threshold": settings.LLM_CONFIDENCE_SCORE_THRESHOLD,
             "passed": False,
         },
     }
@@ -596,11 +589,11 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
     Temporal activity that performs thematic classification on Challenge and solution statements.
 
     Logic:
-      1. Fetch Challenge-classified statements from analysis_results + statements.
-      2. Run SetFit batch inference.
-      3. Confident SetFit hits (>= 0.80) are safety-checked and inserted as Standard/Flagged.
-      4. Low-confidence statements (< 0.80) pass word-count and safety gates in _run_local_classification.
-      5. Statements passing both gates are batched into ONE LLM fallback call.
+      1. Fetch parent statements classified as 'Challenge' or 'Solution or Action'.
+      2. Run SetFit batch inference on the fetched statements.
+      3. Confident SetFit hits (>= dynamic threshold) are safety-checked and inserted. Results are automatically propagated to child statements.
+      4. Low-confidence statements go through `_run_local_classification` for word-count and safety checks.
+      5. Statements passing all checks are batched into ONE LLM fallback call, and results are propagated to child statements.
     """
     submission_id = params.get("submission_id")
     tenant_code = params.get("tenant_code")

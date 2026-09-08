@@ -1001,6 +1001,7 @@ async def fetch_challenge_and_solution_statements_for_submission(
         WHERE ar.submission_id  = $1
           AND ar.tenant_code    = $2
           AND ar.analysis_type  = 'statement_category'
+          AND s.parent_id IS NULL
           AND (
               (ar.llm_prediction IS NULL     AND LOWER(ar.model_prediction) IN ('challenge', 'solution or action'))
            OR (ar.llm_prediction IS NOT NULL AND LOWER(ar.llm_prediction)   IN ('challenge', 'solution or action'))
