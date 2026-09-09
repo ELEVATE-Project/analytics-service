@@ -226,10 +226,16 @@ async def insert_or_update_submission(
         program_id, leader_id = await upsert_metadata(conn, tags, tenant_code)
 
         # Parse submission date (report created at).
-        # For discussion submissions, report created at comes from eventPublishedAt.
+        # For discussion submissions, report created at comes from eventPublishedAt —
+        # but ONLY on create events. eventPublishedAt is present on every event type
+        # (create, update, delete), so reading it unconditionally on updates would
+        # overwrite the original creation date with the update event's timestamp.
+        # On update events, leave sub_date_str as None so COALESCE in the SQL below
+        # preserves the existing DB value (same behaviour as stories, which key off
+        # data.submissionDate which is absent from partial update payloads).
         normalized_sub_type = submission_type.lower().strip()
         if "discussion" in normalized_sub_type:
-            sub_date_str = event_payload.get("eventPublishedAt")
+            sub_date_str = event_payload.get("eventPublishedAt") if event_type != "update" else None
         else:
             sub_date_str = data.get("submissionDate")
 
