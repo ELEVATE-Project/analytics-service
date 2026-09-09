@@ -482,9 +482,29 @@ async def process_csv_inline(record_id: int, file_bytes: Optional[bytes] = None)
     report_type = record["report_type"]
 
     # --- 1. Fetch/Parse CSV (use in-memory file_bytes if available, else fetch from storage) ---
+    # Retry GCS fetch up to 3 times with exponential backoff (1s, 2s, 4s) so that
+    # transient network blips self-heal instead of immediately going on_hold.
+    # In-memory file_bytes (fresh upload path) skips the retry since no network is
+    # involved.  The old Temporal activity had retry_policy(maximum_attempts=3,
+    # backoff_coefficient=2.0) — this is the equivalent without Temporal.
     try:
         if file_bytes is None:
-            csv_file = await asyncio.to_thread(fetch_csv, cloud_storage_path)
+            last_exc: Exception = RuntimeError("unreachable")
+            for attempt in range(3):
+                try:
+                    csv_file = await asyncio.to_thread(fetch_csv, cloud_storage_path)
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    if attempt < 2:
+                        wait = 2 ** attempt  # 1s, 2s — then give up
+                        logger.warning(
+                            "GCS fetch attempt %d/3 failed for record %s (%s); retrying in %ds",
+                            attempt + 1, record_id, exc, wait,
+                        )
+                        await asyncio.sleep(wait)
+            else:
+                raise last_exc
         else:
             csv_file = file_bytes
         df = await asyncio.to_thread(load_csv, csv_file)
@@ -598,31 +618,41 @@ async def process_csv_inline(record_id: int, file_bytes: Optional[bytes] = None)
     }
 
     # --- 4. Build Kafka payloads and schema-validate each row ---
-    chunks = split_csv(df)
-    payloads = []
-    schema_errors = []
-    row_number = 0
+    # Run entirely in a thread: for large CSVs (tens of thousands of rows) the
+    # json.loads + validate_ingestion_schema loop can take several seconds.  Keeping
+    # it on the event loop would freeze every concurrent request (health checks, other
+    # uploads) for that duration — a regression vs. the old Temporal activity which
+    # ran in an isolated worker process.
+    def _build_payloads_sync() -> tuple[list, list, int]:
+        chunks = split_csv(df)
+        _payloads: list = []
+        _schema_errors: list = []
+        _row_number = 0
 
-    for chunk in chunks:
-        for payload_str in rows_to_json(chunk, report_type, metadata=metadata):
-            row_number += 1
-            try:
-                payload_dict = json.loads(payload_str)
-            except json.JSONDecodeError as exc:
-                schema_errors.append({"row": row_number, "problems": [f"Failed to parse generated payload: {exc}"]})
-                continue
+        for chunk in chunks:
+            for payload_str in rows_to_json(chunk, report_type, metadata=metadata):
+                _row_number += 1
+                try:
+                    payload_dict = json.loads(payload_str)
+                except json.JSONDecodeError as exc:
+                    _schema_errors.append({"row": _row_number, "problems": [f"Failed to parse generated payload: {exc}"]})
+                    continue
 
-            problems = validate_ingestion_schema(payload_dict, report_type, "create")
-            if problems:
-                schema_errors.append({
-                    "row": row_number,
-                    "submissionId": payload_dict.get("submissionId"),
-                    "sessionId": payload_dict.get("sessionId"),
-                    "problems": problems,
-                })
-                continue
+                problems = validate_ingestion_schema(payload_dict, report_type, "create")
+                if problems:
+                    _schema_errors.append({
+                        "row": _row_number,
+                        "submissionId": payload_dict.get("submissionId"),
+                        "sessionId": payload_dict.get("sessionId"),
+                        "problems": problems,
+                    })
+                    continue
 
-            payloads.append((payload_str, f"{record_id}-{len(payloads)}"))
+                _payloads.append((payload_str, f"{record_id}-{len(_payloads)}"))
+
+        return _payloads, _schema_errors, _row_number
+
+    payloads, schema_errors, row_number = await asyncio.to_thread(_build_payloads_sync)
 
     if schema_errors:
         logger.warning(

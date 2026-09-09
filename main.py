@@ -3,11 +3,14 @@ import asyncio
 import logging
 import threading
 
+from contextlib import asynccontextmanager
+
 import uvicorn
 from fastapi import FastAPI
 
 from app.api.router import api_router
 from app.api.exceptions import register_exception_handlers
+from app.database.db import db
 from app.kafka.consumer import IngestionConsumer
 from app.logging_config import configure_logging
 from app.temporal.worker import start_worker
@@ -18,12 +21,33 @@ consumer_running = False
 worker_running = False
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await db.connect()
+
+    # Reclaim records that were left stuck at in_progress by a previous
+    # crash / pod restart / OOM-kill before process_csv_inline could finish.
+    # Any record that has been in_progress for more than 30 minutes is
+    # considered stale and reset to pending so it can be retried.
+    try:
+        from app.database import operations as ops
+        reclaimed = await ops.reclaim_stale_in_progress(stale_minutes=30)
+        if reclaimed:
+            logger.info("Reclaimed %d stale in_progress CSV upload(s) back to pending on startup", reclaimed)
+    except Exception as exc:
+        logger.warning("Startup reclaim failed (non-fatal): %s", exc)
+
+    yield
+    await db.disconnect()
+
+
 def run_web():
     """Start the FastAPI web server."""
     app = FastAPI(
         title="Analytics Service API Ingestion & Orchestration Layer",
         description="FastAPI ingestion endpoints and manual orchestration controls.",
         version="1.0.0",
+        lifespan=lifespan,
     )
 
     register_exception_handlers(app)

@@ -809,3 +809,40 @@ async def try_claim_for_processing(record_id: int) -> Optional[str]:
             return None
         return "in_progress"
 
+
+async def reclaim_stale_in_progress(stale_minutes: int = 30) -> int:
+    """
+    Reset any csv_uploads rows that have been stuck at status='in_progress'
+    for longer than stale_minutes back to 'pending' so they can be retried.
+
+    A record can get stuck when the process that called process_csv_inline was
+    killed (OOM, pod restart, deploy) before it could write a terminal status.
+    Without this reclaim, POST /v1/process/csv/{id} returns 409 forever on
+    those records.
+
+    Returns the number of rows reclaimed (0 if none).
+    """
+    from app.database.db import db
+    if not db.pool:
+        await db.connect()
+
+    async with db.pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE csv_uploads
+            SET status = 'pending',
+                meta_data = jsonb_set(
+                    COALESCE(meta_data, '{}')::jsonb,
+                    '{reclaimed_at}',
+                    to_jsonb(now()::text)
+                )
+            WHERE status = 'in_progress'
+              AND updated_at < NOW() - ($1::integer * interval '1 minute')
+            """,
+            stale_minutes,
+        )
+    # asyncpg returns "UPDATE N" as a string
+    try:
+        return int(result.split()[-1])
+    except (AttributeError, ValueError, IndexError):
+        return 0
