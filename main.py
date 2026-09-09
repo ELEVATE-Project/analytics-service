@@ -21,23 +21,46 @@ consumer_running = False
 worker_running = False
 
 
+async def _periodic_reclaim_loop(interval_seconds: int = 300):
+    from app.database import operations as ops
+    from app.api.services.uploads import process_csv_inline
+
+    while True:
+        try:
+            reclaimed = await ops.reclaim_stale_in_progress(stale_minutes=30)
+            if reclaimed:
+                logger.info("Reclaimed %d stale in_progress CSV upload(s)", reclaimed)
+
+            pending_records = await ops.list_by_status("pending")
+            for record in pending_records:
+                record_id = record["id"]
+                claim_status = await ops.try_claim_for_processing(record_id)
+                if claim_status == "success":
+                    logger.info("Periodic sweep picked up pending CSV upload ID %s", record_id)
+                    asyncio.create_task(process_csv_inline(record_id))
+        except asyncio.CancelledError:
+            logger.info("Periodic CSV reclaim loop cancelled.")
+            break
+        except Exception as exc:
+            logger.exception("Periodic CSV reclaim loop encountered an error: %s", exc)
+
+        await asyncio.sleep(interval_seconds)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.connect()
 
-    # Reclaim records that were left stuck at in_progress by a previous
-    # crash / pod restart / OOM-kill before process_csv_inline could finish.
-    # Any record that has been in_progress for more than 30 minutes is
-    # considered stale and reset to pending so it can be retried.
-    try:
-        from app.database import operations as ops
-        reclaimed = await ops.reclaim_stale_in_progress(stale_minutes=30)
-        if reclaimed:
-            logger.info("Reclaimed %d stale in_progress CSV upload(s) back to pending on startup", reclaimed)
-    except Exception as exc:
-        logger.warning("Startup reclaim failed (non-fatal): %s", exc)
+    reclaim_task = asyncio.create_task(_periodic_reclaim_loop(interval_seconds=300))
 
     yield
+
+    reclaim_task.cancel()
+    try:
+        await reclaim_task
+    except asyncio.CancelledError:
+        pass
+
     await db.disconnect()
 
 

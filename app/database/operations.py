@@ -760,6 +760,19 @@ async def update_status(
                 record_id,
             )
 
+async def list_by_status(status: str) -> list:
+    """List all tracker records with a given status."""
+    from app.database.db import db
+    if not db.pool:
+        await db.connect()
+
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM csv_uploads WHERE status = $1 ORDER BY created_at",
+            status,
+        )
+        return [dict(r) for r in rows]
+
 
 async def try_claim_for_processing(record_id: int) -> Optional[str]:
     """
