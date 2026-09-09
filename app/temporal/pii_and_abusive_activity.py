@@ -156,18 +156,49 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
             db_col = map_column_to_db_col(col, sub_type)
             col_res = _get_case_insensitive_key(llm_response_dict, col)
 
-            # Gracefully unwrap scalar columns wrapped in a single-item list by the LLM.
-            # If the list has more than one entry we cannot safely pick one — raise instead
-            # of silently discarding entries that may contain unmasked PII/abusive text.
+            # Scalar column — the LLM should return a single object, but sometimes
+            # wraps it in a list (one entry) or splits the field into multiple entries.
+            # • Single-item list → unwrap transparently (common LLM formatting quirk).
+            # • Multi-item list → merge all masked_text values in order so no content
+            #   is lost.  Silently discarding later entries (old col_res[0] shortcut)
+            #   would leave unmasked PII/abusive text in the database while marking the
+            #   row as fully masked — the failure scenario described in the bug report.
             if col not in column_statements and isinstance(col_res, list):
                 if len(col_res) == 1 and isinstance(col_res[0], dict):
+                    # Fast path: the common single-entry wrap — just unwrap it.
                     col_res = col_res[0]
                 else:
-                    raise ValueError(
-                        f"PII masking response for scalar column '{col}' returned a list with "
-                        f"{len(col_res)} entries (expected a single object). "
-                        f"Refusing to report success with potentially unmasked PII."
+                    # Multi-entry split: merge every masked_text value (in list order)
+                    # and aggregate pii_found / abusive_language across all entries.
+                    merged_parts: List[str] = []
+                    merged_pii = False
+                    merged_abusive = False
+                    for entry in col_res:
+                        if not isinstance(entry, dict):
+                            continue
+                        text = entry.get("masked_text")
+                        if text:
+                            merged_parts.append(text)
+                        if entry.get("pii_found"):
+                            merged_pii = True
+                        if entry.get("abusive_language"):
+                            merged_abusive = True
+                    if not merged_parts:
+                        raise ValueError(
+                            f"PII masking response for scalar column '{col}' returned a list "
+                            f"with {len(col_res)} entries but none contained 'masked_text'. "
+                            f"Refusing to report success with potentially unmasked PII."
+                        )
+                    logger.warning(
+                        f"Scalar column '{col}' was split into {len(col_res)} entries by the LLM; "
+                        f"merging all masked_text values to avoid losing content."
                     )
+                    # Synthesise a single dict so the elif branch below handles bookkeeping.
+                    col_res = {
+                        "masked_text": " ".join(merged_parts),
+                        "pii_found": merged_pii,
+                        "abusive_language": merged_abusive,
+                    }
 
             if col in column_statements:
                 # List-valued column — expect one masked entry per input statement.
