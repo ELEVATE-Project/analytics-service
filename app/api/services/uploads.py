@@ -156,8 +156,10 @@ def parse_segments(val, delimiter="|") -> List[str]:
     return segments
 
 
-def format_datetime(val, with_ms=True) -> str:
+def format_datetime(val, with_ms=True, fallback_to_now=True) -> Optional[str]:
     if pd.isna(val) or val is None:
+        if not fallback_to_now:
+            return None
         val = datetime.utcnow()
     if isinstance(val, str):
         try:
@@ -257,7 +259,7 @@ def row_to_json(
     discussion_date = None
     if normalized_type == "discussion":
         discussion_date_raw = get_csv_value(row_dict, expected_cols, "Date of Discussion")
-        discussion_date = format_datetime(discussion_date_raw, with_ms=False)
+        discussion_date = format_datetime(discussion_date_raw, with_ms=False, fallback_to_now=False)
 
     pdf_col = "Pdf" if normalized_type == "story" else "PDF Urls"
     original_pdf = get_url_field(get_csv_value(row_dict, expected_cols, pdf_col))
