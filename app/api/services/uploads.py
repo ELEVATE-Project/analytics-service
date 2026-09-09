@@ -549,7 +549,7 @@ async def process_csv_inline(record_id: int, file_bytes: Optional[bytes] = None)
     if not isinstance(record_meta, dict):
         record_meta = {}
 
-    tenant_code = record_meta.get("tenant_code") or "mitra"
+    tenant_code = record_meta.get("tenant_code")
 
     try:
         async with db.pool.acquire() as conn:
@@ -600,18 +600,18 @@ async def process_csv_inline(record_id: int, file_bytes: Optional[bytes] = None)
     except Exception as db_exc:
         logger.warning("Failed to query program/leader category metadata from DB: %s", db_exc)
 
-    # Fallbacks if DB query returned nothing
-    if not leader_info:
+    # Use record's values if DB query didn't find matching rows (do not fabricate placeholders)
+    if not leader_info and record.get("leader_category"):
         leader_info = {
             "id": str(uuid.uuid4()),
-            "name": record.get("leader_category") or "District Leader",
-            "description": f"Leader category: {record.get('leader_category') or 'District Leader'}",
+            "name": record.get("leader_category"),
+            "description": f"Leader category: {record.get('leader_category')}",
         }
-    if not program_info:
+    if not program_info and record.get("program_name"):
         program_info = {
             "id": str(uuid.uuid4()),
-            "name": record.get("program_name") or "My Program",
-            "description": f"Program: {record.get('program_name') or 'My Program'}",
+            "name": record.get("program_name"),
+            "description": f"Program: {record.get('program_name')}",
         }
 
     metadata = {
