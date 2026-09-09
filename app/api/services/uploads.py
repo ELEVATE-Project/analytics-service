@@ -519,18 +519,19 @@ async def process_csv_inline(record_id: int, file_bytes: Optional[bytes] = None)
         await operations.update_status(record_id, "on_hold", error_meta)
         return
 
-    # --- 2. Validate columns ---
-    is_valid, errors = await asyncio.to_thread(validate_columns, df, report_type)
-    if not is_valid:
-        logger.warning("Validation failed for record %s: %s", record_id, errors)
-        error_meta = {
-            "stage": "CSV Column Validation",
-            "error": "Invalid CSV schema",
-            "validation_errors": errors,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-        }
-        await operations.update_status(record_id, "on_hold", error_meta)
-        return
+    # --- 2. Validate columns (only if loaded from GCS; handle_upload already validated file_bytes) ---
+    if file_bytes is None:
+        is_valid, errors = await asyncio.to_thread(validate_columns, df, report_type)
+        if not is_valid:
+            logger.warning("Validation failed for record %s: %s", record_id, errors)
+            error_meta = {
+                "stage": "CSV Column Validation",
+                "error": "Invalid CSV schema",
+                "validation_errors": errors,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            }
+            await operations.update_status(record_id, "on_hold", error_meta)
+            return
 
     await operations.update_status(record_id, "in_progress")
 
@@ -764,8 +765,8 @@ async def handle_upload(
                 meta_data=meta_data,
                 status="failed",
             )
-        except Exception:
-            pass
+        except Exception as db_exc:
+            logger.warning("Failed to record upload failure in DB: %s", db_exc)
         raise RuntimeError(f"GCS Upload failed: {exc}. Please verify GCS settings.")
 
     record_id = await operations.insert_upload_record(
