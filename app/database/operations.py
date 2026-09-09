@@ -660,6 +660,7 @@ async def check_duplicate_file(
               AND report_type = $3
               AND file_name = $4
               AND file_size = $5
+              AND status != 'failed'
             LIMIT 1
             """,
             program_name,
