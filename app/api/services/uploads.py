@@ -263,7 +263,7 @@ def row_to_json(
     original_pdf = get_url_field(get_csv_value(row_dict, expected_cols, pdf_col))
     pdf_urls = None
     if original_pdf:
-        pdf_urls = {"original": original_pdf, "masked": original_pdf}
+        pdf_urls = {"original": original_pdf}
 
     tags = {
         "state": state,
