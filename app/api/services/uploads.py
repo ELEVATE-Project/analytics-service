@@ -185,15 +185,17 @@ def row_to_json(
     report_type: str,
     event_type: str = "create",
     metadata: Optional[dict] = None,
+    expected_cols: Optional[List[str]] = None,
 ) -> str:
     row_dict = {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
 
     normalized_type = report_type.lower().strip()
-    raw_cols = settings.STORY_CSV_COLUMN if normalized_type == "story" else settings.DISCUSSION_CSV_COLUMN
-    try:
-        expected_cols = json.loads(raw_cols)
-    except Exception:
-        expected_cols = []
+    if expected_cols is None:
+        raw_cols = settings.STORY_CSV_COLUMN if normalized_type == "story" else settings.DISCUSSION_CSV_COLUMN
+        try:
+            expected_cols = json.loads(raw_cols)
+        except Exception:
+            expected_cols = []
 
     try:
         submission_id = int(get_csv_value(row_dict, expected_cols, "id"))
@@ -367,6 +369,13 @@ def rows_to_json(
     event_type: str = "create",
     metadata: Optional[dict] = None,
 ):
+    normalized_type = report_type.lower().strip()
+    raw_cols = settings.STORY_CSV_COLUMN if normalized_type == "story" else settings.DISCUSSION_CSV_COLUMN
+    try:
+        expected_cols = json.loads(raw_cols)
+    except Exception:
+        expected_cols = []
+
     for _, row in df.iterrows():
         row_dict = {k: (None if pd.isna(v) else v) for k, v in row.to_dict().items()}
         is_complete, missing_fields = _is_row_complete(row_dict, report_type)
@@ -376,7 +385,7 @@ def rows_to_json(
                 missing_fields,
             )
             continue
-        yield row_to_json(row, report_type, event_type, metadata)
+        yield row_to_json(row, report_type, event_type, metadata, expected_cols=expected_cols)
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +471,11 @@ def _push_rows_sync(payloads: List[Any]) -> None:
 # Inline CSV Processing (replaces Temporal activities)
 # ---------------------------------------------------------------------------
 
-async def process_csv_inline(record_id: int, file_bytes: Optional[bytes] = None) -> None:
+async def process_csv_inline(
+    record_id: int,
+    file_bytes: Optional[bytes] = None,
+    df: Optional[pd.DataFrame] = None,
+) -> None:
     """
     Processes a single csv_upload record end-to-end:
       1. Use in-memory CSV bytes (or fetch from cloud storage if file_bytes is None)
@@ -483,33 +496,29 @@ async def process_csv_inline(record_id: int, file_bytes: Optional[bytes] = None)
     cloud_storage_path = record["cloud_storage_path"]
     report_type = record["report_type"]
 
-    # --- 1. Fetch/Parse CSV (use in-memory file_bytes if available, else fetch from storage) ---
-    # Retry GCS fetch up to 3 times with exponential backoff (1s, 2s, 4s) so that
-    # transient network blips self-heal instead of immediately going on_hold.
-    # In-memory file_bytes (fresh upload path) skips the retry since no network is
-    # involved.  The old Temporal activity had retry_policy(maximum_attempts=3,
-    # backoff_coefficient=2.0) — this is the equivalent without Temporal.
+    # --- 1. Fetch/Parse CSV (use pre-parsed df/file_bytes if available, else fetch from storage) ---
     try:
-        if file_bytes is None:
-            last_exc: Exception = RuntimeError("unreachable")
-            for attempt in range(3):
-                try:
-                    csv_file = await asyncio.to_thread(fetch_csv, cloud_storage_path)
-                    break
-                except Exception as exc:
-                    last_exc = exc
-                    if attempt < 2:
-                        wait = 2 ** attempt  # 1s, 2s — then give up
-                        logger.warning(
-                            "GCS fetch attempt %d/3 failed for record %s (%s); retrying in %ds",
-                            attempt + 1, record_id, exc, wait,
-                        )
-                        await asyncio.sleep(wait)
+        if df is None:
+            if file_bytes is None:
+                last_exc: Exception = RuntimeError("unreachable")
+                for attempt in range(3):
+                    try:
+                        csv_file = await asyncio.to_thread(fetch_csv, cloud_storage_path)
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                        if attempt < 2:
+                            wait = 2 ** attempt  # 1s, 2s — then give up
+                            logger.warning(
+                                "GCS fetch attempt %d/3 failed for record %s (%s); retrying in %ds",
+                                attempt + 1, record_id, exc, wait,
+                            )
+                            await asyncio.sleep(wait)
+                else:
+                    raise last_exc
             else:
-                raise last_exc
-        else:
-            csv_file = file_bytes
-        df = await asyncio.to_thread(load_csv, csv_file)
+                csv_file = file_bytes
+            df = await asyncio.to_thread(load_csv, csv_file)
     except Exception as exc:
         logger.exception("Failed to fetch/load CSV for record %s", record_id)
         error_meta = {
@@ -789,7 +798,7 @@ async def handle_upload(
 
     claim_status = await operations.try_claim_for_processing(record_id)
     if claim_status == "success":
-        background_tasks.add_task(process_csv_inline, record_id, file_bytes)
+        background_tasks.add_task(process_csv_inline, record_id, file_bytes, df)
         logger.info("Scheduled inline CSV processing for upload ID %s", record_id)
 
     return {

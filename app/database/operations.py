@@ -230,9 +230,6 @@ async def insert_or_update_submission(
         # created at. This field is only present on create events (absent from
         # partial update payloads), so COALESCE in the SQL below preserves the
         # original DB value on updates — no special-casing needed.
-        # discussion_date (when the discussion took place) is a separate field
-        # (data.discussionDate) stored in discussion_submissions, handled below.
-        normalized_sub_type = submission_type.lower().strip()
         sub_date_str = data.get("submissionDate")
 
         if sub_date_str:
