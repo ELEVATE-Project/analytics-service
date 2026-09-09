@@ -2116,7 +2116,7 @@ def test_upload_027_kafka_unreachable_marks_on_hold(monkeypatch):
 
         await uploads_service_module.process_csv_inline(1)
         final_call = update_status_mock.await_args_list[-1]
-        assert final_call.args[1] == "pending"
+        assert final_call.args[1] == "on_hold"
         assert "Kafka Publishing" in final_call.args[2].get("stage", "")
     asyncio.run(run_test())
 

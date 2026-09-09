@@ -263,7 +263,7 @@ def row_to_json(
     original_pdf = get_url_field(get_csv_value(row_dict, expected_cols, pdf_col))
     pdf_urls = None
     if original_pdf:
-        pdf_urls = {"original": original_pdf}
+        pdf_urls = {"original": original_pdf, "masked": original_pdf}
 
     tags = {
         "state": state,
@@ -642,7 +642,15 @@ async def process_csv_inline(record_id: int, file_bytes: Optional[bytes] = None)
                 "exception": str(exc),
                 "timestamp": datetime.utcnow().isoformat() + "Z",
             }
-            await operations.update_status(record_id, "pending", error_meta)
+            # Use "on_hold" — NOT "pending" — so that handle_push (which only
+            # accepts status="pending") will reject any retry attempt.  Setting
+            # "pending" here would let a manual POST /v1/process/csv/{id} replay
+            # the entire file from scratch, republishing rows that already landed
+            # in Kafka (partial-batch duplicates).  "on_hold" requires explicit
+            # operator action to re-queue, mirroring the original Temporal
+            # activity's maximum_attempts=1 policy that existed for exactly
+            # this reason.
+            await operations.update_status(record_id, "on_hold", error_meta)
             return
 
     # --- 6. Update status to success ---
