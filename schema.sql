@@ -312,15 +312,7 @@ CREATE TABLE analysis_results (
 
     FOREIGN KEY (submission_id, tenant_code)
         REFERENCES submissions(submission_id, tenant_code)
-        ON DELETE CASCADE,
-
-    FOREIGN KEY (statement_id)
-        REFERENCES statements(id)
-        ON DELETE CASCADE,
-
-    FOREIGN KEY (theme_id)
-        REFERENCES themes(id)
-        ON DELETE SET NULL
+        ON DELETE CASCADE
 );
 
 -- =========================================================================
