@@ -293,10 +293,13 @@ async def insert_or_update_submission(
         # Upsert parent metadata tables (reads from flattened tags)
         program_id, leader_id = await upsert_metadata(conn, tags, tenant_code)
 
-        # Parse submission date. On a partial update where submissionDate is absent,
-        # leave it None (rather than defaulting to now()) so COALESCE below preserves
-        # the existing value instead of overwriting it with a "real" default.
+        # Parse submission date (report created at).
+        # Both discussion and story submissions use data.submissionDate for report
+        # created at. This field is only present on create events (absent from
+        # partial update payloads), so COALESCE in the SQL below preserves the
+        # original DB value on updates — no special-casing needed.
         sub_date_str = data.get("submissionDate")
+
         if sub_date_str:
             submission_date = datetime.fromisoformat(sub_date_str.replace("Z", "+00:00"))
         elif event_type != "update":
@@ -456,6 +459,15 @@ async def insert_or_update_submission(
             image_urls = _normalize_media_url_list(data.get("imageUrls"))
             pdf_urls, masked_pdf_urls = _normalize_pdf_urls(data.get("pdfUrls"))
 
+            # Parse discussion date (date the discussion took place) from discussionDate.
+            # This is distinct from submissionDate (report created at) which is stored
+            # in the parent submissions table.
+            disc_date_str = data.get("discussionDate")
+            discussion_date = (
+                datetime.fromisoformat(disc_date_str.replace("Z", "+00:00"))
+                if disc_date_str else None
+            )
+
             if row_exists:
                 await conn.execute(
                     """
@@ -469,6 +481,7 @@ async def insert_or_update_submission(
                         pdf_urls = COALESCE($9, pdf_urls),
                         masked_pdf_urls = COALESCE($10, masked_pdf_urls),
                         transcript_link = COALESCE($11, transcript_link),
+                        discussion_date = COALESCE($12, discussion_date),
                         updated_at = now()
                     WHERE submission_id = $1 AND tenant_code = $2
                     """,
@@ -481,16 +494,17 @@ async def insert_or_update_submission(
                     image_urls,
                     pdf_urls,
                     masked_pdf_urls,
-                    data.get("transcriptLink")
+                    data.get("transcriptLink"),
+                    discussion_date
                 )
             else:
                 await conn.execute(
                     """
                     INSERT INTO discussion_submissions (
                         submission_id, tenant_code, title, challenges, solutions,
-                        author, language, image_urls, pdf_urls, masked_pdf_urls, transcript_link
+                        author, language, image_urls, pdf_urls, masked_pdf_urls, transcript_link, discussion_date
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                     """,
                     submission_id, tenant_code,
                     data.get("title"),
@@ -501,7 +515,8 @@ async def insert_or_update_submission(
                     image_urls,
                     pdf_urls,
                     masked_pdf_urls,
-                    data.get("transcriptLink")
+                    data.get("transcriptLink"),
+                    discussion_date
                 )
 
             # Dynamic KPI metrics: participantsData is a full snapshot when present;
@@ -782,6 +797,7 @@ async def check_duplicate_file(
               AND report_type = $3
               AND file_name = $4
               AND file_size = $5
+              AND status != 'failed'
             LIMIT 1
             """,
             program_name,
@@ -880,7 +896,6 @@ async def update_status(
                 status,
                 record_id,
             )
-
 
 async def list_by_status(status: str) -> list:
     """List all tracker records with a given status."""
@@ -995,3 +1010,39 @@ async def fetch_challenge_statements_for_submission(
         str(submission_id), tenant_code,
     )
     return [dict(row) for row in rows]
+async def reclaim_stale_in_progress(stale_minutes: int = 30) -> int:
+    """
+    Reset any csv_uploads rows that have been stuck at status='in_progress'
+    for longer than stale_minutes back to 'pending' so they can be retried.
+
+    A record can get stuck when the process that called process_csv_inline was
+    killed (OOM, pod restart, deploy) before it could write a terminal status.
+    Without this reclaim, POST /v1/process/csv/{id} returns 409 forever on
+    those records.
+
+    Returns the number of rows reclaimed (0 if none).
+    """
+    from app.database.db import db
+    if not db.pool:
+        await db.connect()
+
+    async with db.pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE csv_uploads
+            SET status = 'pending',
+                meta_data = jsonb_set(
+                    COALESCE(meta_data, '{}')::jsonb,
+                    '{reclaimed_at}',
+                    to_jsonb(now()::text)
+                )
+            WHERE status = 'in_progress'
+              AND updated_at < NOW() - ($1::integer * interval '1 minute')
+            """,
+            stale_minutes,
+        )
+    # asyncpg returns "UPDATE N" as a string
+    try:
+        return int(result.split()[-1])
+    except (AttributeError, ValueError, IndexError):
+        return 0
