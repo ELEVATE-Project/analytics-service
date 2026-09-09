@@ -156,8 +156,18 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
             db_col = map_column_to_db_col(col, sub_type)
             col_res = _get_case_insensitive_key(llm_response_dict, col)
 
-            if col not in column_statements and isinstance(col_res, list) and len(col_res) > 0 and isinstance(col_res[0], dict):
-                col_res = col_res[0]
+            # Gracefully unwrap scalar columns wrapped in a single-item list by the LLM.
+            # If the list has more than one entry we cannot safely pick one — raise instead
+            # of silently discarding entries that may contain unmasked PII/abusive text.
+            if col not in column_statements and isinstance(col_res, list):
+                if len(col_res) == 1 and isinstance(col_res[0], dict):
+                    col_res = col_res[0]
+                else:
+                    raise ValueError(
+                        f"PII masking response for scalar column '{col}' returned a list with "
+                        f"{len(col_res)} entries (expected a single object). "
+                        f"Refusing to report success with potentially unmasked PII."
+                    )
 
             if col in column_statements:
                 # List-valued column — expect one masked entry per input statement.
