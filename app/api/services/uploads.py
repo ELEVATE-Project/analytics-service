@@ -248,11 +248,16 @@ def row_to_json(
             str(user_id_val) if user_id_val is not None else str(submission_id)
         )
 
+    # submission_date (report created at) always comes from "Report Created At" for
+    # both types — same source, same field in submissions table.
+    submission_date = format_datetime(published_at_raw, with_ms=False)
+
+    # discussion_date (when the discussion took place) is discussion-only and maps
+    # to data.discussionDate → discussion_submissions.discussion_date.
+    discussion_date = None
     if normalized_type == "discussion":
-        submission_date_raw = get_csv_value(row_dict, expected_cols, "Date of Discussion")
-        submission_date = format_datetime(submission_date_raw, with_ms=False)
-    else:
-        submission_date = format_datetime(published_at_raw, with_ms=False)
+        discussion_date_raw = get_csv_value(row_dict, expected_cols, "Date of Discussion")
+        discussion_date = format_datetime(discussion_date_raw, with_ms=False)
 
     pdf_col = "Pdf" if normalized_type == "story" else "PDF Urls"
     original_pdf = get_url_field(get_csv_value(row_dict, expected_cols, pdf_col))
@@ -311,7 +316,8 @@ def row_to_json(
             "userId": user_id,
             "userName": user_name,
             "designation": designation,
-            "submissionDate": submission_date,
+            "submissionDate": submission_date,    # report created at → submissions.submission_date
+            "discussionDate": discussion_date,     # date of discussion → discussion_submissions.discussion_date
             "imageUrls": parse_csv_list(get_csv_value(row_dict, expected_cols, "Image Urls")),
             "pdfUrls": pdf_urls,
             "transcriptLink": get_csv_value(row_dict, expected_cols, "Transcript Link") or None,

@@ -226,18 +226,14 @@ async def insert_or_update_submission(
         program_id, leader_id = await upsert_metadata(conn, tags, tenant_code)
 
         # Parse submission date (report created at).
-        # For discussion submissions, report created at comes from eventPublishedAt —
-        # but ONLY on create events. eventPublishedAt is present on every event type
-        # (create, update, delete), so reading it unconditionally on updates would
-        # overwrite the original creation date with the update event's timestamp.
-        # On update events, leave sub_date_str as None so COALESCE in the SQL below
-        # preserves the existing DB value (same behaviour as stories, which key off
-        # data.submissionDate which is absent from partial update payloads).
+        # Both discussion and story submissions use data.submissionDate for report
+        # created at. This field is only present on create events (absent from
+        # partial update payloads), so COALESCE in the SQL below preserves the
+        # original DB value on updates — no special-casing needed.
+        # discussion_date (when the discussion took place) is a separate field
+        # (data.discussionDate) stored in discussion_submissions, handled below.
         normalized_sub_type = submission_type.lower().strip()
-        if "discussion" in normalized_sub_type:
-            sub_date_str = event_payload.get("eventPublishedAt") if event_type != "update" else None
-        else:
-            sub_date_str = data.get("submissionDate")
+        sub_date_str = data.get("submissionDate")
 
         if sub_date_str:
             submission_date = datetime.fromisoformat(sub_date_str.replace("Z", "+00:00"))
@@ -384,8 +380,10 @@ async def insert_or_update_submission(
             image_urls = _normalize_media_url_list(data.get("imageUrls"))
             pdf_urls, masked_pdf_urls = _normalize_pdf_urls(data.get("pdfUrls"))
 
-            # Parse discussion date (date the discussion took place) from submissionDate.
-            disc_date_str = data.get("submissionDate")
+            # Parse discussion date (date the discussion took place) from discussionDate.
+            # This is distinct from submissionDate (report created at) which is stored
+            # in the parent submissions table.
+            disc_date_str = data.get("discussionDate")
             discussion_date = (
                 datetime.fromisoformat(disc_date_str.replace("Z", "+00:00"))
                 if disc_date_str else None
