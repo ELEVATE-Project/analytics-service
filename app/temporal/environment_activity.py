@@ -65,22 +65,20 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
 
             # Extract relevant fields dynamically based on the configured columns.
             input_text_dict = {"id": submission_id}
-            statements_parts = []
+            has_content = False
 
             for col in config_columns:
                 val = payload.get(col)
                 if isinstance(val, list):
                     val_str = "\n".join(str(v) for v in val if v)
-                    db_str = "\n".join(str(v) for v in val if v)
                 else:
                     val_str = str(val or "")
-                    db_str = val_str
 
                 input_text_dict[col] = val_str
-                if db_str.strip():
-                    statements_parts.append(f"{col}:\n{db_str}")
+                if val_str.strip():
+                    has_content = True
 
-            if not statements_parts:
+            if not has_content:
                 return {"status": "skipped", "reason": "no source text available"}
 
             prompt_data = await _get_environment_prompt(conn)
@@ -90,9 +88,7 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
         user_prompt_tmpl = prompt_data["user_prompt"]
 
         json_data = json.dumps(input_text_dict, ensure_ascii=False)
-        statements_str = "\n\n".join(statements_parts)
-        
-        user_prompt = user_prompt_tmpl.replace("{{text}}",json_data)
+        user_prompt = user_prompt_tmpl.replace("{{text}}", json_data)
 
         full_prompt = f"{system_prompt}\n\n{user_prompt}"
 
@@ -101,10 +97,13 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
 
         # Enforce that the LLM timeout is strictly less than the Temporal activity deadline (leave 15s for DB writes/parsing)
         # This prevents orphaned threads blocking forever if Temporal times out the activity.
-        info = activity.info()
-        if info.start_to_close_timeout:
-            max_safe_timeout = int(info.start_to_close_timeout.total_seconds()) - 15
-            resolved_timeout = min(resolved_timeout, max_safe_timeout)
+        try:
+            info = activity.info()
+            if info.start_to_close_timeout:
+                max_safe_timeout = int(info.start_to_close_timeout.total_seconds()) - 15
+                resolved_timeout = min(resolved_timeout, max_safe_timeout)
+        except RuntimeError:
+            pass  # Executing outside Temporal worker context
 
         response_text, usage = await asyncio.to_thread(
             openrouter_chat_completion,
@@ -140,13 +139,13 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
             raise ValueError(f"Invalid or missing environment_classification: {new_env}")
 
         allowed_envs = {"Classroom", "School", "Community"}
-        if new_env != "Requires Review":
+        if new_env != "Others":
             envs = [e.strip() for e in new_env.split(",")]
             for e in envs:
                 if e not in allowed_envs:
-                    raise ValueError(f"Invalid environment value '{e}'. Allowed values are: {', '.join(allowed_envs)} or 'Requires Review'.")
+                    raise ValueError(f"Invalid environment value '{e}'. Allowed values are: {', '.join(allowed_envs)} or 'Others'.")
 
-        rationale = str(parsed_data.get("rationale", ""))
+        justification = str(parsed_data.get("rationale", ""))
         keywords = str(parsed_data.get("keywords_considered", ""))
         
         raw_score = parsed_data.get("confidence_score")
@@ -176,10 +175,9 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
                     tenant_code=tenant_code,
                     theme_id=None,
                     analysis_type=analysis_type,
-                    statements=statements_str,
                     analysis_column=config_columns,
                     llm_confidence_score=confidence_score,
-                    justification=rationale,
+                    justification=justification,
                     category_type=None,
                     improvement_environment=new_env,
                     meta_data=meta_data

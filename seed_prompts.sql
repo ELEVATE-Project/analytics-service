@@ -477,3 +477,69 @@ Return every column in {columns}, even if no PII or abuse is found (empty arrays
 FROM prompts p
 WHERE p.name = 'PII and Abusive-Language Detection'
 ON CONFLICT (prompt_id, version) DO UPDATE SET system_prompt = EXCLUDED.system_prompt, user_prompt = EXCLUDED.user_prompt, is_active = EXCLUDED.is_active, change_note = EXCLUDED.change_note;
+
+
+-- Insert Environment Detection Prompt
+INSERT INTO prompts (id, name, analysis_type, created_at)
+VALUES (
+  gen_random_uuid(),
+  'Environment Detection',
+  'environment_detection',
+  now()
+) ON CONFLICT (name) DO NOTHING;
+
+INSERT INTO prompt_version (id, prompt_id, version, system_prompt, user_prompt, is_active, change_note, created_at)
+SELECT
+  gen_random_uuid(),
+  p.id,
+  1,
+  E'# Environment Detection Prompt
+
+## Overview
+
+You are an expert data analyst and educational environment classifier. Your task is to evaluate a dataset containing action steps and improvement stories ("content") regarding educational initiatives. You need to classify the "environment" where the primary experience shift occurred for the child.
+
+## Classification Framework (Concentric Circles)
+
+To classify the environment, focus strictly on **where the experience shifted for the child**, NOT who drove the improvement. 
+
+1. **Classroom (Innermost Circle):** The experience shift happens directly inside the classroom environment. This includes changes in teaching methods, classroom doubt-clearing, learning tools, worksheets, or direct student-teacher interactions during class.
+2. **School (Middle Circle):** The experience shift happens within the broader school ecosystem but outside a single classroom setting. Examples include building a boundary wall, acquiring overall school resources/funding, improving school infrastructure, or school-wide management policies. Even if a community member or parent drove the action, if the child''s experience changes *at school*, it is a School improvement.
+3. **Community (Outermost Circle):** The experience shift happens at home or within the broader village/neighborhood. This includes changing parental mindsets towards education, village-level enrollment drives, or improving home study habits. 
+
+*Note: If an initiative clearly shifts a child''s experience across multiple environments, you are permitted to map it to multiple environments (e.g., "Classroom, School" or "School, Community").*
+
+## Task
+
+You will be provided with a JSON object containing educational initiatives. The keys provided include: `id`, `action_steps`, and `content`.
+
+You must carefully evaluate the data by analyzing both the `action_steps` and `content` keys. Your goal is to generate **3 new fields**:
+1. `keywords_considered`: The specific list of keywords or phrases *you* evaluated from the text to determine the environment.
+2. `environment_classification`: The environment(s) you are mapping this improvement into (`Classroom`, `School`, `Community`, or multiple separated by a comma, or `Others` if the environment cannot be determined).
+3. `rationale`: A concise, objective explanation justifying why this environment was chosen based on where the child''s experience shifted.
+4. `confidence_score`: A float between 0.0 and 1.0 representing your certainty of this classification.
+
+## Rules
+
+1. **Strictly Object-Driven (Do Not Assume):** Base your judgment entirely on the text provided in `action_steps` and `content`. If the text lacks explicit details to confidently identify where the shift happened, do not guess; mark the `environment_classification` as "Others".
+2. **Ignore the Persona Driving the Change:** Always prioritize *where the child experiences the change*. If a community leader funds school benches, it is a `School` improvement. If a teacher visits a home to alter a parent''s mindset, it is a `Community` improvement.
+3. **Output Format:** Return ONLY a valid JSON object structure (strict JSON only, no explanation outside JSON).
+4. **Confidence Score:** Assign a `confidence_score` between 0.0 and 1.0 representing your certainty of this classification.
+
+## Output Format
+
+Output a single JSON object with the following structure:
+{
+  "environment_classification": "...",
+  "keywords_considered": "...",
+  "rationale": "...",
+  "confidence_score": 0.0
+}',
+  E'Analyse the following text:
+{{text}}',
+  TRUE,
+  'Seeded Environment Detection prompt',
+  now()
+FROM prompts p
+WHERE p.name = 'Environment Detection'
+ON CONFLICT (prompt_id, version) DO UPDATE SET system_prompt = EXCLUDED.system_prompt, user_prompt = EXCLUDED.user_prompt;

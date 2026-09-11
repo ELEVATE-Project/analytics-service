@@ -15,8 +15,41 @@ SEED_THEMES_FILE = BASE_DIR / "seed_themes.sql"
 
 class Database:
     def __init__(self):
-        self.pool = None
-        self._connect_lock = None
+        self._pools = {}
+        self._locks = {}
+
+    @property
+    def pool(self):
+        try:
+            loop = asyncio.get_running_loop()
+            return self._pools.get(loop)
+        except RuntimeError:
+            return None
+
+    @pool.setter
+    def pool(self, value):
+        try:
+            loop = asyncio.get_running_loop()
+            if value is None:
+                self._pools.pop(loop, None)
+            else:
+                self._pools[loop] = value
+        except RuntimeError:
+            pass
+
+    @property
+    def _connect_lock(self):
+        try:
+            loop = asyncio.get_running_loop()
+            if loop not in self._locks:
+                self._locks[loop] = asyncio.Lock()
+            return self._locks[loop]
+        except RuntimeError:
+            return None
+
+    @_connect_lock.setter
+    def _connect_lock(self, value):
+        pass
 
     async def initialize_schema(self) -> None:
         """
@@ -71,10 +104,6 @@ class Database:
         """
         if self.pool:
             return
-
-        current_loop = asyncio.get_running_loop()
-        if self._connect_lock is None or getattr(self._connect_lock, '_loop', None) is not current_loop:
-            self._connect_lock = asyncio.Lock()
 
         async with self._connect_lock:
             if self.pool:
