@@ -90,13 +90,9 @@ async def insert_statement_with_parent_check(
     raw_text: str,
 ) -> None:
     """
-    Checks whether an equivalent statement already exists as a root (using a
-    punctuation-stripped/cleaned form for compatibility matching), then inserts
-    the new row with the ORIGINAL raw_text preserved — parent_id is pre-populated
-    if a duplicate root was found.
-
-    clean_statement() is used ONLY for the duplicate SELECT check, not for storage.
-    raw_statement in the DB always holds the original text with full punctuation.
+    Preserves the original raw_text in raw_statement and stores its cleaned form
+    in cleaned_statement. Deduplication compares cleaned_statement to cleaned_statement
+    (both punctuation-stripped) so minor formatting differences don't create false roots.
 
     Uses a check-before-insert pattern to avoid an extra UPDATE round-trip:
       old: INSERT → SELECT → UPDATE  (3 round-trips on duplicates)
@@ -107,16 +103,15 @@ async def insert_statement_with_parent_check(
     if not cleaned or not original:
         return
 
-    # Duplicate check uses `cleaned` (punctuation stripped) so minor formatting differences
-    # like trailing commas or brackets don't create false new root statements.
-    # - LOWER(raw_statement) vs LOWER(cleaned): both lowercased so case differences are ignored.
+    # Dedup check against cleaned_statement — comparing cleaned-to-cleaned so
+    # punctuation variants (trailing comma, brackets, etc.) are treated as the same statement.
     # - AND parent_id IS NULL ensures we only link to root statements, preventing deep chains.
     # - ORDER BY created_at ASC guarantees the oldest root is chosen when duplicates exist.
     existing_id = await conn.fetchval(
         """
         SELECT id
         FROM statements
-        WHERE LOWER(raw_statement) = LOWER($1)
+        WHERE LOWER(cleaned_statement) = LOWER($1)
           AND parent_id IS NULL
         ORDER BY created_at ASC, id ASC
         LIMIT 1
@@ -124,15 +119,15 @@ async def insert_statement_with_parent_check(
         cleaned,
     )
 
-    # Store the original text — clean_statement() was used only for the SELECT above.
+    # Insert with both original and cleaned text; parent_id pre-set if a duplicate root was found.
     new_id = await conn.fetchval(
         """
         INSERT INTO statements
-            (submission_id, tenant_code, submission_type, statement_type, raw_statement, parent_id)
-        VALUES ($1, $2, $3, $4, $5, $6)
+            (submission_id, tenant_code, submission_type, statement_type, raw_statement, cleaned_statement, parent_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING id
         """,
-        str(submission_id), tenant_code, submission_type, statement_type, original, existing_id,
+        str(submission_id), tenant_code, submission_type, statement_type, original, cleaned, existing_id,
     )
 
     if existing_id:

@@ -203,7 +203,8 @@ CREATE TABLE statements (
 
     submission_type  TEXT NOT NULL,
     statement_type   TEXT NOT NULL,
-    raw_statement    TEXT NOT NULL,
+    raw_statement     TEXT NOT NULL,         -- original text as submitted, punctuation intact
+    cleaned_statement TEXT NOT NULL,         -- punctuation-stripped form used for deduplication
 
     parent_id        UUID,
 
@@ -219,9 +220,9 @@ CREATE TABLE statements (
         ON DELETE SET NULL
 );
 
--- Expression index for fast case-insensitive deduplication (matches LOWER() query).
-CREATE INDEX idx_statements_raw_lower
-    ON statements (LOWER(raw_statement));
+-- Expression index for fast case-insensitive deduplication (matches LOWER() query on cleaned form).
+CREATE INDEX idx_statements_cleaned_lower
+    ON statements (LOWER(cleaned_statement));
 
 -- Submission lookup + cascade delete path.
 CREATE INDEX idx_statements_submission_parent ON statements (submission_id, parent_id);
