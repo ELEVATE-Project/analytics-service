@@ -203,7 +203,8 @@ CREATE TABLE statements (
 
     submission_type  TEXT NOT NULL,
     statement_type   TEXT NOT NULL,
-    raw_statement    TEXT NOT NULL,
+    raw_statement     TEXT NOT NULL,         -- original text as submitted, punctuation intact
+    cleaned_statement TEXT NOT NULL,         -- punctuation-stripped form used for deduplication
 
     parent_id        UUID,
 
@@ -219,9 +220,13 @@ CREATE TABLE statements (
         ON DELETE SET NULL
 );
 
--- Expression index for fast case-insensitive deduplication (matches LOWER() query).
-CREATE INDEX idx_statements_raw_lower
-    ON statements (LOWER(raw_statement));
+-- Expression index for fast case-insensitive deduplication (matches LOWER() query on cleaned form).
+CREATE INDEX idx_statements_cleaned_lower
+    ON statements (LOWER(cleaned_statement));
+
+-- Submission lookup + cascade delete path.
+CREATE INDEX idx_statements_submission_parent ON statements (submission_id, parent_id);
+CREATE INDEX idx_statements_parent ON statements (parent_id) WHERE parent_id IS NOT NULL;
 
 -- Submission lookup + cascade delete path.
 CREATE INDEX idx_statements_submission_parent ON statements (submission_id, parent_id);
@@ -323,15 +328,7 @@ CREATE TABLE analysis_results (
 
     FOREIGN KEY (submission_id, tenant_code)
         REFERENCES submissions(submission_id, tenant_code)
-        ON DELETE CASCADE,
-
-    FOREIGN KEY (statement_id)
-        REFERENCES statements(id)
-        ON DELETE CASCADE,
-
-    FOREIGN KEY (theme_id)
-        REFERENCES themes(id)
-        ON DELETE SET NULL
+        ON DELETE CASCADE
 );
 
 -- =========================================================================

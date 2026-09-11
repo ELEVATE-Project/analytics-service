@@ -90,44 +90,44 @@ async def insert_statement_with_parent_check(
     raw_text: str,
 ) -> None:
     """
-    Cleans raw_text, checks whether an identical statement (case-insensitive)
-    already exists as a root, then inserts the new row with parent_id pre-populated
-    if a match was found.
+    Preserves the original raw_text in raw_statement and stores its cleaned form
+    in cleaned_statement. Deduplication compares cleaned_statement to cleaned_statement
+    (both punctuation-stripped) so minor formatting differences don't create false roots.
 
     Uses a check-before-insert pattern to avoid an extra UPDATE round-trip:
       old: INSERT → SELECT → UPDATE  (3 round-trips on duplicates)
       new: SELECT → INSERT           (2 round-trips max, 1 on uniques)
     """
     cleaned = clean_statement(raw_text)
-    if not cleaned:
+    original = raw_text.strip()
+    if not cleaned or not original:
         return
 
-    # Check for an existing root statement with the same text (case-insensitive).
-    # - LOWER() ensures the match is truly case-insensitive (= operator is case-sensitive in PG).
+    # Dedup check against cleaned_statement — comparing cleaned-to-cleaned so
+    # punctuation variants (trailing comma, brackets, etc.) are treated as the same statement.
     # - AND parent_id IS NULL ensures we only link to root statements, preventing deep chains.
-    # - ORDER BY created_at ASC guarantees we get the oldest/original statement when
-    #   multiple matches exist (LIMIT 1 alone is non-deterministic).
+    # - ORDER BY created_at ASC guarantees the oldest root is chosen when duplicates exist.
     existing_id = await conn.fetchval(
         """
         SELECT id
         FROM statements
-        WHERE LOWER(raw_statement) = LOWER($1)
+        WHERE LOWER(cleaned_statement) = LOWER($1)
           AND parent_id IS NULL
-        ORDER BY created_at ASC, id ASC
+        ORDER BY created_at ASC, id ASC, id ASC
         LIMIT 1
         """,
         cleaned,
     )
 
-    # Insert with parent_id already set if a duplicate root was found — no UPDATE needed.
+    # Insert with both original and cleaned text; parent_id pre-set if a duplicate root was found.
     new_id = await conn.fetchval(
         """
         INSERT INTO statements
-            (submission_id, tenant_code, submission_type, statement_type, raw_statement, parent_id)
-        VALUES ($1, $2, $3, $4, $5, $6)
+            (submission_id, tenant_code, submission_type, statement_type, raw_statement, cleaned_statement, parent_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING id
         """,
-        str(submission_id), tenant_code, submission_type, statement_type, cleaned, existing_id,
+        str(submission_id), tenant_code, submission_type, statement_type, original, cleaned, existing_id,
     )
 
     if existing_id:
@@ -444,6 +444,7 @@ async def insert_or_update_submission(
                             submission_id,
                             tenant_code,
                             submission_type=submission_type,
+                            submission_type=submission_type,
                             statement_type="challenge",
                             raw_text=str(raw_challenge),
                         )
@@ -537,6 +538,7 @@ async def insert_or_update_submission(
                             conn,
                             submission_id,
                             tenant_code,
+                            submission_type=submission_type,
                             submission_type=submission_type,
                             statement_type="challenge",
                             raw_text=str(raw_challenge),
@@ -1011,7 +1013,6 @@ async def fetch_challenge_statements_for_submission(
         str(submission_id), tenant_code,
     )
     return [dict(row) for row in rows]
-
 async def reclaim_stale_in_progress(stale_minutes: int = 30) -> int:
     """
     Reset any csv_uploads rows that have been stuck at status='in_progress'
