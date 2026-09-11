@@ -435,18 +435,23 @@ async def insert_or_update_submission(
                 )
 
             # Extract challenges for story submission into statements table
-            raw_story_challenges = data.get("challenges") or []
-            if isinstance(raw_story_challenges, list):
-                for raw_challenge in raw_story_challenges:
-                    if raw_challenge:
-                        await insert_statement_with_parent_check(
-                            conn,
-                            submission_id,
-                            tenant_code,
-                            submission_type=submission_type,
-                            statement_type="challenge",
-                            raw_text=str(raw_challenge),
-                        )
+            raw_story_challenges = data.get("challenges")
+            if raw_story_challenges is not None:
+                await conn.execute(
+                    "DELETE FROM statements WHERE submission_id = $1 AND tenant_code = $2",
+                    submission_id, tenant_code
+                )
+                if isinstance(raw_story_challenges, list):
+                    for raw_challenge in raw_story_challenges:
+                        if raw_challenge:
+                            await insert_statement_with_parent_check(
+                                conn,
+                                submission_id,
+                                tenant_code,
+                                submission_type=submission_type,
+                                statement_type="challenge",
+                                raw_text=str(raw_challenge),
+                            )
 
         elif "discussion" in normalized_type:
             # Upsert discussion submission
@@ -529,31 +534,37 @@ async def insert_or_update_submission(
                 )
 
             # Extract challenges and solutions for discussion submission into statements table
-            raw_challenges = data.get("challenges") or []
-            if isinstance(raw_challenges, list):
-                for raw_challenge in raw_challenges:
-                    if raw_challenge:
-                        await insert_statement_with_parent_check(
-                            conn,
-                            submission_id,
-                            tenant_code,
-                            submission_type=submission_type,
-                            statement_type="challenge",
-                            raw_text=str(raw_challenge),
-                        )
+            raw_challenges = data.get("challenges")
+            raw_solutions = data.get("solutions")
+            
+            if raw_challenges is not None or raw_solutions is not None:
+                await conn.execute(
+                    "DELETE FROM statements WHERE submission_id = $1 AND tenant_code = $2",
+                    submission_id, tenant_code
+                )
+                if isinstance(raw_challenges, list):
+                    for raw_challenge in raw_challenges:
+                        if raw_challenge:
+                            await insert_statement_with_parent_check(
+                                conn,
+                                submission_id,
+                                tenant_code,
+                                submission_type=submission_type,
+                                statement_type="challenge",
+                                raw_text=str(raw_challenge),
+                            )
 
-            raw_solutions = data.get("solutions") or []
-            if isinstance(raw_solutions, list):
-                for raw_solution in raw_solutions:
-                    if raw_solution:
-                        await insert_statement_with_parent_check(
-                            conn,
-                            submission_id,
-                            tenant_code,
-                            submission_type=submission_type,
-                            statement_type="solution",
-                            raw_text=str(raw_solution),
-                        )
+                if isinstance(raw_solutions, list):
+                    for raw_solution in raw_solutions:
+                        if raw_solution:
+                            await insert_statement_with_parent_check(
+                                conn,
+                                submission_id,
+                                tenant_code,
+                                submission_type=submission_type,
+                                statement_type="solution",
+                                raw_text=str(raw_solution),
+                            )
 
         logger.info(f"Successfully ingested {submission_type} submission {submission_id} under tenant {tenant_code}")
         return {
@@ -651,6 +662,7 @@ async def insert_analysis_result(
     multi_theme_mapped: bool = False,
     category_type: Optional[str] = None,
     meta_data: Optional[Dict[str, Any]] = None,
+    improvement_environment: Optional[str] = None,
 ) -> None:
     """
     Single unified database function to insert rows into analysis_results.
@@ -663,10 +675,16 @@ async def insert_analysis_result(
     # Map statement_type to analysis_column if analysis_column not explicitly passed
     if analysis_column is None and statement_type is not None:
         analysis_column = [statement_type]
+        
+    if llm_prediction is None and improvement_environment is not None:
+        llm_prediction = improvement_environment
 
-    # Map legacy confidence score to model_confidence_score only if explicitly not set
+    # Map legacy confidence score to both model_confidence_score and llm_confidence_score only if explicitly not set
     if model_confidence_score is None and confidence_score is not None:
         model_confidence_score = confidence_score
+        
+    if llm_confidence_score is None and confidence_score is not None:
+        llm_confidence_score = confidence_score
     # NOTE: similarity_score (cosine embedding similarity) is intentionally NOT aliased
     # to model_confidence_score — they are distinct concepts.
 
