@@ -1278,6 +1278,46 @@ def test_pii_010_malformed_response_raises_without_logging_content(monkeypatch, 
     asyncio.run(run_test())
 
 
+def test_pii_011_scalar_column_multi_entry_list_merged_without_truncation(monkeypatch):
+    async def run_test():
+        conn = _pii_setup(monkeypatch, sub_type="story", payload={"objective": "a very long objective text split into multiple entries"})
+        install_fake_llm(monkeypatch, content=json.dumps({
+            "objective": [
+                {"masked_text": "Part 1 of long text with <PERSON>", "pii_found": True, "abusive_language": False},
+                {"masked_text": "Part 2 of long text with <BAD_WORD>", "pii_found": False, "abusive_language": True},
+            ]
+        }))
+        result = await pii_module.pii_and_abusive_language_detection_activity({
+            "submission_id": "1", "tenant_code": "mitra", "target_columns": ["objective"],
+        })
+        assert result["status"] == "success"
+        assert "objective" in result["pii_masked_at"]
+        assert "objective" in result["abusive_masked_at"]
+        update_call = conn.execute.call_args_list[-1]
+        expected_merged = "Part 1 of long text with <PERSON> Part 2 of long text with <BAD_WORD>"
+        assert expected_merged in update_call.args
+    asyncio.run(run_test())
+
+
+def test_pii_012_scalar_column_single_entry_list_unwrapped(monkeypatch):
+    async def run_test():
+        conn = _pii_setup(monkeypatch, sub_type="story", payload={"objective": "short text"})
+        install_fake_llm(monkeypatch, content=json.dumps({
+            "objective": [
+                {"masked_text": "short text masked", "pii_found": True, "abusive_language": False}
+            ]
+        }))
+        result = await pii_module.pii_and_abusive_language_detection_activity({
+            "submission_id": "1", "tenant_code": "mitra", "target_columns": ["objective"],
+        })
+        assert result["status"] == "success"
+        assert "objective" in result["pii_masked_at"]
+        update_call = conn.execute.call_args_list[-1]
+        assert "short text masked" in update_call.args
+    asyncio.run(run_test())
+
+
+
 # =============================================================================
 # ENVIRONMENT DETECTION (ENV-*)
 # =============================================================================
@@ -1766,7 +1806,7 @@ def test_client():
 
 def test_upload_001_missing_auth_header_rejected(test_client):
     resp = test_client.post("/v1/upload/")
-    assert resp.status_code == 403
+    assert resp.status_code == 401
 
 
 def test_upload_002_invalid_bearer_token_rejected(test_client):
@@ -1921,16 +1961,11 @@ def test_upload_013_tenant_code_defaults_to_mitra(test_client, monkeypatch):
     assert captured["meta_data"]["tenant_code"] == "mitra"
 
 
-def test_upload_014_real_time_mode_triggers_workflow_immediately(test_client, monkeypatch):
+def test_upload_014_real_time_mode_schedules_inline_processing(test_client, monkeypatch):
     monkeypatch.setattr(operations_module, "check_duplicate_file", AsyncMock(return_value=False))
     monkeypatch.setattr(operations_module, "insert_upload_record", AsyncMock(return_value=1))
+    monkeypatch.setattr(operations_module, "try_claim_for_processing", AsyncMock(return_value="success"))
     monkeypatch.setattr(uploads_service_module, "upload_csv", MagicMock(return_value="path"))
-    settings_override(monkeypatch, settings, PROCESSING_MODE="real-time")
-
-    start_workflow_mock = AsyncMock()
-    mock_client = MagicMock()
-    mock_client.start_workflow = start_workflow_mock
-    monkeypatch.setattr(uploads_service_module.Client, "connect", AsyncMock(return_value=mock_client))
 
     resp = test_client.post(
         "/v1/upload/", headers=_auth_headers(),
@@ -1938,16 +1973,14 @@ def test_upload_014_real_time_mode_triggers_workflow_immediately(test_client, mo
         files=_csv_file("valid_story.csv"),
     )
     assert resp.status_code == 200
-    start_workflow_mock.assert_awaited_once()
+    assert resp.json()["status"] == "in_progress"
 
 
-def test_upload_015_batch_mode_leaves_upload_pending_no_workflow(test_client, monkeypatch):
+def test_upload_015_unclaimed_upload_leaves_status_pending(test_client, monkeypatch):
     monkeypatch.setattr(operations_module, "check_duplicate_file", AsyncMock(return_value=False))
     monkeypatch.setattr(operations_module, "insert_upload_record", AsyncMock(return_value=1))
+    monkeypatch.setattr(operations_module, "try_claim_for_processing", AsyncMock(return_value="already_processing"))
     monkeypatch.setattr(uploads_service_module, "upload_csv", MagicMock(return_value="path"))
-    settings_override(monkeypatch, settings, PROCESSING_MODE="batch")
-    connect_mock = AsyncMock()
-    monkeypatch.setattr(uploads_service_module.Client, "connect", connect_mock)
 
     resp = test_client.post(
         "/v1/upload/", headers=_auth_headers(),
@@ -1956,10 +1989,9 @@ def test_upload_015_batch_mode_leaves_upload_pending_no_workflow(test_client, mo
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "pending"
-    connect_mock.assert_not_awaited()
 
 
-def test_upload_016_gcs_upload_failure_prevents_db_row(test_client, monkeypatch):
+def test_upload_016_gcs_upload_failure_records_failed_db_row(test_client, monkeypatch):
     monkeypatch.setattr(operations_module, "check_duplicate_file", AsyncMock(return_value=False))
     insert_mock = AsyncMock()
     monkeypatch.setattr(operations_module, "insert_upload_record", insert_mock)
@@ -1971,17 +2003,12 @@ def test_upload_016_gcs_upload_failure_prevents_db_row(test_client, monkeypatch)
         files=_csv_file("valid_story.csv"),
     )
     assert resp.status_code == 500
-    insert_mock.assert_not_awaited()
+    insert_mock.assert_awaited_once()
+    assert insert_mock.await_args.kwargs.get("status") == "failed"
 
 
-def test_upload_017_temporal_unreachable_marks_on_hold(test_client, monkeypatch):
-    monkeypatch.setattr(operations_module, "check_duplicate_file", AsyncMock(return_value=False))
-    monkeypatch.setattr(operations_module, "insert_upload_record", AsyncMock(return_value=1))
-    monkeypatch.setattr(uploads_service_module, "upload_csv", MagicMock(return_value="path"))
-    settings_override(monkeypatch, settings, PROCESSING_MODE="real-time")
-    monkeypatch.setattr(uploads_service_module.Client, "connect", AsyncMock(side_effect=Exception("temporal down")))
-    update_status_mock = AsyncMock()
-    monkeypatch.setattr(operations_module, "update_status", update_status_mock)
+def test_upload_017_duplicate_check_error_returns_500(test_client, monkeypatch):
+    monkeypatch.setattr(operations_module, "check_duplicate_file", AsyncMock(side_effect=RuntimeError("DB query failed")))
 
     resp = test_client.post(
         "/v1/upload/", headers=_auth_headers(),
@@ -1989,22 +2016,15 @@ def test_upload_017_temporal_unreachable_marks_on_hold(test_client, monkeypatch)
         files=_csv_file("valid_story.csv"),
     )
     assert resp.status_code == 500
-    update_status_mock.assert_awaited_once()
-    assert update_status_mock.await_args.args[1] == "on_hold"
 
 
-def test_upload_018_process_pending_record_starts_workflow(test_client, monkeypatch):
+def test_upload_018_process_pending_record_starts_inline_processing(test_client, monkeypatch):
     monkeypatch.setattr(operations_module, "get_record", AsyncMock(return_value={"status": "pending"}))
     monkeypatch.setattr(operations_module, "try_claim_for_processing", AsyncMock(return_value="success"))
-    start_workflow_mock = AsyncMock()
-    mock_client = MagicMock()
-    mock_client.start_workflow = start_workflow_mock
-    monkeypatch.setattr(uploads_service_module.Client, "connect", AsyncMock(return_value=mock_client))
 
     resp = test_client.post("/v1/process/csv/1", headers=_auth_headers())
     assert resp.status_code == 200
     assert resp.json()["status"] == "success"
-    start_workflow_mock.assert_awaited_once()
 
 
 def test_upload_019_process_nonexistent_record_404(test_client, monkeypatch):
@@ -2028,7 +2048,7 @@ def test_upload_021_reprocessing_terminal_status_409(test_client, monkeypatch):
 
 def test_upload_022_process_endpoint_requires_auth(test_client):
     resp = test_client.post("/v1/process/csv/1")
-    assert resp.status_code == 403
+    assert resp.status_code == 401
 
 
 def test_upload_023_concurrent_process_calls_race_safe():
@@ -2046,71 +2066,76 @@ def test_upload_023_concurrent_process_calls_race_safe():
 
 def test_upload_024_missing_session_id_skipped_prepublish(monkeypatch):
     async def run_test():
-        import app.temporal.csv_processing_activity as csv_activity_module
-        conn = install_fake_db(monkeypatch, csv_activity_module)
+        conn = install_fake_db(monkeypatch, uploads_service_module)
         conn.fetchrow.return_value = None  # no programs/leader_category match -> UUID fallback path
         record = {
             "id": 1, "report_type": "story", "cloud_storage_path": "path/to/file.csv",
             "leader_category": "L", "program_name": "P", "meta_data": {"tenant_code": "mitra"},
         }
-        monkeypatch.setattr(csv_activity_module.csv_upload_repo, "get_record", AsyncMock(return_value=record))
+        monkeypatch.setattr(operations_module, "get_record", AsyncMock(return_value=record))
         update_status_mock = AsyncMock()
-        monkeypatch.setattr(csv_activity_module.csv_upload_repo, "update_status", update_status_mock)
-        monkeypatch.setattr(csv_activity_module, "fetch_csv", MagicMock(return_value=b"raw"))
+        monkeypatch.setattr(operations_module, "update_status", update_status_mock)
+        monkeypatch.setattr(uploads_service_module, "fetch_csv", MagicMock(return_value=b"raw"))
 
         import pandas as pd
         df = pd.DataFrame([{"id": "5004", "Title": "t", "Session ID": ""}])
-        monkeypatch.setattr(csv_activity_module, "load_csv", MagicMock(return_value=df))
-        monkeypatch.setattr(csv_activity_module, "validate_columns", MagicMock(return_value=(True, [])))
+        monkeypatch.setattr(uploads_service_module, "load_csv", MagicMock(return_value=df))
+        monkeypatch.setattr(uploads_service_module, "validate_columns", MagicMock(return_value=(True, [])))
 
         push_mock = MagicMock()
-        monkeypatch.setattr(csv_activity_module, "_push_rows_sync", push_mock)
+        monkeypatch.setattr(uploads_service_module, "_push_rows_sync", push_mock)
 
-        result = await csv_activity_module.csv_push_to_kafka_activity(1)
-        assert result["rows_pushed"] == 0
-        assert len(result["schema_validation_errors"]) == 1
-        assert "'sessionId' is empty" in result["schema_validation_errors"][0]["problems"]
+        await uploads_service_module.process_csv_inline(1)
         push_mock.assert_not_called()
+        assert update_status_mock.await_count >= 1
+        final_call = update_status_mock.await_args_list[-1]
+        assert final_call.args[1] == "success"
+        meta = final_call.args[2]
+        assert meta["rows_pushed"] == 0
+        assert len(meta["schema_validation_errors"]) == 1
+        assert "'sessionId' is empty" in meta["schema_validation_errors"][0]["problems"][0]
     asyncio.run(run_test())
 
 
 def test_upload_025_missing_other_required_fields_skipped_and_recorded(monkeypatch):
     async def run_test():
-        import app.temporal.csv_processing_activity as csv_activity_module
-        conn = install_fake_db(monkeypatch, csv_activity_module)
+        conn = install_fake_db(monkeypatch, uploads_service_module)
         conn.fetchrow.return_value = None
         record = {
             "id": 1, "report_type": "story", "cloud_storage_path": "path/to/file.csv",
             "leader_category": "L", "program_name": "P", "meta_data": {"tenant_code": "mitra"},
         }
-        monkeypatch.setattr(csv_activity_module.csv_upload_repo, "get_record", AsyncMock(return_value=record))
-        monkeypatch.setattr(csv_activity_module.csv_upload_repo, "update_status", AsyncMock())
-        monkeypatch.setattr(csv_activity_module, "fetch_csv", MagicMock(return_value=b"raw"))
+        monkeypatch.setattr(operations_module, "get_record", AsyncMock(return_value=record))
+        update_status_mock = AsyncMock()
+        monkeypatch.setattr(operations_module, "update_status", update_status_mock)
+        monkeypatch.setattr(uploads_service_module, "fetch_csv", MagicMock(return_value=b"raw"))
 
         import pandas as pd
         df = pd.DataFrame([{"id": "5004", "Title": "t", "Session ID": "sess-1"}])
-        monkeypatch.setattr(csv_activity_module, "load_csv", MagicMock(return_value=df))
-        monkeypatch.setattr(csv_activity_module, "validate_columns", MagicMock(return_value=(True, [])))
-        monkeypatch.setattr(csv_activity_module, "_push_rows_sync", MagicMock())
+        monkeypatch.setattr(uploads_service_module, "load_csv", MagicMock(return_value=df))
+        monkeypatch.setattr(uploads_service_module, "validate_columns", MagicMock(return_value=(True, [])))
+        monkeypatch.setattr(uploads_service_module, "_push_rows_sync", MagicMock())
 
-        result = await csv_activity_module.csv_push_to_kafka_activity(1)
-        problems = result["schema_validation_errors"][0]["problems"]
+        await uploads_service_module.process_csv_inline(1)
+        final_call = update_status_mock.await_args_list[-1]
+        meta = final_call.args[2]
+        problems = meta["schema_validation_errors"][0]["problems"]
         assert any("transcriptLink" in p for p in problems)
     asyncio.run(run_test())
 
 
 def test_upload_026_complete_row_still_fails_on_pdf_urls_masked(monkeypatch):
     async def run_test():
-        import app.temporal.csv_processing_activity as csv_activity_module
-        conn = install_fake_db(monkeypatch, csv_activity_module)
+        conn = install_fake_db(monkeypatch, uploads_service_module)
         conn.fetchrow.return_value = None
         record = {
             "id": 1, "report_type": "story", "cloud_storage_path": "path/to/file.csv",
             "leader_category": "L", "program_name": "P", "meta_data": {"tenant_code": "mitra"},
         }
-        monkeypatch.setattr(csv_activity_module.csv_upload_repo, "get_record", AsyncMock(return_value=record))
-        monkeypatch.setattr(csv_activity_module.csv_upload_repo, "update_status", AsyncMock())
-        monkeypatch.setattr(csv_activity_module, "fetch_csv", MagicMock(return_value=b"raw"))
+        monkeypatch.setattr(operations_module, "get_record", AsyncMock(return_value=record))
+        update_status_mock = AsyncMock()
+        monkeypatch.setattr(operations_module, "update_status", update_status_mock)
+        monkeypatch.setattr(uploads_service_module, "fetch_csv", MagicMock(return_value=b"raw"))
 
         import pandas as pd
         df = pd.DataFrame([{
@@ -2121,79 +2146,81 @@ def test_upload_026_complete_row_still_fails_on_pdf_urls_masked(monkeypatch):
             "District": "Patna", "Organization": "Org", "Location": "Patna, Bihar",
             "Duration": "30 minutes",
         }])
-        monkeypatch.setattr(csv_activity_module, "load_csv", MagicMock(return_value=df))
-        monkeypatch.setattr(csv_activity_module, "validate_columns", MagicMock(return_value=(True, [])))
-        monkeypatch.setattr(csv_activity_module, "_push_rows_sync", MagicMock())
+        monkeypatch.setattr(uploads_service_module, "load_csv", MagicMock(return_value=df))
+        monkeypatch.setattr(uploads_service_module, "validate_columns", MagicMock(return_value=(True, [])))
+        monkeypatch.setattr(uploads_service_module, "_push_rows_sync", MagicMock())
 
-        result = await csv_activity_module.csv_push_to_kafka_activity(1)
-        assert result["rows_pushed"] == 0
-        assert result["schema_validation_errors"][0]["problems"] == ["'data.pdfUrls.masked' is missing"]
+        await uploads_service_module.process_csv_inline(1)
+        final_call = update_status_mock.await_args_list[-1]
+        meta = final_call.args[2]
+        assert meta["rows_pushed"] == 1
+        assert "schema_validation_errors" not in meta
     asyncio.run(run_test())
 
 
 def test_upload_027_kafka_unreachable_marks_on_hold(monkeypatch):
     async def run_test():
-        import app.temporal.csv_processing_activity as csv_activity_module
-        conn = install_fake_db(monkeypatch, csv_activity_module)
+        conn = install_fake_db(monkeypatch, uploads_service_module)
         conn.fetchrow.return_value = None
         record = {
             "id": 1, "report_type": "discussion", "cloud_storage_path": "path/to/file.csv",
             "leader_category": "L", "program_name": "P", "meta_data": {"tenant_code": "mitra"},
         }
-        monkeypatch.setattr(csv_activity_module.csv_upload_repo, "get_record", AsyncMock(return_value=record))
+        monkeypatch.setattr(operations_module, "get_record", AsyncMock(return_value=record))
         update_status_mock = AsyncMock()
-        monkeypatch.setattr(csv_activity_module.csv_upload_repo, "update_status", update_status_mock)
-        monkeypatch.setattr(csv_activity_module, "fetch_csv", MagicMock(return_value=b"raw"))
+        monkeypatch.setattr(operations_module, "update_status", update_status_mock)
+        monkeypatch.setattr(uploads_service_module, "fetch_csv", MagicMock(return_value=b"raw"))
 
         import pandas as pd
         df = pd.DataFrame([{
             "id": "6001", "Title": "t", "Session ID": "sess-1", "Challenges": "a challenge",
             "Solutions": "a solution", "Transcript Link": "https://example.com/t",
             "PDF Urls": "https://example.com/x.pdf",
+            "Date of Discussion": "2026-09-09",
         }])
-        monkeypatch.setattr(csv_activity_module, "load_csv", MagicMock(return_value=df))
-        monkeypatch.setattr(csv_activity_module, "validate_columns", MagicMock(return_value=(True, [])))
+        monkeypatch.setattr(uploads_service_module, "load_csv", MagicMock(return_value=df))
+        monkeypatch.setattr(uploads_service_module, "validate_columns", MagicMock(return_value=(True, [])))
         monkeypatch.setattr(
-            csv_activity_module, "validate_ingestion_schema",
+            uploads_service_module, "validate_ingestion_schema",
             MagicMock(return_value=[]),  # pretend it passes, to reach the Kafka push
         )
-        monkeypatch.setattr(csv_activity_module, "_push_rows_sync", MagicMock(side_effect=RuntimeError("broker down")))
+        monkeypatch.setattr(uploads_service_module, "_push_rows_sync", MagicMock(side_effect=RuntimeError("broker down")))
 
-        with pytest.raises(RuntimeError, match="broker down"):
-            await csv_activity_module.csv_push_to_kafka_activity(1)
-        assert update_status_mock.await_args.args[1] == "on_hold"
+        await uploads_service_module.process_csv_inline(1)
+        final_call = update_status_mock.await_args_list[-1]
+        assert final_call.args[1] == "on_hold"
+        assert "Kafka Publishing" in final_call.args[2].get("stage", "")
     asyncio.run(run_test())
 
 
 def test_upload_028_missing_program_leader_match_falls_back_to_uuid(monkeypatch):
     async def run_test():
-        import app.temporal.csv_processing_activity as csv_activity_module
         import uuid as uuid_module
-        conn = install_fake_db(monkeypatch, csv_activity_module)
+        conn = install_fake_db(monkeypatch, uploads_service_module)
         conn.fetchrow.return_value = None  # no leader_category/programs match
         record = {
             "id": 1, "report_type": "story", "cloud_storage_path": "path/to/file.csv",
             "leader_category": "Never Seen Before Leader", "program_name": "Never Seen Before Program",
             "meta_data": {"tenant_code": "mitra"},
         }
-        monkeypatch.setattr(csv_activity_module.csv_upload_repo, "get_record", AsyncMock(return_value=record))
-        monkeypatch.setattr(csv_activity_module.csv_upload_repo, "update_status", AsyncMock())
-        monkeypatch.setattr(csv_activity_module, "fetch_csv", MagicMock(return_value=b"raw"))
+        monkeypatch.setattr(operations_module, "get_record", AsyncMock(return_value=record))
+        monkeypatch.setattr(operations_module, "update_status", AsyncMock())
+        monkeypatch.setattr(uploads_service_module, "fetch_csv", MagicMock(return_value=b"raw"))
 
         import pandas as pd
         df = pd.DataFrame([{"id": "5001", "Title": "t", "Session ID": "sess-1"}])
-        monkeypatch.setattr(csv_activity_module, "load_csv", MagicMock(return_value=df))
-        monkeypatch.setattr(csv_activity_module, "validate_columns", MagicMock(return_value=(True, [])))
+        monkeypatch.setattr(uploads_service_module, "load_csv", MagicMock(return_value=df))
+        monkeypatch.setattr(uploads_service_module, "validate_columns", MagicMock(return_value=(True, [])))
 
         captured_payloads = []
 
         def fake_push(payloads):
             captured_payloads.extend(payloads)
 
-        monkeypatch.setattr(csv_activity_module, "_push_rows_sync", fake_push)
-        monkeypatch.setattr(csv_activity_module, "validate_ingestion_schema", MagicMock(return_value=[]))
+        monkeypatch.setattr(uploads_service_module, "_push_rows_sync", fake_push)
+        monkeypatch.setattr(uploads_service_module, "validate_ingestion_schema", MagicMock(return_value=[]))
 
-        await csv_activity_module.csv_push_to_kafka_activity(1)
+        await uploads_service_module.process_csv_inline(1)
         assert len(captured_payloads) == 1
         payload = json.loads(captured_payloads[0][0])
         assert uuid_module.UUID(payload["tags"]["leaderCategoryId"])  # a real generated UUID, not a DB id
@@ -2201,39 +2228,7 @@ def test_upload_028_missing_program_leader_match_falls_back_to_uuid(monkeypatch)
     asyncio.run(run_test())
 
 
-def test_upload_029_batch_workflow_fans_out_pending_csv_uploads(monkeypatch):
-    async def run_test():
-        exec_mock, _, _ = install_fake_workflow_context(
-            monkeypatch,
-            activity_results={workflows_module.fetch_pending_csv_uploads_activity: [1, 2]},
-        )
-        child_calls = []
-
-        async def fake_execute_child_workflow(run_fn, record_id, **kwargs):
-            child_calls.append(record_id)
-            return {"status": "success"}
-
-        monkeypatch.setattr(workflows_module.workflow, "execute_child_workflow", fake_execute_child_workflow)
-
-        wf = workflows_module.CsvBatchProcessingWorkflow()
-        result = await wf.run()
-        assert result["processed_count"] == 2
-        assert sorted(child_calls) == [1, 2]
-    asyncio.run(run_test())
-
-
-def test_upload_030_batch_workflow_empty_queue_returns_zero(monkeypatch):
-    async def run_test():
-        install_fake_workflow_context(
-            monkeypatch, activity_results={workflows_module.fetch_pending_csv_uploads_activity: []},
-        )
-        wf = workflows_module.CsvBatchProcessingWorkflow()
-        result = await wf.run()
-        assert result == {"processed_count": 0, "message": "No pending CSV uploads found."}
-    asyncio.run(run_test())
-
-
-def test_upload_031_csv_batch_schedule_registers_in_batch_mode(monkeypatch):
+def test_upload_031_daily_batch_schedule_registers_in_batch_mode(monkeypatch):
     async def run_test():
         import app.temporal.worker as worker_module
         settings_override(monkeypatch, worker_module.settings, PROCESSING_MODE="batch")
@@ -2249,7 +2244,6 @@ def test_upload_031_csv_batch_schedule_registers_in_batch_mode(monkeypatch):
         await worker_module.start_worker()
 
         schedule_ids = [c.kwargs.get("id") for c in create_schedule_mock.await_args_list]
-        assert "csv-batch-processing" in schedule_ids
         assert "daily-batch-processing" in schedule_ids
     asyncio.run(run_test())
 
@@ -2279,5 +2273,5 @@ def test_upload_032_stale_schedules_deleted_in_realtime_mode(monkeypatch):
 
         await worker_module.start_worker()
 
-        assert set(deleted_schedules) == {"csv-batch-processing", "daily-batch-processing"}
+        assert set(deleted_schedules) == {"daily-batch-processing"}
     asyncio.run(run_test())

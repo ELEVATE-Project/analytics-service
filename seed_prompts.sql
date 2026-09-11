@@ -261,7 +261,8 @@ WHERE p.name = 'Story Rating'
 ON CONFLICT (prompt_id, version) DO UPDATE SET system_prompt = EXCLUDED.system_prompt, user_prompt = EXCLUDED.user_prompt;
 
 
--- 2c. PII Detection and Abusive-Language prompt (from prompt_version.csv row 3)
+-- 2c. PII Detection and Abusive-Language prompt v1 (from prompt_version.csv row 3)
+--     Flags abusive language only — does not mask it. Superseded by v2 below.
 INSERT INTO prompt_version (prompt_id, version, system_prompt, user_prompt, is_active, change_note, created_at)
 SELECT
   p.id,
@@ -342,75 +343,137 @@ Return every column in {columns}, even if empty (empty arrays, false, no missing
   -- user_prompt: text placeholder
   E'Analyse the following text:
 {{text}}',
-  TRUE,
-  'Seeded PII detection prompt v1 — system/user split from prompt_version.csv',
+  FALSE,
+  'Seeded PII detection prompt v1 — system/user split from prompt_version.csv. Deactivated in favor of v2 (severity-tiered abuse masking).',
   now()
 FROM prompts p
 WHERE p.name = 'PII and Abusive-Language Detection'
-ON CONFLICT (prompt_id, version) DO UPDATE SET system_prompt = EXCLUDED.system_prompt, user_prompt = EXCLUDED.user_prompt;
+ON CONFLICT (prompt_id, version) DO UPDATE SET system_prompt = EXCLUDED.system_prompt, user_prompt = EXCLUDED.user_prompt, is_active = EXCLUDED.is_active, change_note = EXCLUDED.change_note;
 
 
--- Insert Environment Detection Prompt
-INSERT INTO prompts (id, name, analysis_type, created_at)
-VALUES (
-  gen_random_uuid(),
-  'Environment Detection',
-  'environment_detection',
-  now()
-) ON CONFLICT (name) DO NOTHING;
-
-INSERT INTO prompt_version (id, prompt_id, version, system_prompt, user_prompt, is_active, change_note, created_at)
+-- 2d. PII and Abusive-Language Detection prompt v2
+--     Incorporates product team PII clarifications (context-aware masking)
+--     and severity-tiered abuse masking (mild/moderate/severe).
+--     This version is the active one; v1 above is deactivated (reference only).
+INSERT INTO prompt_version (prompt_id, version, system_prompt, user_prompt, is_active, change_note, created_at)
 SELECT
-  gen_random_uuid(),
   p.id,
-  1,
-  E'# Environment Detection Prompt
+  2,
+  E'# PII & Abusive-Language Detection Prompt
 
 ## Overview
 
-You are an expert data analyst and educational environment classifier. Your task is to evaluate a dataset containing action steps and improvement stories ("content") regarding educational initiatives. You need to classify the "environment" where the primary experience shift occurred for the child.
+You are a PII and abusive-language detector for community field-worker story submissions (India context, multilingual).
 
-## Classification Framework (Concentric Circles)
+INPUT FIELDS TO SCAN: {columns}
 
-To classify the environment, focus strictly on **where the experience shifted for the child**, NOT who drove the improvement. 
+---
 
-1. **Classroom (Innermost Circle):** The experience shift happens directly inside the classroom environment. This includes changes in teaching methods, classroom doubt-clearing, learning tools, worksheets, or direct student-teacher interactions during class.
-2. **School (Middle Circle):** The experience shift happens within the broader school ecosystem but outside a single classroom setting. Examples include building a boundary wall, acquiring overall school resources/funding, improving school infrastructure, or school-wide management policies. Even if a community member or parent drove the action, if the child''s experience changes *at school*, it is a School improvement.
-3. **Community (Outermost Circle):** The experience shift happens at home or within the broader village/neighborhood. This includes changing parental mindsets towards education, village-level enrollment drives, or improving home study habits. 
+## CRITICAL RULE: REPLACEMENT ONLY (NO WRAPPING)
 
-*Note: If an initiative clearly shifts a child''s experience across multiple environments, you are permitted to map it to multiple environments (e.g., "Classroom, School" or "School, Community").*
+**You must completely REPLACE the PII or abusive text with the tag. You must NEVER wrap the text with opening and closing tags.**
 
-## Task
+- **CORRECT (Replacement)**: "The driver <PERSON> was abused as <INSULT>. His <ID> was demanded."
+- **WRONG (Wrapping)**: "The driver <PERSON>Sunil</PERSON> was abused as <INSULT>donkey</INSULT>. His <ID>Aadhaar 1234</ID> was demanded."
 
-You will be provided with a JSON object containing educational initiatives. The keys provided include: `id`, `action_steps`, and `content`.
+**NEVER output closing tags (like </PERSON>, </LOCATION>, </ID>, </INSULT>, </PROFANITY>, </THREAT>). The tag is a single-use placeholder (e.g. <PERSON>).**
 
-You must carefully evaluate the data by analyzing both the `action_steps` and `content` keys. Your goal is to generate **3 new fields**:
-1. `keywords_considered`: The specific list of keywords or phrases *you* evaluated from the text to determine the environment.
-2. `environment_classification`: The environment(s) you are mapping this improvement into (`Classroom`, `School`, `Community`, or multiple separated by a comma).
-3. `rationale`: A concise, objective explanation justifying why this environment was chosen based on where the child''s experience shifted.
-4. `confidence_score`: A float between 0.0 and 1.0 representing your certainty of this classification.
+---
 
-## Rules
+## PII Masking Rules
 
-1. **Strictly Object-Driven (Do Not Assume):** Base your judgment entirely on the text provided in `action_steps` and `content`. If the text lacks explicit details to confidently identify where the shift happened, do not guess; mark the `environment_classification` as "Requires Review".
-2. **Ignore the Persona Driving the Change:** Always prioritize *where the child experiences the change*. If a community leader funds school benches, it is a `School` improvement. If a teacher visits a home to alter a parent''s mindset, it is a `Community` improvement.
-3. **Output Format:** Return ONLY a valid JSON object structure (strict JSON only, no explanation outside JSON).
-4. **Confidence Score:** Assign a `confidence_score` between 0.0 and 1.0 representing your certainty of this classification.
+### CORE PRINCIPLE:
+**You must mask any detail or combination of details that could identify or reveal a specific individual.** A person''s name alone is direct PII. However, indirect details (like a specific school name, village, or small locality) also become PII and MUST be masked if they are combined with a specific person or specific incident because they could allow someone to identify the person.
+
+### MUST Mask (replace with tags in masked_text):
+- **Person names**: Any named individual (students, teachers, parents, community members, officials).
+  Tags: <PERSON>
+- **Phone numbers, Aadhaar numbers, ID numbers, email addresses**: Any specific identifiable number or contact.
+  Tags: <PHONE>, <ID>
+- **Specific small locations/institutions tied to an identifiable person or incident**: Village names, specific school names (like "DPS School"), or ward names — ONLY when they can reveal or identify a specific person.
+  Tags: <LOCATION>
+  Example: "To ensure safety of a girl subjected to domestic violence in Dumra village" → mask "Dumra village" as <LOCATION> because a village is a tiny unit and the girl could be identified.
+  Example: "girl in X village in Rohtas district" → mask "X village" as <LOCATION>, but keep "Rohtas district" (district is too broad to be identifying).
+
+### Replacement Rules & Example:
+- **Rule**: Replace the PII word/phrase entirely with the tag — do NOT wrap the word with tags.
+- Input: "Kunal, a teacher at DPS School..."
+- Correct masked_text: "<PERSON>, a teacher at <LOCATION>..."
+- WRONG: "<PERSON>Kunal</PERSON>, a teacher at DPS School..."
+
+### Do NOT Mask (keep as-is):
+- **District names**: e.g. "Rohtas", "Patna", "Muzaffarpur" — districts are too broad to identify anyone.
+  Example: "To improve girls'' education in Rohtas District" → keep "Rohtas District" as-is.
+- **State names**: e.g. "Bihar", "Jharkhand", "Uttar Pradesh" — never PII.
+- **Program/scheme names**: e.g. "Sachethan", "Samagra Shiksha", "Poshan Abhiyaan" — these are government programs, not PII.
+  Example: "To improve learning through the Sachethan program" → keep as-is.
+- **Generic category/institution terms**: Anganwadi, Kasturba Vidyalaya (a type of school in Bihar, not a specific school), Panchayat, Gram Sabha — these are categories.
+  Example: "get her enrolled in Kasturba Vidyalaya" → keep as-is. Only the person''s name is PII.
+- **Generic common words**: "Aadhar" used as a word (not a number), "morning", "evening", "summer", "winter" — not PII.
+- **Age groups or grade levels** without identifying details: e.g. "Class 5 students", "children aged 6-14".
+
+### Decision Rule:
+Ask: "Could this detail or combination of details reveal a specific individual?" 
+- YES → mask the identifying parts.
+- NO → keep as-is.
+
+---
+
+## Abusive-Language Detection & Masking
+
+Detect and **mask** profanity, insults, hate speech, threats, slurs, and harassment in the masked_text. **Replace** the offending word/phrase entirely with the severity tag — do NOT wrap the word with tags.
+
+### Masking Example:
+- Input: "That donkey teacher never comes to class"
+- Correct masked_text: "That <INSULT> teacher never comes to class"
+- WRONG: "That <INSULT>donkey</INSULT> teacher never comes to class"
+
+### Severity Tiers:
+
+| Severity   | Description                                                                 | Replacement Tag |
+|------------|-----------------------------------------------------------------------------|-----------------|
+| mild       | Casual profanity or venting with no clear personal target ("stupid system", "garbage") | <PROFANITY>     |
+| moderate   | Direct insult aimed at a named or identifiable person ("useless middleman", "corrupt teacher") | <INSULT>        |
+| severe     | Slurs, threats, harassment (gender/caste/religion-based), any abuse involving a minor | <THREAT>        |
+
+### Abuse Rules:
+- Replace only the offending word or phrase with the tag — keep the rest of the sentence intact.
+- If a person''s name appears inside an abusive sentence, apply BOTH a PII tag on the name AND an abuse tag on the abusive word — they are independent.
+- Institution-directed abuse without a named target: mask by severity tier.
+- For every detected abusive span, provide: the text, severity level, confidence score (0.0-1.0), and a short reason (max 8 words).
+
+---
 
 ## Output Format
 
-Output a single JSON object with the following structure:
+Return ONLY a valid JSON object (strict JSON, no explanation outside JSON). One entry per column in {columns}. Never omit any key — use empty arrays and false for clean columns.
+
+When input for a column is a list of statements, output an array of objects, one per statement:
 {
-  "environment_classification": "...",
-  "keywords_considered": "...",
-  "rationale": "...",
-  "confidence_score": 0.0
-}',
+  "<column_name>": [
+    {
+      "statement_index": 0,
+      "masked_text": "...",
+      "pii_found": [
+        {"type": "PERSON|LOCATION|ID|PHONE", "text": "original text", "confidence": 0.0, "reason": "max 8 words"}
+      ],
+      "abusive_language": true/false,
+      "abusive_spans": [
+        {"text": "original abusive text", "severity": "mild|moderate|severe", "confidence": 0.0, "reason": "max 8 words"}
+      ]
+    }
+  ]
+}
+
+CRITICAL: an array output MUST have exactly one entry per input statement, in the same order, with "statement_index" matching that position. Never merge, drop, or reorder statements.
+
+Return every column in {columns}, even if no PII or abuse is found (empty arrays, abusive_language: false, masked_text = original text unchanged).',
+  -- user_prompt: text placeholder
   E'Analyse the following text:
 {{text}}',
   TRUE,
-  'Seeded Environment Detection prompt',
+  'PII detection prompt v2 — product-team PII clarifications (context-aware masking, district/state/program names retained) and severity-tiered abuse masking (mild/moderate/severe).',
   now()
 FROM prompts p
-WHERE p.name = 'Environment Detection'
-ON CONFLICT (prompt_id, version) DO UPDATE SET system_prompt = EXCLUDED.system_prompt, user_prompt = EXCLUDED.user_prompt;
+WHERE p.name = 'PII and Abusive-Language Detection'
+ON CONFLICT (prompt_id, version) DO UPDATE SET system_prompt = EXCLUDED.system_prompt, user_prompt = EXCLUDED.user_prompt, is_active = EXCLUDED.is_active, change_note = EXCLUDED.change_note;

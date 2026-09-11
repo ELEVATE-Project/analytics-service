@@ -90,44 +90,44 @@ async def insert_statement_with_parent_check(
     raw_text: str,
 ) -> None:
     """
-    Cleans raw_text, checks whether an identical statement (case-insensitive)
-    already exists as a root, then inserts the new row with parent_id pre-populated
-    if a match was found.
+    Preserves the original raw_text in raw_statement and stores its cleaned form
+    in cleaned_statement. Deduplication compares cleaned_statement to cleaned_statement
+    (both punctuation-stripped) so minor formatting differences don't create false roots.
 
     Uses a check-before-insert pattern to avoid an extra UPDATE round-trip:
       old: INSERT → SELECT → UPDATE  (3 round-trips on duplicates)
       new: SELECT → INSERT           (2 round-trips max, 1 on uniques)
     """
     cleaned = clean_statement(raw_text)
-    if not cleaned:
+    original = raw_text.strip()
+    if not cleaned or not original:
         return
 
-    # Check for an existing root statement with the same text (case-insensitive).
-    # - LOWER() ensures the match is truly case-insensitive (= operator is case-sensitive in PG).
+    # Dedup check against cleaned_statement — comparing cleaned-to-cleaned so
+    # punctuation variants (trailing comma, brackets, etc.) are treated as the same statement.
     # - AND parent_id IS NULL ensures we only link to root statements, preventing deep chains.
-    # - ORDER BY created_at ASC guarantees we get the oldest/original statement when
-    #   multiple matches exist (LIMIT 1 alone is non-deterministic).
+    # - ORDER BY created_at ASC guarantees the oldest root is chosen when duplicates exist.
     existing_id = await conn.fetchval(
         """
         SELECT id
         FROM statements
-        WHERE LOWER(raw_statement) = LOWER($1)
+        WHERE LOWER(cleaned_statement) = LOWER($1)
           AND parent_id IS NULL
-        ORDER BY created_at ASC
+        ORDER BY created_at ASC, id ASC
         LIMIT 1
         """,
         cleaned,
     )
 
-    # Insert with parent_id already set if a duplicate root was found — no UPDATE needed.
+    # Insert with both original and cleaned text; parent_id pre-set if a duplicate root was found.
     new_id = await conn.fetchval(
         """
         INSERT INTO statements
-            (submission_id, tenant_code, submission_type, statement_type, raw_statement, parent_id)
-        VALUES ($1, $2, $3, $4, $5, $6)
+            (submission_id, tenant_code, submission_type, statement_type, raw_statement, cleaned_statement, parent_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING id
         """,
-        str(submission_id), tenant_code, submission_type, statement_type, cleaned, existing_id,
+        str(submission_id), tenant_code, submission_type, statement_type, original, cleaned, existing_id,
     )
 
     if existing_id:
@@ -293,10 +293,13 @@ async def insert_or_update_submission(
         # Upsert parent metadata tables (reads from flattened tags)
         program_id, leader_id = await upsert_metadata(conn, tags, tenant_code)
 
-        # Parse submission date. On a partial update where submissionDate is absent,
-        # leave it None (rather than defaulting to now()) so COALESCE below preserves
-        # the existing value instead of overwriting it with a "real" default.
+        # Parse submission date (report created at).
+        # Both discussion and story submissions use data.submissionDate for report
+        # created at. This field is only present on create events (absent from
+        # partial update payloads), so COALESCE in the SQL below preserves the
+        # original DB value on updates — no special-casing needed.
         sub_date_str = data.get("submissionDate")
+
         if sub_date_str:
             submission_date = datetime.fromisoformat(sub_date_str.replace("Z", "+00:00"))
         elif event_type != "update":
@@ -444,7 +447,7 @@ async def insert_or_update_submission(
                             conn,
                             submission_id,
                             tenant_code,
-                            submission_type="story",
+                            submission_type=submission_type,
                             statement_type="challenge",
                             raw_text=str(raw_challenge),
                         )
@@ -460,6 +463,15 @@ async def insert_or_update_submission(
             image_urls = _normalize_media_url_list(data.get("imageUrls"))
             pdf_urls, masked_pdf_urls = _normalize_pdf_urls(data.get("pdfUrls"))
 
+            # Parse discussion date (date the discussion took place) from discussionDate.
+            # This is distinct from submissionDate (report created at) which is stored
+            # in the parent submissions table.
+            disc_date_str = data.get("discussionDate")
+            discussion_date = (
+                datetime.fromisoformat(disc_date_str.replace("Z", "+00:00"))
+                if disc_date_str else None
+            )
+
             if row_exists:
                 await conn.execute(
                     """
@@ -473,6 +485,7 @@ async def insert_or_update_submission(
                         pdf_urls = COALESCE($9, pdf_urls),
                         masked_pdf_urls = COALESCE($10, masked_pdf_urls),
                         transcript_link = COALESCE($11, transcript_link),
+                        discussion_date = COALESCE($12, discussion_date),
                         updated_at = now()
                     WHERE submission_id = $1 AND tenant_code = $2
                     """,
@@ -485,16 +498,17 @@ async def insert_or_update_submission(
                     image_urls,
                     pdf_urls,
                     masked_pdf_urls,
-                    data.get("transcriptLink")
+                    data.get("transcriptLink"),
+                    discussion_date
                 )
             else:
                 await conn.execute(
                     """
                     INSERT INTO discussion_submissions (
                         submission_id, tenant_code, title, challenges, solutions,
-                        author, language, image_urls, pdf_urls, masked_pdf_urls, transcript_link
+                        author, language, image_urls, pdf_urls, masked_pdf_urls, transcript_link, discussion_date
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                     """,
                     submission_id, tenant_code,
                     data.get("title"),
@@ -505,7 +519,8 @@ async def insert_or_update_submission(
                     image_urls,
                     pdf_urls,
                     masked_pdf_urls,
-                    data.get("transcriptLink")
+                    data.get("transcriptLink"),
+                    discussion_date
                 )
 
             # Dynamic KPI metrics: participantsData is a full snapshot when present;
@@ -530,7 +545,7 @@ async def insert_or_update_submission(
                             conn,
                             submission_id,
                             tenant_code,
-                            submission_type="discussion",
+                            submission_type=submission_type,
                             statement_type="challenge",
                             raw_text=str(raw_challenge),
                         )
@@ -543,7 +558,7 @@ async def insert_or_update_submission(
                             conn,
                             submission_id,
                             tenant_code,
-                            submission_type="discussion",
+                            submission_type=submission_type,
                             statement_type="solution",
                             raw_text=str(raw_solution),
                         )
@@ -631,11 +646,9 @@ async def insert_analysis_result(
     statement_id: Optional[Any] = None,
     analysis_column: Optional[List[str]] = None,
     statement_type: Optional[str] = None,
-    statements: Optional[str] = None,
     ml_model_name: Optional[str] = None,
     ml_model_version: Optional[str] = None,
     model_confidence_score: Optional[float] = None,
-    similarity_score: Optional[float] = None,
     confidence_score: Optional[float] = None,
     model_prediction: Optional[str] = None,
     llm_confidence_score: Optional[float] = None,
@@ -803,6 +816,7 @@ async def check_duplicate_file(
               AND report_type = $3
               AND file_name = $4
               AND file_size = $5
+              AND status != 'failed'
             LIMIT 1
             """,
             program_name,
@@ -901,7 +915,6 @@ async def update_status(
                 status,
                 record_id,
             )
-
 
 async def list_by_status(status: str) -> list:
     """List all tracker records with a given status."""
@@ -1016,3 +1029,39 @@ async def fetch_challenge_statements_for_submission(
         str(submission_id), tenant_code,
     )
     return [dict(row) for row in rows]
+async def reclaim_stale_in_progress(stale_minutes: int = 30) -> int:
+    """
+    Reset any csv_uploads rows that have been stuck at status='in_progress'
+    for longer than stale_minutes back to 'pending' so they can be retried.
+
+    A record can get stuck when the process that called process_csv_inline was
+    killed (OOM, pod restart, deploy) before it could write a terminal status.
+    Without this reclaim, POST /v1/process/csv/{id} returns 409 forever on
+    those records.
+
+    Returns the number of rows reclaimed (0 if none).
+    """
+    from app.database.db import db
+    if not db.pool:
+        await db.connect()
+
+    async with db.pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE csv_uploads
+            SET status = 'pending',
+                meta_data = jsonb_set(
+                    COALESCE(meta_data, '{}')::jsonb,
+                    '{reclaimed_at}',
+                    to_jsonb(now()::text)
+                )
+            WHERE status = 'in_progress'
+              AND updated_at < NOW() - ($1::integer * interval '1 minute')
+            """,
+            stale_minutes,
+        )
+    # asyncpg returns "UPDATE N" as a string
+    try:
+        return int(result.split()[-1])
+    except (AttributeError, ValueError, IndexError):
+        return 0

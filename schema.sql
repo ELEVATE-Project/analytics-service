@@ -100,6 +100,7 @@ CREATE TABLE discussion_submissions (
     submission_id       TEXT NOT NULL,
     tenant_code         TEXT NOT NULL,
     title               TEXT,
+    discussion_date     TIMESTAMPTZ,
     challenges          TEXT[], -- one array element per discrete statement (see operations.py's _normalize_statement_list)
     solutions           TEXT[], -- same format as challenges
     author              TEXT,
@@ -202,12 +203,13 @@ CREATE TABLE statements (
 
     submission_type  TEXT NOT NULL,
     statement_type   TEXT NOT NULL,
-    raw_statement    TEXT NOT NULL,
+    raw_statement     TEXT NOT NULL,         -- original text as submitted, punctuation intact
+    cleaned_statement TEXT NOT NULL,         -- punctuation-stripped form used for deduplication
 
     parent_id        UUID,
 
-    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     FOREIGN KEY (submission_id, tenant_code)
         REFERENCES submissions(submission_id, tenant_code)
@@ -218,9 +220,13 @@ CREATE TABLE statements (
         ON DELETE SET NULL
 );
 
--- Expression index for fast case-insensitive deduplication (matches LOWER() query).
-CREATE INDEX idx_statements_raw_lower
-    ON statements (LOWER(raw_statement));
+-- Expression index for fast case-insensitive deduplication (matches LOWER() query on cleaned form).
+CREATE INDEX idx_statements_cleaned_lower
+    ON statements (LOWER(cleaned_statement));
+
+-- Submission lookup + cascade delete path.
+CREATE INDEX idx_statements_submission_parent ON statements (submission_id, parent_id);
+CREATE INDEX idx_statements_parent ON statements (parent_id) WHERE parent_id IS NOT NULL;
 
 -- =========================================================================
 -- Trigger: automatically promote a duplicate child to be the new parent
@@ -302,20 +308,12 @@ CREATE TABLE analysis_results (
 
     meta_data               JSONB,
 
-    created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     FOREIGN KEY (submission_id, tenant_code)
         REFERENCES submissions(submission_id, tenant_code)
-        ON DELETE CASCADE,
-
-    FOREIGN KEY (statement_id)
-        REFERENCES statements(id)
-        ON DELETE CASCADE,
-
-    FOREIGN KEY (theme_id)
-        REFERENCES themes(id)
-        ON DELETE SET NULL
+        ON DELETE CASCADE
 );
 
 -- =========================================================================
@@ -417,6 +415,7 @@ CREATE INDEX idx_submission_metrics_tenant ON submission_metrics (tenant_code);
 -- Composite query mapping indexes (Foreign key performance optimization)
 CREATE INDEX idx_discussion_submission_mapping ON discussion_submissions (submission_id, tenant_code);
 CREATE INDEX idx_story_submission_mapping ON story_submissions (submission_id, tenant_code);
+CREATE INDEX idx_statements_submission_mapping ON statements (submission_id);
 CREATE INDEX idx_llm_logs_submission_mapping ON llm_logs (submission_id, tenant_code);
 CREATE INDEX idx_analysis_results_submission_mapping ON analysis_results (submission_id, tenant_code);
 CREATE INDEX idx_ranking_submission_mapping ON ranking (submission_id, tenant_code);
@@ -430,6 +429,7 @@ CREATE INDEX idx_programs_leader ON programs (leaders_id);
 -- Theme-specific analytics
 CREATE INDEX idx_analysis_results_theme ON analysis_results (theme_id) WHERE theme_id IS NOT NULL;
 CREATE INDEX idx_analysis_results_type ON analysis_results (analysis_type);
+CREATE INDEX idx_analysis_results_statement ON analysis_results (statement_id) WHERE statement_id IS NOT NULL;
 
 -- Prompt version active check
 CREATE INDEX idx_prompt_version_active ON prompt_version (prompt_id) WHERE is_active = TRUE;
