@@ -228,6 +228,10 @@ CREATE INDEX idx_statements_cleaned_lower
 CREATE INDEX idx_statements_submission_parent ON statements (submission_id, parent_id);
 CREATE INDEX idx_statements_parent ON statements (parent_id) WHERE parent_id IS NOT NULL;
 
+-- Submission lookup + cascade delete path.
+CREATE INDEX idx_statements_submission_parent ON statements (submission_id, parent_id);
+CREATE INDEX idx_statements_parent ON statements (parent_id) WHERE parent_id IS NOT NULL;
+
 -- =========================================================================
 -- Trigger: automatically promote a duplicate child to be the new parent
 -- whenever the current root (parent_id IS NULL) statement is deleted.
@@ -238,11 +242,14 @@ CREATE OR REPLACE FUNCTION promote_statement_child()
 RETURNS TRIGGER AS $$
 DECLARE
     new_parent_id UUID;
+    new_sub_id TEXT;
+    new_tenant TEXT;
 BEGIN
     -- Only act if the statement being deleted is a root (parent)
     IF OLD.parent_id IS NULL THEN
         -- Find one child to become the new parent (the oldest duplicate)
-        SELECT id INTO new_parent_id
+        SELECT id, submission_id, tenant_code
+        INTO new_parent_id, new_sub_id, new_tenant
         FROM statements
         WHERE parent_id = OLD.id
         ORDER BY created_at ASC
@@ -258,6 +265,14 @@ BEGIN
             UPDATE statements
             SET parent_id = new_parent_id
             WHERE parent_id = OLD.id AND id != new_parent_id;
+
+            -- Repoint analysis_results from the deleted parent (OLD.id) to the new parent (new_parent_id)
+            -- and update submission_id & tenant_code to the child's submission so ON DELETE CASCADE doesn't wipe it
+            UPDATE analysis_results
+            SET statement_id = new_parent_id,
+                submission_id = new_sub_id,
+                tenant_code = new_tenant
+            WHERE statement_id = OLD.id;
         END IF;
     END IF;
 

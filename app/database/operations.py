@@ -113,7 +113,7 @@ async def insert_statement_with_parent_check(
         FROM statements
         WHERE LOWER(cleaned_statement) = LOWER($1)
           AND parent_id IS NULL
-        ORDER BY created_at ASC, id ASC
+        ORDER BY created_at ASC, id ASC, id ASC
         LIMIT 1
         """,
         cleaned,
@@ -444,6 +444,7 @@ async def insert_or_update_submission(
                             submission_id,
                             tenant_code,
                             submission_type=submission_type,
+                            submission_type=submission_type,
                             statement_type="challenge",
                             raw_text=str(raw_challenge),
                         )
@@ -537,6 +538,7 @@ async def insert_or_update_submission(
                             conn,
                             submission_id,
                             tenant_code,
+                            submission_type=submission_type,
                             submission_type=submission_type,
                             statement_type="challenge",
                             raw_text=str(raw_challenge),
@@ -977,13 +979,13 @@ async def fetch_challenge_statements_for_submission(
     tenant_code: str,
 ) -> List[Dict[str, Any]]:
     """
-    Returns statements that the statement_category step classified as 'Challenge',
+    Returns statements that the statement_category step classified as 'Challenge' or 'Solution or Action',
     ready for thematic classification.
 
     Effective-category resolution rule (applied in SQL):
       - If llm_prediction IS NOT NULL  → use llm_prediction
       - Else                           → use model_prediction
-    Only rows where the effective category equals 'Challenge' are returned.
+    Only rows where the effective category is 'Challenge', 'Solution', or 'Solution or Action' are returned.
 
     Each row contains:
       statement_id  (UUID, FK into statements)
@@ -995,15 +997,16 @@ async def fetch_challenge_statements_for_submission(
         SELECT
             ar.statement_id,
             s.raw_statement,
-            s.statement_type
+            s.statement_type,
+            s.submission_type
         FROM analysis_results ar
         JOIN statements s ON s.id = ar.statement_id
         WHERE ar.submission_id  = $1
           AND ar.tenant_code    = $2
           AND ar.analysis_type  = 'statement_category'
           AND (
-              (ar.llm_prediction IS NULL     AND LOWER(ar.model_prediction) = 'challenge')
-           OR (ar.llm_prediction IS NOT NULL AND LOWER(ar.llm_prediction)   = 'challenge')
+              (ar.llm_prediction IS NULL     AND LOWER(ar.model_prediction) IN ('challenge', 'solution', 'solution or action'))
+           OR (ar.llm_prediction IS NOT NULL AND LOWER(ar.llm_prediction)   IN ('challenge', 'solution', 'solution or action'))
           )
         ORDER BY ar.created_at ASC
         """,
