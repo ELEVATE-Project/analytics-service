@@ -1319,6 +1319,78 @@ def test_pii_012_scalar_column_single_entry_list_unwrapped(monkeypatch):
 
 
 # =============================================================================
+# ENVIRONMENT DETECTION (ENV-*)
+# =============================================================================
+
+import app.temporal.environment_activity as environment_module
+
+
+def test_env_001_no_target_columns_skips_before_llm(monkeypatch):
+    async def run_test():
+        import app.services.llm as llm_module
+
+        urlopen_mock = MagicMock()
+        monkeypatch.setattr(llm_module.urllib.request, "urlopen", urlopen_mock)
+
+        result = await environment_module.environment_detection_activity({
+            "submission_id": "1", "tenant_code": "mitra", "target_columns": [],
+        })
+
+        assert result["status"] == "skipped"
+        assert result["reason"] == "no columns specified"
+        urlopen_mock.assert_not_called()
+    asyncio.run(run_test())
+
+
+def test_env_002_empty_selected_values_skip_before_llm(monkeypatch):
+    async def run_test():
+        import app.services.llm as llm_module
+
+        install_fake_db(monkeypatch, environment_module)
+        prompt_mock = AsyncMock()
+        urlopen_mock = MagicMock()
+
+        async def fake_get_submission_type_and_payload(c, sid, tenant):
+            return "story", {"objective": "", "challenge": [], "impact": None}
+
+        monkeypatch.setattr(
+            environment_module,
+            "get_submission_type_and_payload",
+            fake_get_submission_type_and_payload,
+        )
+        monkeypatch.setattr(environment_module, "_get_environment_prompt", prompt_mock)
+        monkeypatch.setattr(llm_module.urllib.request, "urlopen", urlopen_mock)
+
+        result = await environment_module.environment_detection_activity({
+            "submission_id": "1",
+            "tenant_code": "mitra",
+            "target_columns": ["objective", "challenge", "impact"],
+        })
+
+        assert result["status"] == "skipped"
+        assert result["reason"] == "no source text available"
+        prompt_mock.assert_not_awaited()
+        urlopen_mock.assert_not_called()
+    asyncio.run(run_test())
+
+
+def test_env_003_prompt_loader_uses_environment_prompt_name():
+    async def run_test():
+        conn = FakeConn()
+        conn.fetchrow.return_value = {"id": "pv-1", "system_prompt": "sp", "user_prompt": "up"}
+
+        result = await environment_module._get_environment_prompt(conn)
+
+        query = conn.fetchrow.await_args.args[0]
+        prompt_identity = conn.fetchrow.await_args.args[1]
+        assert result["id"] == "pv-1"
+        assert "p.name = $1" in query
+        assert "p.analysis_type = $1" not in query
+        assert prompt_identity == "Environment Detection"
+    asyncio.run(run_test())
+
+
+# =============================================================================
 # STORY RATING (RATING-*)
 # =============================================================================
 # RATING-009 excluded: "no DB connection held during OpenRouter/PDF calls" is a
