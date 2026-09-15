@@ -436,22 +436,21 @@ async def insert_or_update_submission(
 
             # Extract challenges for story submission into statements table
             raw_story_challenges = data.get("challenges")
-            if raw_story_challenges is not None:
+            if isinstance(raw_story_challenges, list):
                 await conn.execute(
-                    "DELETE FROM statements WHERE submission_id = $1 AND tenant_code = $2",
-                    submission_id, tenant_code
+                    "DELETE FROM statements WHERE submission_id = $1 AND tenant_code = $2 AND statement_type = $3",
+                    submission_id, tenant_code, "challenge"
                 )
-                if isinstance(raw_story_challenges, list):
-                    for raw_challenge in raw_story_challenges:
-                        if raw_challenge:
-                            await insert_statement_with_parent_check(
-                                conn,
-                                submission_id,
-                                tenant_code,
-                                submission_type=submission_type,
-                                statement_type="challenge",
-                                raw_text=str(raw_challenge),
-                            )
+                for raw_challenge in raw_story_challenges:
+                    if raw_challenge:
+                        await insert_statement_with_parent_check(
+                            conn,
+                            submission_id,
+                            tenant_code,
+                            submission_type=submission_type,
+                            statement_type="challenge",
+                            raw_text=str(raw_challenge),
+                        )
 
         elif "discussion" in normalized_type:
             # Upsert discussion submission
@@ -537,34 +536,37 @@ async def insert_or_update_submission(
             raw_challenges = data.get("challenges")
             raw_solutions = data.get("solutions")
             
-            if raw_challenges is not None or raw_solutions is not None:
+            if isinstance(raw_challenges, list):
                 await conn.execute(
-                    "DELETE FROM statements WHERE submission_id = $1 AND tenant_code = $2",
-                    submission_id, tenant_code
+                    "DELETE FROM statements WHERE submission_id = $1 AND tenant_code = $2 AND statement_type = $3",
+                    submission_id, tenant_code, "challenge"
                 )
-                if isinstance(raw_challenges, list):
-                    for raw_challenge in raw_challenges:
-                        if raw_challenge:
-                            await insert_statement_with_parent_check(
-                                conn,
-                                submission_id,
-                                tenant_code,
-                                submission_type=submission_type,
-                                statement_type="challenge",
-                                raw_text=str(raw_challenge),
-                            )
+                for raw_challenge in raw_challenges:
+                    if raw_challenge:
+                        await insert_statement_with_parent_check(
+                            conn,
+                            submission_id,
+                            tenant_code,
+                            submission_type=submission_type,
+                            statement_type="challenge",
+                            raw_text=str(raw_challenge),
+                        )
 
-                if isinstance(raw_solutions, list):
-                    for raw_solution in raw_solutions:
-                        if raw_solution:
-                            await insert_statement_with_parent_check(
-                                conn,
-                                submission_id,
-                                tenant_code,
-                                submission_type=submission_type,
-                                statement_type="solution",
-                                raw_text=str(raw_solution),
-                            )
+            if isinstance(raw_solutions, list):
+                await conn.execute(
+                    "DELETE FROM statements WHERE submission_id = $1 AND tenant_code = $2 AND statement_type = $3",
+                    submission_id, tenant_code, "solution"
+                )
+                for raw_solution in raw_solutions:
+                    if raw_solution:
+                        await insert_statement_with_parent_check(
+                            conn,
+                            submission_id,
+                            tenant_code,
+                            submission_type=submission_type,
+                            statement_type="solution",
+                            raw_text=str(raw_solution),
+                        )
 
         logger.info(f"Successfully ingested {submission_type} submission {submission_id} under tenant {tenant_code}")
         return {

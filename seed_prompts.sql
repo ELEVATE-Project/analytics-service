@@ -516,7 +516,7 @@ You will be provided with a JSON object containing educational initiatives. The 
 You must carefully evaluate the data by analyzing both the `action_steps` and `content` keys. Your goal is to generate **3 new fields**:
 1. `keywords_considered`: The specific list of keywords or phrases *you* evaluated from the text to determine the environment.
 2. `environment_classification`: The environment(s) you are mapping this improvement into (`Classroom`, `School`, `Community`, or multiple separated by a comma, or `Others` if the environment cannot be determined).
-3. `rationale`: A concise, objective explanation justifying why this environment was chosen based on where the child''s experience shifted.
+3. `justification`: A concise, objective explanation justifying why this environment was chosen based on where the child''s experience shifted.
 4. `confidence_score`: A float between 0.0 and 1.0 representing your certainty of this classification.
 
 ## Rules
@@ -532,7 +532,7 @@ Output a single JSON object with the following structure:
 {
   "environment_classification": "...",
   "keywords_considered": "...",
-  "rationale": "...",
+  "justification": "...",
   "confidence_score": 0.0
 }',
   E'Analyse the following text:

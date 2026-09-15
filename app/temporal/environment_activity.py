@@ -13,6 +13,7 @@ from app.database.operations import (
     get_submission_type_and_payload,
     update_submission_status
 )
+from app.temporal.pii_and_abusive_activity import map_column_to_db_col
 
 logger = logging.getLogger("analytics_service.temporal.activities")
 
@@ -68,13 +69,14 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
             has_content = False
 
             for col in config_columns:
-                val = payload.get(col)
+                db_col = map_column_to_db_col(col, sub_type)
+                val = payload.get(db_col)
                 if isinstance(val, list):
                     val_str = "\n".join(str(v) for v in val if v)
                 else:
                     val_str = str(val or "")
 
-                input_text_dict[col] = val_str
+                input_text_dict[col] = val_str  # keep the original camelCase key for the LLM prompt shape
                 if val_str.strip():
                     has_content = True
 
@@ -129,7 +131,7 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
         if not isinstance(parsed_data, dict):
             raise ValueError("LLM response must be a JSON object")
 
-        required_fields = ["environment_classification", "rationale", "keywords_considered", "confidence_score"]
+        required_fields = ["environment_classification", "justification", "keywords_considered", "confidence_score"]
         for field in required_fields:
             if field not in parsed_data:
                 raise ValueError(f"Missing required field in LLM response: {field}")
@@ -145,7 +147,7 @@ async def environment_detection_activity(params: Dict[str, Any]) -> Dict[str, An
                 if e not in allowed_envs:
                     raise ValueError(f"Invalid environment value '{e}'. Allowed values are: {', '.join(allowed_envs)} or 'Others'.")
 
-        justification = str(parsed_data.get("rationale", ""))
+        justification = str(parsed_data.get("justification", ""))
         keywords = str(parsed_data.get("keywords_considered", ""))
         
         raw_score = parsed_data.get("confidence_score")
