@@ -32,10 +32,11 @@ def _get_case_insensitive_key(d: dict, key: str) -> Any:
 
 def _parse_statement_list(raw_value: Any) -> Optional[List[str]]:
     """
-    Returns raw_value if it's already a list — discussion columns like
-    challenges/solutions are stored as TEXT[] (per operations.py's
-    _normalize_statement_list), which asyncpg auto-decodes to a native Python list.
-    Returns None for scalar columns (a story's objective/challenge are plain text).
+    Returns raw_value if it's already a list — statement columns like
+    discussion's challenges/solutions and story's challenge/action_steps are
+    stored as TEXT[] (per operations.py's _normalize_statement_list), which
+    asyncpg auto-decodes to a native Python list. Returns None for scalar
+    columns (e.g. a story's objective, which is plain text).
     """
     return raw_value if isinstance(raw_value, list) else None
 
@@ -155,6 +156,50 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
             db_col = map_column_to_db_col(col, sub_type)
             col_res = _get_case_insensitive_key(llm_response_dict, col)
 
+            # Scalar column — the LLM should return a single object, but sometimes
+            # wraps it in a list (one entry) or splits the field into multiple entries.
+            # • Single-item list → unwrap transparently (common LLM formatting quirk).
+            # • Multi-item list → merge all masked_text values in order so no content
+            #   is lost.  Silently discarding later entries (old col_res[0] shortcut)
+            #   would leave unmasked PII/abusive text in the database while marking the
+            #   row as fully masked — the failure scenario described in the bug report.
+            if col not in column_statements and isinstance(col_res, list):
+                if len(col_res) == 1 and isinstance(col_res[0], dict):
+                    # Fast path: the common single-entry wrap — just unwrap it.
+                    col_res = col_res[0]
+                else:
+                    # Multi-entry split: merge every masked_text value (in list order)
+                    # and aggregate pii_found / abusive_language across all entries.
+                    merged_parts: List[str] = []
+                    merged_pii = False
+                    merged_abusive = False
+                    for entry in col_res:
+                        if not isinstance(entry, dict):
+                            continue
+                        text = entry.get("masked_text")
+                        if text:
+                            merged_parts.append(text)
+                        if entry.get("pii_found"):
+                            merged_pii = True
+                        if entry.get("abusive_language"):
+                            merged_abusive = True
+                    if not merged_parts:
+                        raise ValueError(
+                            f"PII masking response for scalar column '{col}' returned a list "
+                            f"with {len(col_res)} entries but none contained 'masked_text'. "
+                            f"Refusing to report success with potentially unmasked PII."
+                        )
+                    logger.warning(
+                        f"Scalar column '{col}' was split into {len(col_res)} entries by the LLM; "
+                        f"merging all masked_text values to avoid losing content."
+                    )
+                    # Synthesise a single dict so the elif branch below handles bookkeeping.
+                    col_res = {
+                        "masked_text": " ".join(merged_parts),
+                        "pii_found": merged_pii,
+                        "abusive_language": merged_abusive,
+                    }
+
             if col in column_statements:
                 # List-valued column — expect one masked entry per input statement.
                 original_statements = column_statements[col]
@@ -270,8 +315,13 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
                 meta_data=usage_meta or None,
             )
 
-            # Step 6. Update the status in submissions to success
-            await update_submission_status(conn, submission_id, tenant_code, "success")
+            # Deliberately not marking the submission's overall status "success"
+            # here — this is only the first of several pipeline steps (thematic
+            # classification, image blur, and for stories, story rating still
+            # follow). Only the workflow's own final update_status_activity call,
+            # once every step has actually completed, is allowed to set the
+            # submission's terminal status — otherwise the row reports "success"
+            # while most of the pipeline hasn't run yet.
 
         return {
             "status": "success",
@@ -309,8 +359,10 @@ async def pii_and_abusive_language_detection_activity(params: Dict[str, Any]) ->
                     meta_data=usage_meta
                 )
 
-                # Update the status in submissions to failed
-                await update_submission_status(conn, submission_id, tenant_code, "failed")
+            # Not marking the submission "failed" here either — the workflow's
+            # own exception handler (workflows.py) already does this with the
+            # full per-step process_status once this exception propagates up,
+            # via the same raise below.
         except Exception as log_err:
             logger.error(f"Failed to log error to llm_logs: {log_err}")
 

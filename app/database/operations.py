@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import urllib.parse
 from typing import Dict, Any, Optional, List
 import asyncpg
@@ -69,6 +70,73 @@ def _normalize_pdf_urls(value: Any) -> tuple:
         return original, masked
     # Legacy fallback: plain string or list
     return _normalize_media_url_list(value), None
+
+def clean_statement(text: str) -> str:
+    """
+    Cleans a raw statement by removing commas, question marks, and bracket
+    characters, then collapsing any resulting extra whitespace.
+    """
+    text = re.sub(r"[,?\(\)\[\]\{\}]", "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+async def insert_statement_with_parent_check(
+    conn: asyncpg.Connection,
+    submission_id: str,
+    tenant_code: str,
+    submission_type: str,
+    statement_type: str,
+    raw_text: str,
+) -> None:
+    """
+    Preserves the original raw_text in raw_statement and stores its cleaned form
+    in cleaned_statement. Deduplication compares cleaned_statement to cleaned_statement
+    (both punctuation-stripped) so minor formatting differences don't create false roots.
+
+    Uses a check-before-insert pattern to avoid an extra UPDATE round-trip:
+      old: INSERT → SELECT → UPDATE  (3 round-trips on duplicates)
+      new: SELECT → INSERT           (2 round-trips max, 1 on uniques)
+    """
+    cleaned = clean_statement(raw_text)
+    original = raw_text.strip()
+    if not cleaned or not original:
+        return
+
+    # Dedup check against cleaned_statement — comparing cleaned-to-cleaned so
+    # punctuation variants (trailing comma, brackets, etc.) are treated as the same statement.
+    # - AND parent_id IS NULL ensures we only link to root statements, preventing deep chains.
+    # - ORDER BY created_at ASC guarantees the oldest root is chosen when duplicates exist.
+    existing_id = await conn.fetchval(
+        """
+        SELECT id
+        FROM statements
+        WHERE LOWER(cleaned_statement) = LOWER($1)
+          AND parent_id IS NULL
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1
+        """,
+        cleaned,
+    )
+
+    # Insert with both original and cleaned text; parent_id pre-set if a duplicate root was found.
+    new_id = await conn.fetchval(
+        """
+        INSERT INTO statements
+            (submission_id, tenant_code, submission_type, statement_type, raw_statement, cleaned_statement, parent_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id
+        """,
+        str(submission_id), tenant_code, submission_type, statement_type, original, cleaned, existing_id,
+    )
+
+    if existing_id:
+        logger.info(
+            f"Statement [{new_id}] matched existing root statement [{existing_id}] — parent_id assigned at insert."
+        )
+    else:
+        logger.info(f"Statement [{new_id}] stored with no duplicate found.")
+
 
 async def upsert_metadata(conn: asyncpg.Connection, tags: Dict[str, Any], tenant_code: str) -> tuple:
     """
@@ -225,10 +293,13 @@ async def insert_or_update_submission(
         # Upsert parent metadata tables (reads from flattened tags)
         program_id, leader_id = await upsert_metadata(conn, tags, tenant_code)
 
-        # Parse submission date. On a partial update where submissionDate is absent,
-        # leave it None (rather than defaulting to now()) so COALESCE below preserves
-        # the existing value instead of overwriting it with a "real" default.
+        # Parse submission date (report created at).
+        # Both discussion and story submissions use data.submissionDate for report
+        # created at. This field is only present on create events (absent from
+        # partial update payloads), so COALESCE in the SQL below preserves the
+        # original DB value on updates — no special-casing needed.
         sub_date_str = data.get("submissionDate")
+
         if sub_date_str:
             submission_date = datetime.fromisoformat(sub_date_str.replace("Z", "+00:00"))
         elif event_type != "update":
@@ -301,8 +372,8 @@ async def insert_or_update_submission(
                 "SELECT 1 FROM story_submissions WHERE submission_id = $1 AND tenant_code = $2",
                 submission_id, tenant_code
             )
-            challenges_joined = _normalize_string_list(data.get("challenges"))
-            action_steps_joined = _normalize_string_list(data.get("actionSteps"))
+            challenges_joined = _normalize_statement_list(data.get("challenges"))
+            action_steps_joined = _normalize_statement_list(data.get("actionSteps"))
             image_urls = _normalize_media_url_list(data.get("imageUrls"))
             pdf_urls, masked_pdf_urls = _normalize_pdf_urls(data.get("pdfUrls"))
 
@@ -363,6 +434,24 @@ async def insert_or_update_submission(
                     data.get("transcriptLink")
                 )
 
+            # Extract challenges for story submission into statements table
+            raw_story_challenges = data.get("challenges")
+            if isinstance(raw_story_challenges, list):
+                await conn.execute(
+                    "DELETE FROM statements WHERE submission_id = $1 AND tenant_code = $2 AND statement_type = $3",
+                    submission_id, tenant_code, "challenge"
+                )
+                for raw_challenge in raw_story_challenges:
+                    if raw_challenge:
+                        await insert_statement_with_parent_check(
+                            conn,
+                            submission_id,
+                            tenant_code,
+                            submission_type=submission_type,
+                            statement_type="challenge",
+                            raw_text=str(raw_challenge),
+                        )
+
         elif "discussion" in normalized_type:
             # Upsert discussion submission
             row_exists = await conn.fetchval(
@@ -373,6 +462,15 @@ async def insert_or_update_submission(
             solutions_joined = _normalize_statement_list(data.get("solutions"))
             image_urls = _normalize_media_url_list(data.get("imageUrls"))
             pdf_urls, masked_pdf_urls = _normalize_pdf_urls(data.get("pdfUrls"))
+
+            # Parse discussion date (date the discussion took place) from discussionDate.
+            # This is distinct from submissionDate (report created at) which is stored
+            # in the parent submissions table.
+            disc_date_str = data.get("discussionDate")
+            discussion_date = (
+                datetime.fromisoformat(disc_date_str.replace("Z", "+00:00"))
+                if disc_date_str else None
+            )
 
             if row_exists:
                 await conn.execute(
@@ -387,6 +485,7 @@ async def insert_or_update_submission(
                         pdf_urls = COALESCE($9, pdf_urls),
                         masked_pdf_urls = COALESCE($10, masked_pdf_urls),
                         transcript_link = COALESCE($11, transcript_link),
+                        discussion_date = COALESCE($12, discussion_date),
                         updated_at = now()
                     WHERE submission_id = $1 AND tenant_code = $2
                     """,
@@ -399,16 +498,17 @@ async def insert_or_update_submission(
                     image_urls,
                     pdf_urls,
                     masked_pdf_urls,
-                    data.get("transcriptLink")
+                    data.get("transcriptLink"),
+                    discussion_date
                 )
             else:
                 await conn.execute(
                     """
                     INSERT INTO discussion_submissions (
                         submission_id, tenant_code, title, challenges, solutions,
-                        author, language, image_urls, pdf_urls, masked_pdf_urls, transcript_link
+                        author, language, image_urls, pdf_urls, masked_pdf_urls, transcript_link, discussion_date
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                     """,
                     submission_id, tenant_code,
                     data.get("title"),
@@ -419,7 +519,8 @@ async def insert_or_update_submission(
                     image_urls,
                     pdf_urls,
                     masked_pdf_urls,
-                    data.get("transcriptLink")
+                    data.get("transcriptLink"),
+                    discussion_date
                 )
 
             # Dynamic KPI metrics: participantsData is a full snapshot when present;
@@ -430,6 +531,42 @@ async def insert_or_update_submission(
                 await upsert_participant_metrics(
                     conn, submission_id, tenant_code, submission_type, participants_data
                 )
+
+            # Extract challenges and solutions for discussion submission into statements table
+            raw_challenges = data.get("challenges")
+            raw_solutions = data.get("solutions")
+            
+            if isinstance(raw_challenges, list):
+                await conn.execute(
+                    "DELETE FROM statements WHERE submission_id = $1 AND tenant_code = $2 AND statement_type = $3",
+                    submission_id, tenant_code, "challenge"
+                )
+                for raw_challenge in raw_challenges:
+                    if raw_challenge:
+                        await insert_statement_with_parent_check(
+                            conn,
+                            submission_id,
+                            tenant_code,
+                            submission_type=submission_type,
+                            statement_type="challenge",
+                            raw_text=str(raw_challenge),
+                        )
+
+            if isinstance(raw_solutions, list):
+                await conn.execute(
+                    "DELETE FROM statements WHERE submission_id = $1 AND tenant_code = $2 AND statement_type = $3",
+                    submission_id, tenant_code, "solution"
+                )
+                for raw_solution in raw_solutions:
+                    if raw_solution:
+                        await insert_statement_with_parent_check(
+                            conn,
+                            submission_id,
+                            tenant_code,
+                            submission_type=submission_type,
+                            statement_type="solution",
+                            raw_text=str(raw_solution),
+                        )
 
         logger.info(f"Successfully ingested {submission_type} submission {submission_id} under tenant {tenant_code}")
         return {
@@ -510,44 +647,82 @@ async def insert_analysis_result(
     conn: asyncpg.Connection,
     submission_id: str,
     tenant_code: str,
-    theme_id: Optional[str],
     analysis_type: str,
-    statements: str,
-    statement_type: str,
+    statement_id: Optional[Any] = None,
+    analysis_column: Optional[List[str]] = None,
+    statement_type: Optional[str] = None,
+    ml_model_name: Optional[str] = None,
+    ml_model_version: Optional[str] = None,
+    model_confidence_score: Optional[float] = None,
     confidence_score: Optional[float] = None,
+    model_prediction: Optional[str] = None,
+    llm_confidence_score: Optional[float] = None,
+    llm_prediction: Optional[str] = None,
+    threshold: Optional[float] = None,
+    theme_id: Optional[Any] = None,
     justification: Optional[str] = None,
-    category_type: Optional[str] = None,
-    similarity_score: Optional[float] = None,
     multi_theme_mapped: bool = False,
-    meta_data: Optional[Dict[str, Any]] = None
+    category_type: Optional[str] = None,
+    meta_data: Optional[Dict[str, Any]] = None,
+    improvement_environment: Optional[str] = None,
 ) -> None:
     """
-    Saves theme/environmental extraction analysis output to database.
+    Single unified database function to insert rows into analysis_results.
+    Handles all analysis types:
+      - statement_category (SetFit + LLM fallback)
+      - thematic classification
+      - environmental & future analysis steps
+    Supports alias mapping (e.g. statement_type -> analysis_column, similarity_score -> model_confidence_score).
     """
-    if similarity_score is not None:
-        similarity_score = round(similarity_score, 2)
+    # Map statement_type to analysis_column if analysis_column not explicitly passed
+    if analysis_column is None and statement_type is not None:
+        analysis_column = [statement_type]
+        
+    if llm_prediction is None and improvement_environment is not None:
+        llm_prediction = improvement_environment
+
+    # Map legacy confidence score to both model_confidence_score and llm_confidence_score only if explicitly not set
+    if model_confidence_score is None and confidence_score is not None:
+        model_confidence_score = confidence_score
+        
+    if llm_confidence_score is None and confidence_score is not None:
+        llm_confidence_score = confidence_score
+    # NOTE: similarity_score (cosine embedding similarity) is intentionally NOT aliased
+    # to model_confidence_score — they are distinct concepts.
+
     meta_json = json.dumps(meta_data) if meta_data else None
+
     await conn.execute(
         """
         INSERT INTO analysis_results (
-            submission_id, tenant_code, theme_id, analysis_type, statements,
-            statement_type, confidence_score, justification, category_type,
-            similarity_score, multi_theme_mapped, meta_data
+            submission_id, tenant_code, statement_id,
+            analysis_type, analysis_column,
+            ml_model_name, ml_model_version,
+            model_confidence_score, model_prediction,
+            llm_confidence_score, llm_prediction,
+            threshold, theme_id,
+            justification, multi_theme_mapped,
+            category_type, meta_data
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
         """,
-        submission_id,
+        str(submission_id),
         tenant_code,
-        theme_id,
+        str(statement_id) if statement_id else None,
         analysis_type,
-        statements,
-        statement_type,
-        confidence_score,
+        analysis_column,
+        ml_model_name,
+        ml_model_version,
+        model_confidence_score,
+        model_prediction,
+        llm_confidence_score,
+        llm_prediction,
+        threshold,
+        str(theme_id) if theme_id else None,
         justification,
-        category_type,
-        similarity_score,
         multi_theme_mapped,
-        meta_json
+        category_type,
+        meta_json,
     )
 
 
@@ -620,3 +795,274 @@ async def get_submission_type_and_payload(conn: asyncpg.Connection, submission_i
 
     return sub_type, dict(payload_row)
 
+# CSV Upload Tracking (csv_uploads)
+async def check_duplicate_file(
+    program_name: str,
+    leader_category: str,
+    report_type: str,
+    file_name: str,
+    file_size: int,
+) -> bool:
+    """Return True if a matching file already exists in the tracker."""
+    from app.database.db import db
+    if not db.pool:
+        await db.connect()
+
+    async with db.pool.acquire() as conn:
+        exists = await conn.fetchval(
+            """
+            SELECT 1 FROM csv_uploads
+            WHERE program_name = $1
+              AND leader_category = $2
+              AND report_type = $3
+              AND file_name = $4
+              AND file_size = $5
+              AND status != 'failed'
+            LIMIT 1
+            """,
+            program_name,
+            leader_category,
+            report_type,
+            file_name,
+            file_size,
+        )
+        return exists is not None
+
+
+async def insert_upload_record(
+    report_type: str,
+    program_name: str,
+    leader_category: str,
+    cloud_storage_path: str,
+    file_name: Optional[str] = None,
+    file_size: Optional[int] = None,
+    meta_data: Optional[Dict[str, Any]] = None,
+    status: str = "pending",
+) -> int:
+    """Insert a new row with the given status. Returns the new row's id."""
+    from app.database.db import db
+    if not db.pool:
+        await db.connect()
+
+    async with db.pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO csv_uploads
+                    (report_type, program_name, leader_category, cloud_storage_path,
+                     file_name, file_size, meta_data, status)
+                VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+                RETURNING id
+                """,
+                report_type,
+                program_name,
+                leader_category,
+                cloud_storage_path,
+                file_name,
+                file_size,
+                json.dumps(meta_data or {}),
+                status,
+            )
+            record_id = row["id"]
+            logger.info("Inserted csv_uploads record %s (status=%s)", record_id, status)
+            return record_id
+        except asyncpg.UniqueViolationError:
+            from app.api.exceptions import DuplicateFile
+            raise DuplicateFile("FILE ALREADY EXISTS")
+
+
+async def get_record(record_id: int) -> Optional[dict]:
+    """Fetch a single tracker record by id."""
+    from app.database.db import db
+    if not db.pool:
+        await db.connect()
+
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM csv_uploads WHERE id = $1",
+            record_id,
+        )
+        return dict(row) if row else None
+
+
+async def update_status(
+    record_id: int,
+    status: str,
+    meta_data: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Update status, optionally merging new keys into meta_data.
+    """
+    from app.database.db import db
+    if not db.pool:
+        await db.connect()
+
+    async with db.pool.acquire() as conn:
+        if meta_data is not None:
+            await conn.execute(
+                """
+                UPDATE csv_uploads
+                SET status = $1,
+                    meta_data = COALESCE(meta_data, '{}'::jsonb) || $2::jsonb
+                WHERE id = $3
+                """,
+                status,
+                json.dumps(meta_data),
+                record_id,
+            )
+        else:
+            await conn.execute(
+                "UPDATE csv_uploads SET status = $1 WHERE id = $2",
+                status,
+                record_id,
+            )
+
+async def list_by_status(status: str) -> list:
+    """List all tracker records with a given status."""
+    from app.database.db import db
+    if not db.pool:
+        await db.connect()
+
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM csv_uploads WHERE status = $1 ORDER BY created_at",
+            status,
+        )
+        return [dict(r) for r in rows]
+
+
+async def try_claim_for_processing(record_id: int) -> Optional[str]:
+    """
+    Atomically set status to 'in_progress' if record exists and its status is not 'in_progress'.
+    Returns:
+      - 'success' if successfully claimed/updated.
+      - 'in_progress' if it is already in progress.
+      - None if the record does not exist.
+    """
+    from app.database.db import db
+    if not db.pool:
+        await db.connect()
+
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE csv_uploads
+            SET status = 'in_progress'
+            WHERE id = $1 AND status != 'in_progress'
+            RETURNING status
+            """,
+            record_id,
+        )
+        if row:
+            logger.info("Atomically claimed record %s for processing", record_id)
+            return "success"
+
+        # If update did not match any row, determine if it doesn't exist or is in_progress
+        exists = await conn.fetchval(
+            "SELECT 1 FROM csv_uploads WHERE id = $1 LIMIT 1",
+            record_id,
+        )
+        if not exists:
+            return None
+        return "in_progress"
+
+
+async def fetch_statements_for_submission(
+    conn: asyncpg.Connection,
+    submission_id: str,
+    tenant_code: str,
+) -> List[Dict[str, Any]]:
+    """
+    Fetches all original (non-duplicate) statements for a given submission.
+    Skips rows that have a parent_id set (i.e., duplicates).
+    Returns rows ordered by creation time.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT id, raw_statement, statement_type, submission_type
+        FROM statements
+        WHERE submission_id = $1
+          AND tenant_code = $2
+          AND parent_id IS NULL
+        ORDER BY created_at ASC
+        """,
+        str(submission_id), tenant_code
+    )
+    return [dict(row) for row in rows]
+
+
+async def fetch_challenge_statements_for_submission(
+    conn: asyncpg.Connection,
+    submission_id: str,
+    tenant_code: str,
+) -> List[Dict[str, Any]]:
+    """
+    Returns statements that the statement_category step classified as 'Challenge',
+    ready for thematic classification.
+
+    Effective-category resolution rule (applied in SQL):
+      - If llm_prediction IS NOT NULL  → use llm_prediction
+      - Else                           → use model_prediction
+    Only rows where the effective category equals 'Challenge' are returned.
+
+    Each row contains:
+      statement_id  (UUID, FK into statements)
+      raw_statement (the cleaned text to classify)
+      statement_type ('challenge' / 'solution' / …)
+    """
+    rows = await conn.fetch(
+        """
+        SELECT
+            ar.statement_id,
+            s.raw_statement,
+            s.statement_type
+        FROM analysis_results ar
+        JOIN statements s ON s.id = ar.statement_id
+        WHERE ar.submission_id  = $1
+          AND ar.tenant_code    = $2
+          AND ar.analysis_type  = 'statement_category'
+          AND (
+              (ar.llm_prediction IS NULL     AND LOWER(ar.model_prediction) = 'challenge')
+           OR (ar.llm_prediction IS NOT NULL AND LOWER(ar.llm_prediction)   = 'challenge')
+          )
+        ORDER BY ar.created_at ASC
+        """,
+        str(submission_id), tenant_code,
+    )
+    return [dict(row) for row in rows]
+async def reclaim_stale_in_progress(stale_minutes: int = 30) -> int:
+    """
+    Reset any csv_uploads rows that have been stuck at status='in_progress'
+    for longer than stale_minutes back to 'pending' so they can be retried.
+
+    A record can get stuck when the process that called process_csv_inline was
+    killed (OOM, pod restart, deploy) before it could write a terminal status.
+    Without this reclaim, POST /v1/process/csv/{id} returns 409 forever on
+    those records.
+
+    Returns the number of rows reclaimed (0 if none).
+    """
+    from app.database.db import db
+    if not db.pool:
+        await db.connect()
+
+    async with db.pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE csv_uploads
+            SET status = 'pending',
+                meta_data = jsonb_set(
+                    COALESCE(meta_data, '{}')::jsonb,
+                    '{reclaimed_at}',
+                    to_jsonb(now()::text)
+                )
+            WHERE status = 'in_progress'
+              AND updated_at < NOW() - ($1::integer * interval '1 minute')
+            """,
+            stale_minutes,
+        )
+    # asyncpg returns "UPDATE N" as a string
+    try:
+        return int(result.split()[-1])
+    except (AttributeError, ValueError, IndexError):
+        return 0

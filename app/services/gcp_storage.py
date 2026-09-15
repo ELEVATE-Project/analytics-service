@@ -1,5 +1,6 @@
 import json
 import logging
+import uuid
 from pathlib import Path
 from google.cloud import storage
 from google.oauth2 import service_account
@@ -62,3 +63,34 @@ def upload_to_gcp(local_file_path: str, blob_name: str) -> str:
     except Exception as e:
         logger.error(f"Failed to upload {local_file_path} to GCP bucket {settings.BUCKET_NAME}: {e}")
         raise
+
+def upload_csv(file_bytes: bytes, report_type: str, original_filename: str) -> str:
+    """Upload raw CSV bytes to the configured GCS bucket and return the object key."""
+    if not settings.BUCKET_NAME:
+        raise ValueError("BUCKET_NAME is not configured in settings.")
+
+    prefix = settings.CSV_BLOB_UPLOADS.strip("/")
+    object_key = f"{prefix}/{uuid.uuid4()}_{original_filename}"
+
+    credentials = get_gcp_credentials()
+    client = storage.Client(credentials=credentials, project=settings.PROJECT_ID)
+    bucket = client.bucket(settings.BUCKET_NAME)
+    blob = bucket.blob(object_key)
+    blob.upload_from_string(file_bytes, content_type="text/csv")
+
+    logger.info(f"Uploaded CSV to gs://{settings.BUCKET_NAME}/{object_key}")
+    return object_key
+
+def fetch_csv(bucket_path: str) -> bytes:
+    """Download CSV bytes from the configured GCS bucket."""
+    if not settings.BUCKET_NAME:
+        raise ValueError("BUCKET_NAME is not configured in settings.")
+
+    credentials = get_gcp_credentials()
+    client = storage.Client(credentials=credentials, project=settings.PROJECT_ID)
+    bucket = client.bucket(settings.BUCKET_NAME)
+    blob = bucket.blob(bucket_path)
+    data = blob.download_as_bytes()
+
+    logger.info(f"Fetched CSV from gs://{settings.BUCKET_NAME}/{bucket_path} ({len(data)} bytes)")
+    return data
