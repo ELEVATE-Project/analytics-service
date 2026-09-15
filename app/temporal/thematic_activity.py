@@ -155,6 +155,10 @@ def _finalize_qualifying_themes(
         if not tid:
             continue
         conf = item["confidence_score"]
+        
+        if conf < settings.LLM_CONFIDENCE_SCORE_THRESHOLD:
+            continue
+            
         existing = best_by_theme.get(tid)
         if existing is None or conf > existing["confidence_score"]:
             best_by_theme[tid] = item
@@ -669,8 +673,16 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
             statement_type = stmt["statement_type"]
             statement_id   = stmt["statement_id"]
 
-            theme_threshold = settings.get_setfit_theme_threshold(str(pred))
-            if conf >= theme_threshold:
+            try:
+                theme_threshold = settings.get_setfit_theme_threshold(str(pred))
+            except ValueError:
+                logger.warning(
+                    f"[Thematic Pipeline] SetFit predicted unmapped theme label '{pred}' for statement "
+                    f"{statement_id}; routing to LLM fallback instead of failing the submission."
+                )
+                theme_threshold = None
+
+            if theme_threshold is not None and conf >= theme_threshold:
                 has_pii_tag = bool(re.search(r'<[A-Z]+>', statement))
                 is_abusive_flagged_column = statement_type in abusive_masked_at
                 flagged = has_pii_tag or is_abusive_flagged_column

@@ -127,15 +127,13 @@ def load_setfit_model(model_id: str, revision: str = "main"):
 
 
 def predict_setfit_batch(model, texts: List[str]) -> Tuple[List[str], List[float]]:
-    try:
-        probs = model.predict_proba(texts)
-        if isinstance(probs, torch.Tensor):
-            confs = probs.max(dim=1).values.tolist()
-        else:
-            confs = np.asarray(probs).max(axis=1).tolist()
-    except Exception:
-        probs = np.asarray(model.predict_proba(texts))
-        confs = probs.max(axis=1).tolist()
-
-    preds = [str(p) for p in model.predict(texts)]
+    raw_probs = model.predict_proba(texts)
+    if hasattr(raw_probs, "cpu"):
+        probs = raw_probs.cpu().numpy()
+    else:
+        probs = np.asarray(raw_probs)
+        
+    pred_idx = probs.argmax(axis=1)
+    confs = probs.max(axis=1).tolist()
+    preds = [str(model.labels[i]) for i in pred_idx]
     return preds, confs

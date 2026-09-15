@@ -529,6 +529,7 @@ Return ONLY a valid JSON object matching this format (no markdown, no extra text
   now()
 FROM prompts p
 WHERE p.name = 'Statement Category'
+ON CONFLICT (prompt_id, version) DO UPDATE SET system_prompt = EXCLUDED.system_prompt, user_prompt = EXCLUDED.user_prompt, is_active = EXCLUDED.is_active, change_note = EXCLUDED.change_note;
 
 
 -- Insert Environment Detection Prompt

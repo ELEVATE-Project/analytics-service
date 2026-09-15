@@ -183,6 +183,7 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             )
 
     VALID_CATEGORIES = {"Challenge", "Solution or Action", "Other"}
+    _CATEGORY_LOOKUP = {c.lower(): c for c in VALID_CATEGORIES}
 
     # 4.5 Execute LLM fallbacks concurrently
     if fallback_tasks:
@@ -195,7 +196,7 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             
             # Validate Category
             raw_pred = str(llm_res.get("category") or "").strip()
-            llm_pred = raw_pred if raw_pred in VALID_CATEGORIES else "Other"
+            llm_pred = _CATEGORY_LOOKUP.get(raw_pred.lower(), "Other")
             if llm_pred != raw_pred:
                 logger.warning(
                     "LLM returned unknown category %r for statement [%s] — defaulting to 'Other'.",

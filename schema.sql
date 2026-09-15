@@ -97,25 +97,29 @@ CREATE TABLE submissions (
 
 CREATE TABLE discussion_submissions (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    submission_id       TEXT NOT NULL,
-    tenant_code         TEXT NOT NULL,
-    title               TEXT,
-    discussion_date     TIMESTAMPTZ,
-    challenges          TEXT[], -- one array element per discrete statement (see operations.py's _normalize_statement_list)
-    solutions           TEXT[], -- same format as challenges
-    author              TEXT,
-    language            TEXT,
-    image_urls          TEXT[] DEFAULT '{}',
-    blur_image_urls     TEXT[] DEFAULT '{}',
-    pdf_urls            TEXT[] DEFAULT '{}',
-    masked_pdf_urls     TEXT[] DEFAULT '{}',
-    transcript_link     TEXT,
-    pii_masked          BOOLEAN NOT NULL DEFAULT FALSE,
-    pii_masked_at       TEXT[] DEFAULT '{}',
-    abusive_masked_at   TEXT[] DEFAULT '{}',
-    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-     meta_data           JSONB,
+    submission_id                     TEXT NOT NULL,
+    tenant_code                       TEXT NOT NULL,
+    title                             TEXT,
+    discussion_date                   TIMESTAMPTZ,
+    challenges                        TEXT[], -- one array element per discrete statement (see operations.py's _normalize_statement_list)
+    solutions                         TEXT[], -- same format as challenges
+    author                            TEXT,
+    language                          TEXT,
+    image_urls                        TEXT[] DEFAULT '{}',
+    blur_image_urls                   TEXT[] DEFAULT '{}',
+    pdf_urls                          TEXT[] DEFAULT '{}',
+    masked_pdf_urls                   TEXT[] DEFAULT '{}',
+    transcript_link                   TEXT,
+    pii_masked                        BOOLEAN NOT NULL DEFAULT FALSE,
+    pii_masked_at                     TEXT[] DEFAULT '{}',
+    abusive_masked_at                 TEXT[] DEFAULT '{}',
+    pri_member_name                   TEXT,
+    pri_member_designation            TEXT,
+    school_representative_name        TEXT,
+    school_representative_designation TEXT,
+    created_at                        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at                        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    meta_data                         JSONB,
     
     FOREIGN KEY (submission_id, tenant_code) 
         REFERENCES submissions(submission_id, tenant_code) ON DELETE CASCADE
@@ -225,12 +229,8 @@ CREATE INDEX idx_statements_cleaned_lower
     ON statements (LOWER(cleaned_statement));
 
 -- Submission lookup + cascade delete path.
-CREATE INDEX idx_statements_submission_parent ON statements (submission_id, parent_id);
-CREATE INDEX idx_statements_parent ON statements (parent_id) WHERE parent_id IS NOT NULL;
-
--- Submission lookup + cascade delete path.
-CREATE INDEX idx_statements_submission_parent ON statements (submission_id, parent_id);
-CREATE INDEX idx_statements_parent ON statements (parent_id) WHERE parent_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_statements_submission_parent ON statements (submission_id, parent_id);
+CREATE INDEX IF NOT EXISTS idx_statements_parent ON statements (parent_id) WHERE parent_id IS NOT NULL;
 
 -- =========================================================================
 -- Trigger: automatically promote a duplicate child to be the new parent
