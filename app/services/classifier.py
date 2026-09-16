@@ -12,6 +12,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from setfit import SetFitModel
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
+from huggingface_hub import snapshot_download
 
 from app.config import settings
 
@@ -112,13 +113,20 @@ def load_setfit_model(model_id: str, revision: str = "main"):
         with _setfit_models_lock:
             if cache_key not in _setfit_models_cache:
                 logger.info(f"Loading SetFit model '{model_id}' (revision={revision})...")
-                model = SetFitModel.from_pretrained(model_id, revision=revision)
-                if revision != "main":
-                    model.model_body = SentenceTransformer(model_id, revision=revision)
-                    logger.info(
-                        f"Patched model body for '{model_id}' revision='{revision}' "
-                        f"(embedding dim: {model.model_body.get_sentence_embedding_dimension()})."
-                    )
+                # SetFitModel.from_pretrained has a bug: it builds the SentenceTransformer
+                # body by calling SentenceTransformer(model_id) without forwarding the
+                # `revision` argument, so it always reads from 'main' regardless of what
+                # revision you requested.
+                #
+                # Permanent fix: use snapshot_download to resolve the exact local
+                # directory for the requested revision (downloads on first use, then
+                # returns the cached path instantly on subsequent calls). Passing the
+                # local snapshot path to from_pretrained forces SetFit to read every
+                # file — including the SentenceTransformer body — from that exact
+                # revision's directory, so 'main', 'v2', or any other tag each get
+                # their own isolated, correct snapshot.
+                snapshot_path = snapshot_download(repo_id=model_id, revision=revision)
+                model = SetFitModel.from_pretrained(snapshot_path)
                 _setfit_models_cache[cache_key] = model
                 logger.info(f"SetFit model '{model_id}' loaded successfully.")
     return _setfit_models_cache[cache_key]
