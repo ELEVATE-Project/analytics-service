@@ -88,7 +88,7 @@ async def _get_theme_classification_prompt(conn, analysis_type: str) -> dict:
         SELECT pv.id, pv.system_prompt, pv.user_prompt
         FROM prompt_version pv
         JOIN prompts p ON p.id = pv.prompt_id
-        WHERE (p.analysis_type = $1 OR p.analysis_type = 'thematic_classification')
+        WHERE (p.analysis_type = $1)
           AND pv.is_active = TRUE
         ORDER BY pv.created_at DESC
         LIMIT 1
@@ -109,8 +109,8 @@ def _build_themes_text(approved_themes: list) -> str:
     for theme in approved_themes:
         theme_id = theme["id"]
         name = theme.get("name", "")
-        definition = theme.get("definitions", "") or theme.get("definition", "") or ""
-        keywords = theme.get("keywords", "") or ""
+        definition = theme.get("definitions") or ""
+        keywords = theme.get("keywords") or ""
         lines.append(
             f"Theme ID: {theme_id}\n"
             f"Theme Name: {name}\n"
@@ -174,6 +174,7 @@ async def _run_local_classification(
     tenant_code: str,
     statement_type: str,
     abusive_masked_at: list,
+    analysis_type: str,
     statement_id: Optional[str] = None,
     setfit_conf: Optional[float] = None,
     setfit_pred: Optional[str] = None,
@@ -224,7 +225,7 @@ async def _run_local_classification(
             tenant_code=tenant_code,
             statement_id=statement_id,
             theme_id=None,
-            analysis_type="thematic_classification",
+            analysis_type=analysis_type,
             statement_type=statement_type,
             category_type="Unknown/Unclear",
             meta_data=diagnostics,
@@ -260,7 +261,7 @@ async def _run_local_classification(
             tenant_code=tenant_code,
             statement_id=statement_id,
             theme_id=None,
-            analysis_type="thematic_classification",
+            analysis_type=analysis_type,
             statement_type=statement_type,
             category_type="Flagged",
             meta_data=diagnostics,
@@ -485,7 +486,7 @@ async def _run_batched_llm_fallback(
                         tenant_code=tenant_code,
                         statement_id=pending.get("statement_id"),
                         theme_id=item["theme_id"],
-                        analysis_type="thematic_classification",
+                        analysis_type=analysis_type,
                         statement_type=statement_type,
                         category_type="Standard",
                         ml_model_name=settings.SETFIT_THEME_MODEL_ID,
@@ -518,7 +519,7 @@ async def _run_batched_llm_fallback(
                             tenant_code=tenant_code,
                             statement_id=_child["id"],
                             theme_id=item["theme_id"],
-                            analysis_type="thematic_classification",
+                            analysis_type=analysis_type,
                             statement_type=_child["statement_type"],
                             category_type="Standard",
                             ml_model_name=settings.SETFIT_THEME_MODEL_ID,
@@ -543,7 +544,7 @@ async def _run_batched_llm_fallback(
                     tenant_code=tenant_code,
                     statement_id=pending.get("statement_id"),
                     theme_id=None,
-                    analysis_type="thematic_classification",
+                    analysis_type=analysis_type,
                     statement_type=statement_type,
                     category_type="Others",
                     ml_model_name=settings.SETFIT_THEME_MODEL_ID,
@@ -568,7 +569,7 @@ async def _run_batched_llm_fallback(
                         tenant_code=tenant_code,
                         statement_id=_child["id"],
                         theme_id=None,
-                        analysis_type="thematic_classification",
+                        analysis_type=analysis_type,
                         statement_type=_child["statement_type"],
                         category_type="Others",
                         ml_model_name=settings.SETFIT_THEME_MODEL_ID,
@@ -604,6 +605,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
     resolved_model = params.get("llm_model") or params.get("model") or settings.OPENROUTER_MODEL
     resolved_max_tokens = params.get("max_tokens") or settings.LLM_MAX_TOKENS
     resolved_timeout = params.get("llm_timeout_seconds") or params.get("timeout") or settings.LLM_TIMEOUT_SECONDS
+    analysis_type = params.get("analysis_type", "thematic_classification")
 
     if not submission_id or not tenant_code:
         raise ValueError("submission_id and tenant_code are required.")
@@ -631,7 +633,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                 ON ds.submission_id = sub.submission_id AND ds.tenant_code = sub.tenant_code
             WHERE sub.submission_id = $1 AND sub.tenant_code = $2
             """,
-            submission_id, tenant_code,
+            submission_id, tenant_code, analysis_type
         )
         abusive_masked_at: List[str] = (
             list(abusive_masked_at_row["abusive_masked_at"] or [])
@@ -650,8 +652,8 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
     # Clear previous theme analysis_results for idempotency
     async with db.pool.acquire() as conn:
         await conn.execute(
-            "DELETE FROM analysis_results WHERE submission_id = $1 AND tenant_code = $2 AND analysis_type = 'thematic_classification'",
-            submission_id, tenant_code,
+            "DELETE FROM analysis_results WHERE submission_id = $1 AND tenant_code = $2 AND analysis_type = $3",
+            submission_id, tenant_code, analysis_type
         )
 
     # Step 1 — SetFit theme model: batch inference on all Challenge statements
@@ -695,7 +697,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                         submission_id=submission_id,
                         tenant_code=tenant_code,
                         statement_id=statement_id,
-                        analysis_type="thematic_classification",
+                        analysis_type=analysis_type,
                         statement_type=statement_type,
                         category_type="Flagged",
                         ml_model_name=settings.SETFIT_THEME_MODEL_ID,
@@ -712,7 +714,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                             submission_id=submission_id,
                             tenant_code=tenant_code,
                             statement_id=_child["id"],
-                            analysis_type="thematic_classification",
+                            analysis_type=analysis_type,
                             statement_type=_child["statement_type"],
                             category_type="Flagged",
                             ml_model_name=settings.SETFIT_THEME_MODEL_ID,
@@ -738,7 +740,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                     submission_id=submission_id,
                     tenant_code=tenant_code,
                     statement_id=statement_id,
-                    analysis_type="thematic_classification",
+                    analysis_type=analysis_type,
                     statement_type=statement_type,
                     theme_id=resolved_theme_id,
                     category_type=cat_type,
@@ -756,7 +758,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                         submission_id=submission_id,
                         tenant_code=tenant_code,
                         statement_id=_child["id"],
-                        analysis_type="thematic_classification",
+                        analysis_type=analysis_type,
                         statement_type=_child["statement_type"],
                         theme_id=resolved_theme_id,
                         category_type=cat_type,
@@ -803,7 +805,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
             theme_id_to_info=theme_id_to_info,
             submission_id=submission_id,
             tenant_code=tenant_code,
-            analysis_type="thematic_classification",
+            analysis_type=analysis_type,
             resolved_model=resolved_model,
             resolved_max_tokens=resolved_max_tokens,
             resolved_timeout=resolved_timeout,

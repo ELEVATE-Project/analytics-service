@@ -71,9 +71,6 @@ def _llm_classify(
     return result, usage
 
 
-# -------------------------------------------------------------------------
-# Temporal activity definition
-# -------------------------------------------------------------------------
 @activity.defn
 async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -86,6 +83,7 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     llm_model = params.get("llm_model")
     max_tokens = params.get("max_tokens")
     llm_timeout_seconds = params.get("llm_timeout_seconds")
+    analysis_type = params.get("analysis_type")
     thresholds = settings.SETFIT_CONFIDENCE_THRESHOLD
 
     logger.info(
@@ -226,10 +224,11 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                 DELETE FROM analysis_results 
                 WHERE submission_id = $1 
                   AND tenant_code = $2 
-                  AND analysis_type = 'statement_category'
+                  AND analysis_type = $3
                 """,
                 submission_id,
                 tenant_code,
+                analysis_type,
             )
 
             for r in results:
@@ -238,7 +237,7 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                     submission_id=submission_id,
                     tenant_code=tenant_code,
                     statement_id=r["statement_id"],
-                    analysis_type="statement_category",
+                    analysis_type=analysis_type,
                     analysis_column=[r["statement_type"]],
                     ml_model_name=settings.SETFIT_MODEL_ID,
                     ml_model_version=settings.SETFIT_MODEL_VERSION,
@@ -258,14 +257,15 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                     parent_statement_id=r["statement_id"],
                     submission_id=submission_id,
                     tenant_code=tenant_code,
-                )
+                analysis_type,
+            )
                 for child in children:
                     await insert_analysis_result(
                         conn,
                         submission_id=submission_id,
                         tenant_code=tenant_code,
                         statement_id=child["id"],
-                        analysis_type="statement_category",
+                        analysis_type=analysis_type,
                         analysis_column=[child["statement_type"]],
                         ml_model_name=settings.SETFIT_MODEL_ID,
                         ml_model_version=settings.SETFIT_MODEL_VERSION,

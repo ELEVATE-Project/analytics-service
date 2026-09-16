@@ -21,13 +21,6 @@ from app.temporal.thematic_activity import thematic_classification_activity
 from app.temporal.environment_activity import environment_detection_activity
 from app.temporal.story_rating_activity import story_rating_activity
 from app.temporal.statement_category_activity import statement_category_activity
-from app.temporal.csv_processing_activity import (
-    csv_fetch_and_validate_activity,
-    csv_push_to_kafka_activity,
-    csv_update_status_activity,
-    fetch_pending_csv_uploads_activity,
-)
-
 logger = logging.getLogger("analytics_service.temporal.worker")
 
 async def start_worker():

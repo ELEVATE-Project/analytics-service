@@ -100,9 +100,7 @@ def classify_statement(
     return scores[0]
 
 
-# ---------------------------------------------------------------------------
 # Shared SetFit Model Loader & Batch Predictor
-# ---------------------------------------------------------------------------
 
 _setfit_models_cache: Dict[Tuple[str, str], Any] = {}
 _setfit_models_lock = threading.Lock()
