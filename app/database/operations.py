@@ -980,11 +980,15 @@ async def fetch_statements_for_submission(
     rows = await conn.fetch(
         """
         SELECT id, raw_statement, statement_type, submission_type
-        FROM statements
-        WHERE submission_id = $1
-          AND tenant_code = $2
-          AND parent_id IS NULL
-        ORDER BY created_at ASC
+        FROM statements s
+        WHERE s.submission_id = $1
+          AND s.tenant_code = $2
+          AND NOT EXISTS (
+              SELECT 1 FROM analysis_results existing
+              WHERE existing.statement_id = s.id
+                AND existing.analysis_type = 'statement_category'
+          )
+        ORDER BY s.created_at ASC
         """,
         str(submission_id), tenant_code
     )
@@ -1025,6 +1029,11 @@ async def fetch_challenge_and_solution_statements_for_submission(
           AND (
               (ar.llm_prediction IS NULL     AND LOWER(ar.model_prediction) IN ('challenge', 'solution or action'))
            OR (ar.llm_prediction IS NOT NULL AND LOWER(ar.llm_prediction)   IN ('challenge', 'solution or action'))
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM analysis_results existing
+              WHERE existing.statement_id = s.id
+                AND existing.analysis_type = 'thematic_classification'
           )
         ORDER BY ar.created_at ASC
         """,
