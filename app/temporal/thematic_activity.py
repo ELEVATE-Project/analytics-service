@@ -1,19 +1,18 @@
-from app.database.operations import fetch_challenge_and_solution_statements_for_submission
 import asyncio
 import json
 import logging
 import math
 import re
-import threading
 from typing import Dict, Any, List, Optional, Tuple
 from temporalio import activity
 
 from app.config import settings
 from app.database.db import db
 from app.database.operations import (
-    fetch_child_statements,
+    fetch_challenge_and_solution_statements_for_submission,
     insert_llm_log,
     insert_analysis_result,
+    copy_parent_analysis_results,
 )
 from app.services.classifier import load_setfit_model, predict_setfit_batch
 from app.services.llm import openrouter_chat_completion, split_llm_usage
@@ -506,34 +505,6 @@ async def _run_batched_llm_fallback(
                     f"LLM match{'es' if is_multi else ''} (batched): '{statement[:60]}...' → {theme_names} "
                     f"(conf={[round(item['confidence_score'], 2) for item in qualifying_llm]})"
                 )
-                # Propagate each qualifying theme result to duplicate (child) statements
-                parent_stmt_id = pending.get("statement_id")
-                _children = await fetch_child_statements(conn, parent_stmt_id, submission_id, tenant_code)
-                for _child in _children:
-                    for item in qualifying_llm:
-                        setfit_pred = pending.get("setfit_pred")
-                        setfit_threshold = settings.get_setfit_theme_threshold(setfit_pred) if setfit_pred else None
-                        await insert_analysis_result(
-                            conn,
-                            submission_id=submission_id,
-                            tenant_code=tenant_code,
-                            statement_id=_child["id"],
-                            theme_id=item["theme_id"],
-                            analysis_type=analysis_type,
-                            statement_type=_child["statement_type"],
-                            category_type="Standard",
-                            ml_model_name=settings.SETFIT_THEME_MODEL_ID,
-                            ml_model_version=settings.SETFIT_THEME_MODEL_VERSION,
-                            model_confidence_score=pending.get("setfit_conf"),
-                            model_prediction=setfit_pred,
-                            llm_prediction=item["theme_name"],
-                            threshold=setfit_threshold,
-                            llm_confidence_score=item["confidence_score"],
-                            justification=item["justification"],
-                            multi_theme_mapped=is_multi,
-                            meta_data={"deduped_from": str(parent_stmt_id)},
-                        )
-                    logger.debug("[Thematic Pipeline] Copied LLM Standard result from parent [%s] to child [%s]", parent_stmt_id, _child["id"])
             else:
                 result["category_type"] = "Others"
                 setfit_pred = pending.get("setfit_pred")
@@ -556,32 +527,6 @@ async def _run_batched_llm_fallback(
                     justification=llm_justification,
                     meta_data=diagnostics,
                 )
-                logger.info(f"Statement marked Others (low confidence, batched): {statement[:80]}...")
-                # Propagate Others result to duplicate (child) statements
-                parent_stmt_id = pending.get("statement_id")
-                _children = await fetch_child_statements(conn, parent_stmt_id, submission_id, tenant_code)
-                for _child in _children:
-                    setfit_pred = pending.get("setfit_pred")
-                    setfit_threshold = settings.get_setfit_theme_threshold(setfit_pred) if setfit_pred else None
-                    await insert_analysis_result(
-                        conn,
-                        submission_id=submission_id,
-                        tenant_code=tenant_code,
-                        statement_id=_child["id"],
-                        theme_id=None,
-                        analysis_type=analysis_type,
-                        statement_type=_child["statement_type"],
-                        category_type="Others",
-                        ml_model_name=settings.SETFIT_THEME_MODEL_ID,
-                        ml_model_version=settings.SETFIT_THEME_MODEL_VERSION,
-                        model_confidence_score=pending.get("setfit_conf"),
-                        model_prediction=setfit_pred,
-                        threshold=setfit_threshold,
-                        llm_confidence_score=llm_confidence,
-                        justification=llm_justification,
-                        meta_data={"deduped_from": str(parent_stmt_id)},
-                    )
-                    logger.debug("[Thematic Pipeline] Copied Others result from parent [%s] to child [%s]", parent_stmt_id, _child["id"])
 
             results.append(result)
 
@@ -613,6 +558,20 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
     logger.info(f"[Thematic Pipeline] Starting activity for submission={submission_id}, tenant={tenant_code}")
 
     async with db.pool.acquire() as conn:
+        # Idempotency: clear any existing thematic results for this submission.
+        await conn.execute(
+            "DELETE FROM analysis_results WHERE submission_id = $1 AND tenant_code = $2 AND analysis_type = $3",
+            submission_id, tenant_code, analysis_type,
+        )
+
+        # Copy parent thematic results to any child (duplicate) statements in this submission.
+        child_copies = await copy_parent_analysis_results(conn, submission_id, tenant_code, analysis_type)
+        if child_copies > 0:
+            logger.info(
+                "[Thematic Pipeline] Copied %d parent thematic results to child statements for submission=%s",
+                child_copies, submission_id,
+            )
+
         statements = await fetch_challenge_and_solution_statements_for_submission(conn, submission_id, tenant_code)
         if not statements:
             logger.info(f"[Thematic Pipeline] No Challenge/Solution statements found for submission={submission_id}.")
@@ -620,6 +579,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                 "status": "success",
                 "processed": 0,
                 "results": [],
+                "child_copies": child_copies,
                 "warnings": ["No Challenge or Solution statements found for submission."],
             }
 
@@ -648,13 +608,6 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
         warnings.append(warn_msg)
 
     theme_id_to_info = {str(t["id"]): t for t in approved_themes}
-
-    # Clear previous theme analysis_results for idempotency
-    async with db.pool.acquire() as conn:
-        await conn.execute(
-            "DELETE FROM analysis_results WHERE submission_id = $1 AND tenant_code = $2 AND analysis_type = $3",
-            submission_id, tenant_code, analysis_type
-        )
 
     # Step 1 — SetFit theme model: batch inference on all Challenge statements
     setfit_model = await asyncio.to_thread(
@@ -706,25 +659,6 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                         model_prediction=pred,
                         threshold=theme_threshold,
                     )
-                    # Propagate result to duplicate (child) statements
-                    _children = await fetch_child_statements(conn, statement_id, submission_id, tenant_code)
-                    for _child in _children:
-                        await insert_analysis_result(
-                            conn,
-                            submission_id=submission_id,
-                            tenant_code=tenant_code,
-                            statement_id=_child["id"],
-                            analysis_type=analysis_type,
-                            statement_type=_child["statement_type"],
-                            category_type="Flagged",
-                            ml_model_name=settings.SETFIT_THEME_MODEL_ID,
-                            ml_model_version=settings.SETFIT_THEME_MODEL_VERSION,
-                            model_confidence_score=conf,
-                            model_prediction=pred,
-                            threshold=theme_threshold,
-                            meta_data={"deduped_from": str(statement_id)},
-                        )
-                        logger.debug("[Thematic Pipeline] Copied Flagged result from parent [%s] to child [%s]", statement_id, _child["id"])
                     all_results.append({"statement": statement, "category_type": "Flagged"})
                     setfit_resolved_count += 1
                     continue
@@ -750,26 +684,6 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                     model_prediction=pred,
                     threshold=theme_threshold,
                 )
-                # Propagate result to duplicate (child) statements
-                _children = await fetch_child_statements(conn, statement_id, submission_id, tenant_code)
-                for _child in _children:
-                    await insert_analysis_result(
-                        conn,
-                        submission_id=submission_id,
-                        tenant_code=tenant_code,
-                        statement_id=_child["id"],
-                        analysis_type=analysis_type,
-                        statement_type=_child["statement_type"],
-                        theme_id=resolved_theme_id,
-                        category_type=cat_type,
-                        ml_model_name=settings.SETFIT_THEME_MODEL_ID,
-                        ml_model_version=settings.SETFIT_THEME_MODEL_VERSION,
-                        model_confidence_score=conf,
-                        model_prediction=pred,
-                        threshold=theme_threshold,
-                        meta_data={"deduped_from": str(statement_id)},
-                    )
-                    logger.debug("[Thematic Pipeline] Copied %s result from parent [%s] to child [%s]", cat_type, statement_id, _child["id"])
                 all_results.append({
                     "statement": statement,
                     "category_type": cat_type,
@@ -788,6 +702,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                     tenant_code=tenant_code,
                     statement_type=statement_type,
                     abusive_masked_at=abusive_masked_at,
+                    analysis_type=analysis_type,
                     statement_id=statement_id,
                     setfit_conf=conf,
                     setfit_pred=pred,
