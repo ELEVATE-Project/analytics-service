@@ -8,10 +8,10 @@ from temporalio import activity
 from app.config import settings
 from app.database.db import db
 from app.database.operations import (
-    fetch_child_statements,
     fetch_statements_for_submission,
     insert_analysis_result,
     update_submission_status,
+    copy_parent_analysis_results,
 )
 
 from app.services.classifier import load_setfit_model, predict_setfit_batch
@@ -83,7 +83,7 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     llm_model = params.get("llm_model")
     max_tokens = params.get("max_tokens")
     llm_timeout_seconds = params.get("llm_timeout_seconds")
-    analysis_type = params.get("analysis_type")
+    analysis_type = params.get("analysis_type", "statement_category")
     thresholds = settings.SETFIT_CONFIDENCE_THRESHOLD
 
     logger.info(
@@ -91,15 +91,40 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         submission_id, tenant_code, thresholds,
     )
 
-    # 1. Fetch original statements (skip duplicates with parent_id set)
     async with db.pool.acquire() as conn:
+        # Idempotency: clear any existing results for this submission + analysis type.
+        await conn.execute(
+            """
+            DELETE FROM analysis_results
+            WHERE submission_id = $1
+              AND tenant_code = $2
+              AND analysis_type = $3
+            """,
+            submission_id, tenant_code, analysis_type,
+        )
+
+        # Copy parent results to any child (duplicate) statements in this submission.
+        # Handles the case where this submission's statements are duplicates of an
+        # older submission that was already fully processed.
+        child_copies = await copy_parent_analysis_results(conn, submission_id, tenant_code, analysis_type)
+        if child_copies > 0:
+            logger.info(
+                "Copied %d parent analysis_results to child statements for submission=%s",
+                child_copies, submission_id,
+            )
+
+        # Fetch only root (non-duplicate) statements for this submission.
         statements = await fetch_statements_for_submission(conn, submission_id, tenant_code)
 
     if not statements:
-        logger.info("No statements found for submission=%s — skipping.", submission_id)
-        return {"status": "skipped", "reason": "no statements found"}
+        logger.info("No root statements to classify for submission=%s.", submission_id)
+        return {
+            "status": "success",
+            "reason": "all statements were duplicates — results copied from parents",
+            "child_copies": child_copies,
+        }
 
-    logger.info("Found %d statements to classify for submission=%s", len(statements), submission_id)
+    logger.info("Found %d root statements to classify for submission=%s", len(statements), submission_id)
 
     # 1.5. Fetch the LLM prompt from database
     async with db.pool.acquire() as conn:
@@ -214,23 +239,9 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
             if llm_pred:
                 results[fallback_idx]["final_category"] = llm_pred
 
-    # 5. Bulk insert into analysis_results (parent statements only)
-    child_copy_count = 0
+    # 5. Bulk insert into analysis_results (root statements only)
     async with db.pool.acquire() as conn:
         async with conn.transaction():
-            # Idempotency: Clear any existing statement_category results for this submission
-            await conn.execute(
-                """
-                DELETE FROM analysis_results 
-                WHERE submission_id = $1 
-                  AND tenant_code = $2 
-                  AND analysis_type = $3
-                """,
-                submission_id,
-                tenant_code,
-                analysis_type,
-            )
-
             for r in results:
                 await insert_analysis_result(
                     conn,
@@ -249,46 +260,12 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
                     justification=r["justification"],
                 )
 
-                # 5a. Propagate the same result to any duplicate (child) statements so
-                #     every statement_id has its own analysis_results row.  Consumers
-                #     never need to walk parent_id chains to read classification output.
-                children = await fetch_child_statements(
-                    conn,
-                    parent_statement_id=r["statement_id"],
-                    submission_id=submission_id,
-                    tenant_code=tenant_code,
-                analysis_type,
-            )
-                for child in children:
-                    await insert_analysis_result(
-                        conn,
-                        submission_id=submission_id,
-                        tenant_code=tenant_code,
-                        statement_id=child["id"],
-                        analysis_type=analysis_type,
-                        analysis_column=[child["statement_type"]],
-                        ml_model_name=settings.SETFIT_MODEL_ID,
-                        ml_model_version=settings.SETFIT_MODEL_VERSION,
-                        model_confidence_score=r["model_conf"],
-                        model_prediction=r["model_pred"],
-                        llm_confidence_score=r["llm_conf"],
-                        llm_prediction=r["llm_pred"],
-                        threshold=r.get("current_threshold", 0.80),
-                        justification=r["justification"],
-                        meta_data={"deduped_from": str(r["statement_id"])},
-                    )
-                    child_copy_count += 1
-                    logger.debug(
-                        "Copied statement_category result from parent [%s] to child [%s]",
-                        r["statement_id"], child["id"],
-                    )
-
     model_only_count = sum(1 for r in results if not r["llm_pred"])
     llm_fallback_count = sum(1 for r in results if r["llm_pred"])
 
     logger.info(
-        "Statement categorization complete for submission=%s: %d total, %d model-only, %d LLM-fallback, %d child copies",
-        submission_id, len(results), model_only_count, llm_fallback_count, child_copy_count,
+        "Statement categorization complete for submission=%s: %d root classified, %d model-only, %d LLM-fallback, %d child copies",
+        submission_id, len(results), model_only_count, llm_fallback_count, child_copies,
     )
 
     return {
@@ -296,5 +273,5 @@ async def statement_category_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         "total": len(results),
         "model_only": model_only_count,
         "llm_fallback": llm_fallback_count,
-        "child_copies": child_copy_count,
+        "child_copies": child_copies,
     }

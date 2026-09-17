@@ -980,11 +980,15 @@ async def fetch_statements_for_submission(
     rows = await conn.fetch(
         """
         SELECT id, raw_statement, statement_type, submission_type
-        FROM statements
-        WHERE submission_id = $1
-          AND tenant_code = $2
-          AND parent_id IS NULL
-        ORDER BY created_at ASC
+        FROM statements s
+        WHERE s.submission_id = $1
+          AND s.tenant_code = $2
+          AND NOT EXISTS (
+              SELECT 1 FROM analysis_results existing
+              WHERE existing.statement_id = s.id
+                AND existing.analysis_type = 'statement_category'
+          )
+        ORDER BY s.created_at ASC
         """,
         str(submission_id), tenant_code
     )
@@ -1026,42 +1030,17 @@ async def fetch_challenge_and_solution_statements_for_submission(
               (ar.llm_prediction IS NULL     AND LOWER(ar.model_prediction) IN ('challenge', 'solution or action'))
            OR (ar.llm_prediction IS NOT NULL AND LOWER(ar.llm_prediction)   IN ('challenge', 'solution or action'))
           )
+          AND NOT EXISTS (
+              SELECT 1 FROM analysis_results existing
+              WHERE existing.statement_id = s.id
+                AND existing.analysis_type = 'thematic_classification'
+          )
         ORDER BY ar.created_at ASC
         """,
         str(submission_id), tenant_code,
     )
     return [dict(row) for row in rows]
 
-
-async def fetch_child_statements(
-    conn: asyncpg.Connection,
-    parent_statement_id: Any,
-    submission_id: str,
-    tenant_code: str,
-) -> List[Dict[str, Any]]:
-    """
-    Fetches all duplicate (child) statements whose parent_id equals the given
-    parent_statement_id within the same submission.
-
-    These are statements that were deduplicated at insert time and therefore
-    skipped during analysis. Their analysis_results rows should be copied from
-    the parent after the parent is processed.
-
-    Returns rows with: id (the child statement_id), statement_type.
-    Returns an empty list when no children exist.
-    """
-    rows = await conn.fetch(
-        """
-        SELECT id, statement_type
-        FROM statements
-        WHERE parent_id   = $1
-          AND submission_id = $2
-          AND tenant_code   = $3
-        ORDER BY created_at ASC
-        """,
-        str(parent_statement_id), str(submission_id), tenant_code,
-    )
-    return [dict(row) for row in rows]
 async def reclaim_stale_in_progress(stale_minutes: int = 30) -> int:
     """
     Reset any csv_uploads rows that have been stuck at status='in_progress'
@@ -1097,4 +1076,58 @@ async def reclaim_stale_in_progress(stale_minutes: int = 30) -> int:
     try:
         return int(result.split()[-1])
     except (AttributeError, ValueError, IndexError):
+        return 0
+
+async def copy_parent_analysis_results(
+    conn: asyncpg.Connection,
+    submission_id: str,
+    tenant_code: str,
+    analysis_type: str,
+) -> int:
+    """
+    Copies analysis_results from parent statements to child statements within a submission.
+    This effectively "pulls" historical AI classification results forward when a new
+    submission contains statements that were deduplicated against an older submission.
+    """
+    query = """
+        INSERT INTO analysis_results (
+            submission_id, tenant_code, statement_id, analysis_type, analysis_column,
+            ml_model_name, ml_model_version, model_confidence_score, model_prediction,
+            llm_confidence_score, llm_prediction, threshold, theme_id,
+            justification, multi_theme_mapped, category_type, meta_data
+        )
+        SELECT 
+            $1 AS submission_id,
+            $2 AS tenant_code,
+            child.id AS statement_id,
+            ar.analysis_type,
+            ARRAY[child.statement_type] AS analysis_column,
+            ar.ml_model_name,
+            ar.ml_model_version,
+            ar.model_confidence_score,
+            ar.model_prediction,
+            ar.llm_confidence_score,
+            ar.llm_prediction,
+            ar.threshold,
+            ar.theme_id,
+            ar.justification,
+            ar.multi_theme_mapped,
+            ar.category_type,
+            jsonb_build_object('deduped_from', child.parent_id::text) AS meta_data
+        FROM statements child
+        JOIN analysis_results ar ON ar.statement_id = child.parent_id
+        WHERE child.submission_id = $1
+          AND child.tenant_code = $2
+          AND child.parent_id IS NOT NULL
+          AND ar.analysis_type = $3
+          AND NOT EXISTS (
+              SELECT 1 FROM analysis_results existing
+              WHERE existing.statement_id = child.id
+                AND existing.analysis_type = $3
+          )
+    """
+    result = await conn.execute(query, submission_id, tenant_code, analysis_type)
+    try:
+        return int(result.split()[-1])
+    except Exception:
         return 0
