@@ -486,6 +486,10 @@ async def insert_or_update_submission(
                         masked_pdf_urls = COALESCE($10, masked_pdf_urls),
                         transcript_link = COALESCE($11, transcript_link),
                         discussion_date = COALESCE($12, discussion_date),
+                        pri_member_name = COALESCE($13, pri_member_name),
+                        pri_member_designation = COALESCE($14, pri_member_designation),
+                        school_representative_name = COALESCE($15, school_representative_name),
+                        school_representative_designation = COALESCE($16, school_representative_designation),
                         updated_at = now()
                     WHERE submission_id = $1 AND tenant_code = $2
                     """,
@@ -499,16 +503,21 @@ async def insert_or_update_submission(
                     pdf_urls,
                     masked_pdf_urls,
                     data.get("transcriptLink"),
-                    discussion_date
+                    discussion_date,
+                    data.get("priMemberName"),
+                    data.get("priMemberDesignation"),
+                    data.get("schoolRepresentativeName"),
+                    data.get("schoolRepresentativeDesignation"),
                 )
             else:
                 await conn.execute(
                     """
                     INSERT INTO discussion_submissions (
                         submission_id, tenant_code, title, challenges, solutions,
-                        author, language, image_urls, pdf_urls, masked_pdf_urls, transcript_link, discussion_date
+                        author, language, image_urls, pdf_urls, masked_pdf_urls, transcript_link, discussion_date,
+                        pri_member_name, pri_member_designation, school_representative_name, school_representative_designation
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                     """,
                     submission_id, tenant_code,
                     data.get("title"),
@@ -520,7 +529,11 @@ async def insert_or_update_submission(
                     pdf_urls,
                     masked_pdf_urls,
                     data.get("transcriptLink"),
-                    discussion_date
+                    discussion_date,
+                    data.get("priMemberName"),
+                    data.get("priMemberDesignation"),
+                    data.get("schoolRepresentativeName"),
+                    data.get("schoolRepresentativeDesignation"),
                 )
 
             # Dynamic KPI metrics: participantsData is a full snapshot when present;
