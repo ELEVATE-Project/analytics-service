@@ -108,6 +108,18 @@ async def _process_one_image(submission_id: str, tenant_code: str, sub_type: str
     else:
         resolved_url = url_str
 
+
+    # Percent-encode unsafe characters (spaces, brackets, unicode, etc.) in the
+    # URL path while preserving the scheme/host/query.  urllib.request.urlopen()
+    # rejects raw spaces or control characters — real-world filenames like
+    # "image (2).png" trigger InvalidURL without this.  `quote(…, safe=…)`
+    # re-encodes only the characters that are NOT in `safe`; the slash, colon,
+    # at-sign, etc. are kept literal so already-valid path separators aren't
+    # touched.  Passing the full URL (not just the path) through quote() is
+    # intentional: it's simpler than decomposing/recomposing with urlparse and
+    # handles every observed failure case.
+    resolved_url = urllib.parse.quote(resolved_url, safe=":/?#[]@!$&'()*+,;=-._~%")
+
     if not _is_allowed_media_host(resolved_url):
         raise ValueError(
             f"Refusing to download image from disallowed host: {resolved_url!r} "
