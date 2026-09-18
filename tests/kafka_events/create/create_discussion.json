@@ -43,16 +43,32 @@
       "Adding more books to the library."
     ],
     "participantsData": [
-      { "role": "men", "count": 4 },
-      { "role": "women", "count": 2 },
-      { "role": "children", "count": 1 },
-      { "role": "teacher", "count": 3 }
+      {
+        "role": "men",
+        "count": 4
+      },
+      {
+        "role": "women",
+        "count": 2
+      },
+      {
+        "role": "children",
+        "count": 1
+      },
+      {
+        "role": "teacher",
+        "count": 3
+      }
     ],
     "author": "120",
     "language": "en",
-    "priMemberName": "Ramesh Yadav",
-    "priMemberDesignation": "Gram Panchayat Member",
-    "schoolRepresentativeName": "Sunita Devi",
-    "schoolRepresentativeDesignation": "Head Teacher"
+    "pri_member_information": {
+      "name": "Ramesh Yadav",
+      "designation": "Gram Panchayat Member"
+    },
+    "school_representative_information": {
+      "name": "Sunita Devi",
+      "designation": "Head Teacher"
+    }
   }
 }

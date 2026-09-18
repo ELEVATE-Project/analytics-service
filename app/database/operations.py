@@ -472,6 +472,34 @@ async def insert_or_update_submission(
                 if disc_date_str else None
             )
 
+            # Extract PRI member info (nested object or legacy flat keys)
+            pri_info = (
+                data.get("pri_member_information")
+                or data.get("priMemberInformation")
+                or data.get("pri_member_info")
+                or data.get("priMemberInfo")
+            )
+            if isinstance(pri_info, dict):
+                pri_member_name = pri_info.get("name") or data.get("priMemberName")
+                pri_member_designation = pri_info.get("designation") or data.get("priMemberDesignation")
+            else:
+                pri_member_name = data.get("priMemberName")
+                pri_member_designation = data.get("priMemberDesignation")
+
+            # Extract School Representative info (nested object or legacy flat keys)
+            school_info = (
+                data.get("school_representative_information")
+                or data.get("schoolRepresentativeInformation")
+                or data.get("school_representative_info")
+                or data.get("schoolRepresentativeInfo")
+            )
+            if isinstance(school_info, dict):
+                school_rep_name = school_info.get("name") or data.get("schoolRepresentativeName")
+                school_rep_designation = school_info.get("designation") or data.get("schoolRepresentativeDesignation")
+            else:
+                school_rep_name = data.get("schoolRepresentativeName")
+                school_rep_designation = data.get("schoolRepresentativeDesignation")
+
             if row_exists:
                 await conn.execute(
                     """
@@ -504,10 +532,10 @@ async def insert_or_update_submission(
                     masked_pdf_urls,
                     data.get("transcriptLink"),
                     discussion_date,
-                    data.get("priMemberName"),
-                    data.get("priMemberDesignation"),
-                    data.get("schoolRepresentativeName"),
-                    data.get("schoolRepresentativeDesignation"),
+                    pri_member_name,
+                    pri_member_designation,
+                    school_rep_name,
+                    school_rep_designation,
                 )
             else:
                 await conn.execute(
@@ -530,10 +558,10 @@ async def insert_or_update_submission(
                     masked_pdf_urls,
                     data.get("transcriptLink"),
                     discussion_date,
-                    data.get("priMemberName"),
-                    data.get("priMemberDesignation"),
-                    data.get("schoolRepresentativeName"),
-                    data.get("schoolRepresentativeDesignation"),
+                    pri_member_name,
+                    pri_member_designation,
+                    school_rep_name,
+                    school_rep_designation,
                 )
 
             # Dynamic KPI metrics: participantsData is a full snapshot when present;
