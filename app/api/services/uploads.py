@@ -330,6 +330,18 @@ def row_to_json(
             "participantsData": participants_data,
             "author": user_id,
             "language": get_csv_value(row_dict, expected_cols, "Language") or "en",
+            "pri_member_information": {
+                "name": get_csv_value(row_dict, expected_cols, "PRI Member Name") or None,
+                "designation": get_csv_value(row_dict, expected_cols, "PRI Member Designation") or None,
+            },
+            "school_representative_information": {
+                "name": get_csv_value(row_dict, expected_cols, "School Representative Name") or None,
+                "designation": get_csv_value(row_dict, expected_cols, "School Representative Designation") or None,
+            },
+            "priMemberName":                   get_csv_value(row_dict, expected_cols, "PRI Member Name") or None,
+            "priMemberDesignation":            get_csv_value(row_dict, expected_cols, "PRI Member Designation") or None,
+            "schoolRepresentativeName":        get_csv_value(row_dict, expected_cols, "School Representative Name") or None,
+            "schoolRepresentativeDesignation": get_csv_value(row_dict, expected_cols, "School Representative Designation") or None,
         }
     else:  # story
         data = {

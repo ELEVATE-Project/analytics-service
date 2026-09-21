@@ -108,6 +108,16 @@ async def _process_one_image(submission_id: str, tenant_code: str, sub_type: str
     else:
         resolved_url = url_str
 
+
+    # Split URL into components (scheme, netloc, path, query, fragment) so that
+    # unsafe characters like '#', '?', spaces, etc. inside the path are safely
+    # quoted without losing the path structure or corrupting query/fragment delimiters.
+    parsed = urllib.parse.urlsplit(resolved_url)
+    quoted_path = urllib.parse.quote(parsed.path, safe="/:-._~%!$&'()*+,;=@")
+    quoted_query = urllib.parse.quote(parsed.query, safe="=&-._~%!$'()*+,;:@/?") if parsed.query else ""
+    quoted_fragment = urllib.parse.quote(parsed.fragment, safe="-._~%!$&'()*+,;=@/?") if parsed.fragment else ""
+    resolved_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, quoted_path, quoted_query, quoted_fragment))
+
     if not _is_allowed_media_host(resolved_url):
         raise ValueError(
             f"Refusing to download image from disallowed host: {resolved_url!r} "
@@ -115,13 +125,15 @@ async def _process_one_image(submission_id: str, tenant_code: str, sub_type: str
         )
 
     parsed_path = urllib.parse.urlparse(resolved_url).path
-    parts = [p for p in parsed_path.split("/") if p]
+    # Unquote path so GCP blob key uses real characters (e.g. spaces)
+    unquoted_path = urllib.parse.unquote(parsed_path)
+    parts = [p for p in unquoted_path.split("/") if p]
     if len(parts) >= 2:
         actual_name = f"{parts[-2]}/{parts[-1]}"
     else:
         actual_name = parts[-1] if parts else f"{submission_id}_{i}.jpg"
 
-    ext = os.path.splitext(parsed_path)[1]
+    ext = os.path.splitext(unquoted_path)[1]
     if not ext:
         ext = ".jpg"
     filename = f"{submission_id}_{tenant_code}_{i}{ext}"
