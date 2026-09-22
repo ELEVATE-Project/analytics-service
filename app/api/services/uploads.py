@@ -13,7 +13,8 @@ from fastapi import BackgroundTasks
 
 from app.config import settings
 from app.api.validators.uploads import validate_columns
-from app.services.gcp_storage import upload_csv, fetch_csv
+from app.services.storage.factory import get_object_storage
+from app.services.storage.models import AccessMode
 from app.database import operations
 from app.database.db import db
 from app.services.ingestion_validation import validate_ingestion_schema
@@ -26,6 +27,28 @@ from app.api.exceptions import (
 )
 
 logger = logging.getLogger("analytics_service.api.services.uploads")
+
+def upload_csv(file_bytes: bytes, report_type: str, original_filename: str) -> str:
+    """Upload raw CSV bytes to the configured storage bucket and return the object key."""
+    if not settings.STORAGE_PRIVATE_BUCKET:
+        raise ValueError("STORAGE_PRIVATE_BUCKET is not configured in settings.")
+
+    prefix = (settings.STORAGE_CSV_PREFIX or settings.CSV_BLOB_UPLOADS).strip("/")
+    filename = f"{uuid.uuid4()}_{original_filename}"
+    object_key = f"{prefix}/{filename}" if prefix else filename
+
+    storage = get_object_storage()
+    obj = storage.upload_bytes(file_bytes, object_key, content_type="text/csv", access_mode=AccessMode.PRIVATE)
+    
+    logger.info(f"Uploaded CSV to object storage at {object_key}")
+    return obj.key
+
+def fetch_csv(bucket_path: str) -> bytes:
+    """Download CSV bytes from the configured storage bucket."""
+    storage = get_object_storage()
+    data = storage.download_bytes(bucket_path, access_mode=AccessMode.PRIVATE)
+    logger.info(f"Fetched CSV from object storage at {bucket_path} ({len(data)} bytes)")
+    return data
 
 
 # ---------------------------------------------------------------------------

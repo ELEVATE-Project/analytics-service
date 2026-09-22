@@ -37,6 +37,7 @@ from conftest import (
     make_fake_kafka_producer,
     make_fake_admin_client,
     make_fake_gcs_client,
+    make_fake_object_storage,
     install_fake_llm,
     install_failing_llm,
     install_fake_workflow_context,
@@ -2271,3 +2272,276 @@ def test_upload_032_stale_schedules_deleted_in_realtime_mode(monkeypatch):
 
         assert set(deleted_schedules) == {"daily-batch-processing"}
     asyncio.run(run_test())
+
+# =============================================================================
+# STORAGE ABSTRACTION (STORAGE-*)
+# =============================================================================
+from app.services.storage import StoredObject, AccessMode, StorageNotFoundError, StoragePermissionError, StorageTransientError, StorageError, resolve_url
+from app.services.storage.aws_s3 import AwsS3Storage
+from app.services.storage.gcp import GcpStorage
+from botocore.exceptions import ClientError, EndpointConnectionError
+import google.api_core.exceptions
+import app.api.services.uploads as uploads_service_module
+
+
+def test_storage_001_aws_upload_public_goes_to_public_bucket():
+    storage = AwsS3Storage(public_bucket="pub-b", private_bucket="priv-b", region="us-east-1")
+    storage.s3_client = MagicMock()
+
+    obj = storage.upload_file("local.jpg", "key.jpg", content_type="image/jpeg", access_mode=AccessMode.PUBLIC)
+
+    storage.s3_client.upload_file.assert_called_once_with(
+        "local.jpg", "pub-b", "key.jpg", ExtraArgs={"ContentType": "image/jpeg"}
+    )
+    assert obj.provider == "aws"
+    assert obj.bucket == "pub-b"
+    assert obj.access_mode == AccessMode.PUBLIC
+
+
+def test_storage_002_aws_upload_private_goes_to_private_bucket():
+    storage = AwsS3Storage(public_bucket="pub-b", private_bucket="priv-b", region="us-east-1")
+    storage.s3_client = MagicMock()
+
+    obj = storage.upload_file("local.jpg", "key.jpg", content_type="image/jpeg", access_mode=AccessMode.PRIVATE)
+
+    storage.s3_client.upload_file.assert_called_once_with(
+        "local.jpg", "priv-b", "key.jpg", ExtraArgs={"ContentType": "image/jpeg"}
+    )
+    assert obj.bucket == "priv-b"
+    assert obj.access_mode == AccessMode.PRIVATE
+
+
+def test_storage_003_aws_upload_bytes_private_goes_to_private_bucket():
+    storage = AwsS3Storage(public_bucket="pub-b", private_bucket="priv-b", region="us-east-1")
+    storage.s3_client = MagicMock()
+
+    obj = storage.upload_bytes(b"data", "key.csv", content_type="text/csv", access_mode=AccessMode.PRIVATE)
+
+    storage.s3_client.put_object.assert_called_once_with(
+        Bucket="priv-b", Key="key.csv", Body=b"data", ContentType="text/csv"
+    )
+    assert obj.bucket == "priv-b"
+    assert obj.access_mode == AccessMode.PRIVATE
+
+
+def test_storage_004_aws_upload_bytes_public_goes_to_public_bucket():
+    storage = AwsS3Storage(public_bucket="pub-b", private_bucket="priv-b", region="us-east-1")
+    storage.s3_client = MagicMock()
+
+    obj = storage.upload_bytes(b"data", "key.png", content_type="image/png", access_mode=AccessMode.PUBLIC)
+
+    storage.s3_client.put_object.assert_called_once_with(
+        Bucket="pub-b", Key="key.png", Body=b"data", ContentType="image/png"
+    )
+    assert obj.bucket == "pub-b"
+    assert obj.access_mode == AccessMode.PUBLIC
+
+
+def test_storage_005_aws_download_bytes_uses_private_bucket_by_default():
+    storage = AwsS3Storage(public_bucket="pub-b", private_bucket="priv-b", region="us-east-1")
+    mock_body = MagicMock()
+    mock_body.read.return_value = b"csv-bytes"
+    storage.s3_client = MagicMock()
+    storage.s3_client.get_object.return_value = {"Body": mock_body}
+
+    res = storage.download_bytes("key.csv", AccessMode.PRIVATE)
+    assert res == b"csv-bytes"
+    storage.s3_client.get_object.assert_called_once_with(Bucket="priv-b", Key="key.csv")
+
+
+def test_storage_006_aws_delete_object_private_bucket():
+    storage = AwsS3Storage(public_bucket="pub-b", private_bucket="priv-b", region="us-east-1")
+    storage.s3_client = MagicMock()
+    storage.delete_object("key.csv", AccessMode.PRIVATE)
+    storage.s3_client.delete_object.assert_called_once_with(Bucket="priv-b", Key="key.csv")
+
+
+def test_storage_007_aws_generate_access_url_private_bucket():
+    storage = AwsS3Storage(public_bucket="pub-b", private_bucket="priv-b", region="us-east-1")
+    storage.s3_client = MagicMock()
+    storage.s3_client.generate_presigned_url.return_value = "http://presigned"
+    url = storage.generate_access_url("key.csv", 3600, AccessMode.PRIVATE)
+    assert url == "http://presigned"
+    storage.s3_client.generate_presigned_url.assert_called_once_with(
+        "get_object", Params={"Bucket": "priv-b", "Key": "key.csv"}, ExpiresIn=3600
+    )
+
+
+def test_storage_008_aws_exception_mapping():
+    storage = AwsS3Storage(public_bucket="pub-b", private_bucket="priv-b", region="us-east-1")
+    storage.s3_client = MagicMock()
+
+    storage.s3_client.get_object.side_effect = ClientError({"Error": {"Code": "NoSuchKey"}}, "op")
+    try:
+        storage.download_bytes("key.csv", AccessMode.PRIVATE)
+        assert False
+    except StorageNotFoundError:
+        pass
+
+    storage.s3_client.get_object.side_effect = ClientError({"Error": {"Code": "AccessDenied"}}, "op")
+    try:
+        storage.download_bytes("key.csv", AccessMode.PRIVATE)
+        assert False
+    except StoragePermissionError:
+        pass
+
+    storage.s3_client.get_object.side_effect = EndpointConnectionError(endpoint_url="x")
+    try:
+        storage.download_bytes("key.csv", AccessMode.PRIVATE)
+        assert False
+    except StorageTransientError:
+        pass
+
+
+def test_storage_009_gcp_upload_public_goes_to_public_bucket(monkeypatch):
+    monkeypatch.setattr("app.services.storage.gcp.settings.PROJECT_ID", "p")
+    storage = GcpStorage(public_bucket="pub-b", private_bucket="priv-b")
+    mock_client = MagicMock()
+    mock_blob = MagicMock()
+    mock_client.bucket.return_value.blob.return_value = mock_blob
+    storage._get_client = MagicMock(return_value=mock_client)
+
+    obj = storage.upload_file("local.jpg", "key.jpg", content_type="image/jpeg", access_mode=AccessMode.PUBLIC)
+
+    mock_client.bucket.assert_called_once_with("pub-b")
+    mock_blob.upload_from_filename.assert_called_once_with("local.jpg", content_type="image/jpeg")
+    assert obj.bucket == "pub-b"
+    assert obj.access_mode == AccessMode.PUBLIC
+
+
+def test_storage_010_gcp_upload_private_goes_to_private_bucket(monkeypatch):
+    monkeypatch.setattr("app.services.storage.gcp.settings.PROJECT_ID", "p")
+    storage = GcpStorage(public_bucket="pub-b", private_bucket="priv-b")
+    mock_client = MagicMock()
+    mock_blob = MagicMock()
+    mock_client.bucket.return_value.blob.return_value = mock_blob
+    storage._get_client = MagicMock(return_value=mock_client)
+
+    obj = storage.upload_file("local.jpg", "key.jpg", content_type="image/jpeg", access_mode=AccessMode.PRIVATE)
+
+    mock_client.bucket.assert_called_once_with("priv-b")
+    mock_blob.upload_from_filename.assert_called_once_with("local.jpg", content_type="image/jpeg")
+    assert obj.bucket == "priv-b"
+    assert obj.access_mode == AccessMode.PRIVATE
+
+
+def test_storage_011_gcp_exception_mapping(monkeypatch):
+    monkeypatch.setattr("app.services.storage.gcp.settings.PROJECT_ID", "p")
+    storage = GcpStorage(public_bucket="pub-b", private_bucket="priv-b")
+    storage._get_client = MagicMock(side_effect=google.api_core.exceptions.NotFound("not found"))
+    try:
+        storage.download_bytes("k", AccessMode.PRIVATE)
+        assert False
+    except StorageNotFoundError:
+        pass
+
+    storage._get_client = MagicMock(side_effect=google.api_core.exceptions.Forbidden("forbidden"))
+    try:
+        storage.download_bytes("k", AccessMode.PRIVATE)
+        assert False
+    except StoragePermissionError:
+        pass
+
+
+def test_storage_012_resolve_url_public():
+    storage = MagicMock()
+    obj = StoredObject(provider="aws", bucket="pub-b", key="k", access_mode=AccessMode.PUBLIC)
+    url = resolve_url(obj, storage)
+    assert url == "https://pub-b.s3.amazonaws.com/k"
+    storage.generate_access_url.assert_not_called()
+
+
+def test_storage_013_resolve_url_private():
+    storage = MagicMock()
+    storage.generate_access_url.return_value = "https://signed"
+    obj = StoredObject(provider="aws", bucket="priv-b", key="k", access_mode=AccessMode.PRIVATE)
+    url = resolve_url(obj, storage)
+    assert url == "https://signed"
+    storage.generate_access_url.assert_called_once_with("k", expires_in_seconds=3600, access_mode=AccessMode.PRIVATE)
+
+
+def test_storage_014_csv_download_always_uses_private_bucket(monkeypatch):
+    """
+    CSV fetch in process_csv_inline must always target the private bucket.
+    """
+    import asyncio
+
+    mock_storage = make_fake_object_storage(download_bytes=b"id,Title\n1,test")
+    recorded = []
+
+    def capturing_download(object_key, access_mode):
+        recorded.append(access_mode)
+        return b"id,Title\n1,test"
+
+    mock_storage.download_bytes = MagicMock(side_effect=capturing_download)
+    monkeypatch.setattr(uploads_service_module, "get_object_storage", MagicMock(return_value=mock_storage))
+
+    conn = install_fake_db(monkeypatch, uploads_service_module)
+    conn.fetchrow.return_value = None
+    record = {
+        "id": 1, "report_type": "story", "cloud_storage_path": "path/to/file.csv",
+        "leader_category": "L", "program_name": "P", "meta_data": {"tenant_code": "mitra"},
+    }
+    monkeypatch.setattr(uploads_service_module.operations, "get_record", AsyncMock(return_value=record))
+    monkeypatch.setattr(uploads_service_module.operations, "update_status", AsyncMock())
+    monkeypatch.setattr(uploads_service_module, "load_csv", MagicMock())
+    monkeypatch.setattr(uploads_service_module, "validate_columns", MagicMock(return_value=(True, [])))
+    monkeypatch.setattr(uploads_service_module, "_push_rows_sync", MagicMock())
+
+    async def run():
+        await uploads_service_module.process_csv_inline(1)
+
+    asyncio.run(run())
+    assert recorded == [AccessMode.PRIVATE], f"Expected PRIVATE, got {recorded}"
+
+
+def test_storage_015_uploads_py_handle_upload_private(monkeypatch):
+    import asyncio
+
+    mock_storage = MagicMock()
+    mock_storage.upload_bytes.return_value = MagicMock(key="k")
+    monkeypatch.setattr(uploads_service_module, "get_object_storage", MagicMock(return_value=mock_storage))
+    monkeypatch.setattr(uploads_service_module.operations, "check_duplicate_file", AsyncMock(return_value=False))
+    monkeypatch.setattr(uploads_service_module.operations, "insert_upload_record", AsyncMock(return_value=1))
+    monkeypatch.setattr(uploads_service_module.settings, "PROCESSING_MODE", "batch")
+    monkeypatch.setattr(uploads_service_module.settings, "STORAGE_PRIVATE_BUCKET", "test-private-bucket")
+    monkeypatch.setattr(uploads_service_module, "validate_columns", MagicMock(return_value=(True, [])))
+
+    async def run():
+        background_tasks_mock = MagicMock()
+        await uploads_service_module.handle_upload("story", "p", "l", "t", "f", b"a,b\n1,2", background_tasks_mock)
+    asyncio.run(run())
+
+    mock_storage.upload_bytes.assert_called_once()
+    assert mock_storage.upload_bytes.call_args.kwargs.get("access_mode") == AccessMode.PRIVATE
+
+
+def test_storage_017_azure_upload_routing(monkeypatch):
+    from app.services.storage.azure import AzureStorage
+    monkeypatch.setattr("app.services.storage.azure.BlobServiceClient", MagicMock())
+    storage = AzureStorage(public_bucket="pub-c", private_bucket="priv-c", account_name="test")
+    mock_blob_client = MagicMock()
+    storage.blob_service_client.get_blob_client.return_value = mock_blob_client
+
+    obj_pub = storage.upload_bytes(b"data", "key.jpg", access_mode=AccessMode.PUBLIC)
+    storage.blob_service_client.get_blob_client.assert_called_with(container="pub-c", blob="key.jpg")
+    assert obj_pub.bucket == "pub-c"
+
+    obj_priv = storage.upload_bytes(b"data", "key.csv", access_mode=AccessMode.PRIVATE)
+    storage.blob_service_client.get_blob_client.assert_called_with(container="priv-c", blob="key.csv")
+    assert obj_priv.bucket == "priv-c"
+
+
+def test_storage_018_oci_upload_routing(monkeypatch):
+    from app.services.storage.oci import OciStorage
+    monkeypatch.setattr("oci.config.from_file", MagicMock(return_value={}))
+    monkeypatch.setattr("oci.object_storage.ObjectStorageClient", MagicMock())
+    storage = OciStorage(public_bucket="pub-b", private_bucket="priv-b", namespace="ns")
+
+    obj_pub = storage.upload_bytes(b"data", "key.jpg", access_mode=AccessMode.PUBLIC)
+    storage.client.put_object.assert_any_call("ns", "pub-b", "key.jpg", b"data", content_type="application/octet-stream")
+    assert obj_pub.bucket == "pub-b"
+
+    obj_priv = storage.upload_bytes(b"data", "key.csv", access_mode=AccessMode.PRIVATE)
+    storage.client.put_object.assert_any_call("ns", "priv-b", "key.csv", b"data", content_type="application/octet-stream")
+    assert obj_priv.bucket == "priv-b"

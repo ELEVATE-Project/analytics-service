@@ -15,6 +15,17 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
+from app.services.storage.factory import clear_storage_cache
+
+
+@pytest.fixture(autouse=True)
+def reset_storage_cache():
+    clear_storage_cache()
+    yield
+    clear_storage_cache()
+
 
 # ---------------------------------------------------------------------------
 # Fake asyncpg pool/connection — used for every db.pool.acquire() call site.
@@ -127,6 +138,49 @@ def make_fake_gcs_client(download_bytes: bytes = b""):
     client = MagicMock()
     client.bucket = MagicMock(return_value=bucket)
     return client, blob
+
+
+# ---------------------------------------------------------------------------
+# Fake ObjectStorage — used for every get_object_storage() call site.
+# ---------------------------------------------------------------------------
+from app.services.storage import StoredObject, AccessMode
+
+def make_fake_object_storage(download_bytes: bytes = b""):
+    """
+    A MagicMock standing in for ObjectStorage protocol.
+
+    Routing matches real adapters: PUBLIC → mock-public-bucket,
+    PRIVATE → mock-private-bucket.
+    """
+    storage = MagicMock()
+
+    def _bucket(access_mode: AccessMode) -> str:
+        return "mock-public-bucket" if access_mode == AccessMode.PUBLIC else "mock-private-bucket"
+
+    def fake_upload_file(local_file_path, object_key, content_type=None, access_mode=AccessMode.PRIVATE):
+        return StoredObject(
+            provider=    "mock",
+            bucket=      _bucket(access_mode),
+            key=         object_key,
+            access_mode= access_mode,
+            content_type=content_type,
+        )
+
+    def fake_upload_bytes(data, object_key, content_type=None, access_mode=AccessMode.PRIVATE):
+        return StoredObject(
+            provider=    "mock",
+            bucket=      _bucket(access_mode),
+            key=         object_key,
+            access_mode= access_mode,
+            content_type=content_type,
+        )
+
+    storage.upload_file   = MagicMock(side_effect=fake_upload_file)
+    storage.upload_bytes  = MagicMock(side_effect=fake_upload_bytes)
+    storage.download_bytes = MagicMock(return_value=download_bytes)
+    storage.delete_object  = MagicMock()
+    storage.generate_access_url = MagicMock(return_value="https://mock-signed-url")
+    return storage
 
 
 # ---------------------------------------------------------------------------
