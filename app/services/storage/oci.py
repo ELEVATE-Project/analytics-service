@@ -179,8 +179,9 @@ class OciStorage(ObjectStorage):
         cache_key = (bucket_name, object_key)
         now = datetime.now(timezone.utc)
         cached_par = self._pars.get(cache_key)
+        endpoint = f"https://objectstorage.{self.region}.oraclecloud.com"
         if cached_par and cached_par[1] > now:
-            return cached_par[0]
+            return f"{endpoint}{cached_par[0]}"
 
         try:
             par_details = oci.object_storage.models.CreatePreauthenticatedRequestDetails(
@@ -198,6 +199,10 @@ class OciStorage(ObjectStorage):
             
             full_path = response.data.full_path
             self._pars[cache_key] = (full_path, par_details.time_expires)
-            return full_path
+            return f"{endpoint}{full_path}"
         except Exception as e:
             self._handle_error(e)
+
+    def generate_public_url(self, object_key: str) -> str:
+        endpoint = f"https://objectstorage.{self.region}.oraclecloud.com"
+        return f"{endpoint}/n/{self.namespace}/b/{self.public_bucket}/o/{object_key}"

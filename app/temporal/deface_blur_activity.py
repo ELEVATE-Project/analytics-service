@@ -165,9 +165,9 @@ async def _process_one_image(submission_id: str, tenant_code: str, sub_type: str
 
         # 3. Upload to Object Storage
         if "story" in sub_type:
-            blob_prefix = settings.STORY_BLOB or "story_blurred_image"
+            blob_prefix = settings.STORAGE_STORY_PREFIX
         else:
-            blob_prefix = settings.DISCUSSION_BLOB or "dicussion_blurred_image"
+            blob_prefix = settings.STORAGE_DISCUSSION_PREFIX
 
         blob_name = f"{blob_prefix}/{actual_name}"
         content_type = mimetypes.guess_type(blob_name)[0] or "image/jpeg"

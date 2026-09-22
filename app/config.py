@@ -173,9 +173,9 @@ class Settings(BaseSettings):
     STORAGE_DISCUSSION_PREFIX: str = Field(default="discussion_blurred_image")
     STORAGE_CSV_PREFIX: str = Field(default="mitra_dashboard_api_output")
     STORAGE_SIGNED_URL_TTL_SECONDS: int = Field(default=3600)
-    STORAGE_CONNECT_TIMEOUT_SECONDS: int = Field(default=10)
-    STORAGE_READ_TIMEOUT_SECONDS: int = Field(default=60)
-    STORAGE_MAX_RETRIES: int = Field(default=3)
+    STORAGE_CONNECT_TIMEOUT_SECONDS: int = Field(default=10, gt=0)
+    STORAGE_READ_TIMEOUT_SECONDS: int = Field(default=60, gt=0)
+    STORAGE_MAX_RETRIES: int = Field(default=3, ge=0)
 
     # AWS S3 Configuration
     AWS_ACCESS_KEY_ID: str = Field(default="")

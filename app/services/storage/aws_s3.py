@@ -182,3 +182,6 @@ class AwsS3Storage(ObjectStorage):
             )
         except Exception as e:
             self._handle_error(e)
+
+    def generate_public_url(self, object_key: str) -> str:
+        return f"https://{self.public_bucket}.s3.amazonaws.com/{object_key}"

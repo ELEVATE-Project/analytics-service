@@ -51,23 +51,12 @@ class ObjectStorage(Protocol):
         access_mode:        AccessMode = AccessMode.PRIVATE,
     ) -> str: ...
 
+    def generate_public_url(self, object_key: str) -> str: ...
+
 
 # ---------------------------------------------------------------------------
 # URL helpers
 # ---------------------------------------------------------------------------
-
-def build_public_url(stored_object: StoredObject) -> str:
-    """Return the canonical public HTTP URL for a public-bucket object."""
-    if stored_object.provider == "aws":
-        return f"https://{stored_object.bucket}.s3.amazonaws.com/{stored_object.key}"
-    elif stored_object.provider == "gcp":
-        return f"https://storage.googleapis.com/{stored_object.bucket}/{stored_object.key}"
-    elif stored_object.provider == "azure":
-        return f"https://azure.blob.core.windows.net/{stored_object.bucket}/{stored_object.key}"
-    elif stored_object.provider == "oci":
-        return f"https://oci.objectstorage/{stored_object.bucket}/{stored_object.key}"
-    return f"https://{stored_object.bucket}/{stored_object.key}"
-
 
 def resolve_url(
     stored_object:      StoredObject,
@@ -81,7 +70,7 @@ def resolve_url(
     PRIVATE → pre-signed / signed URL valid for ``expires_in_seconds`` seconds.
     """
     if stored_object.access_mode == AccessMode.PUBLIC:
-        return build_public_url(stored_object)
+        return storage.generate_public_url(stored_object.key)
     return storage.generate_access_url(
         stored_object.key,
         expires_in_seconds = expires_in_seconds,

@@ -155,13 +155,13 @@ class AzureStorage(ObjectStorage):
         container_name = self._container_for(access_mode)
         try:
             if not self.account_key:
-                # If using managed identity, we need to generate a User Delegation SAS, which is more complex.
-                # Since connection string is the primary method in settings, we assume account key is present.
-                # For robustness, we can fallback to just blob url without SAS if key is missing
-                # (though this would fail for private containers if anonymous access is off).
-                logger.warning("Account key not found, cannot generate SAS URL. Returning base blob URL.")
-                blob_client = self.blob_service_client.get_blob_client(container=container_name, blob=object_key)
-                return blob_client.url
+                # Azure supports user-delegation SAS generation with Microsoft Entra credentials,
+                # but it requires additional setup. For now, raise an error instead of
+                # returning a plain blob URL that cannot authorize access to a private container.
+                raise StorageError(
+                    "Account key not found. Generating user-delegation SAS with managed identity "
+                    "is not yet supported."
+                )
 
             sas_token = generate_blob_sas(
                 account_name=self.account_name,
@@ -174,3 +174,7 @@ class AzureStorage(ObjectStorage):
             return f"https://{self.account_name}.blob.core.windows.net/{container_name}/{object_key}?{sas_token}"
         except Exception as e:
             self._handle_error(e)
+
+    def generate_public_url(self, object_key: str) -> str:
+        blob_client = self.blob_service_client.get_blob_client(container=self.public_bucket, blob=object_key)
+        return blob_client.url

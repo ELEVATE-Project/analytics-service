@@ -177,3 +177,6 @@ class GcpStorage(ObjectStorage):
             )
         except Exception as e:
             self._handle_error(e)
+
+    def generate_public_url(self, object_key: str) -> str:
+        return f"https://storage.googleapis.com/{self.public_bucket}/{object_key}"
