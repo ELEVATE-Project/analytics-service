@@ -186,7 +186,7 @@ async def _process_one_image(submission_id: str, tenant_code: str, sub_type: str
 
     except urllib.error.URLError as e:
         logger.warning(f"Failed to download image {resolved_url} (ignoring): {e}")
-        return {"relative_url": parsed_path, "public_url": None}
+        return None
     except Exception as e:
         logger.error(f"Failed face blurring for {resolved_url}: {e}")
         raise
@@ -251,8 +251,9 @@ async def deface_blur_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(r, BaseException):
             raise r
 
-    blurred_local_paths = [r["public_url"] for r in results]
-    relative_original_urls = [r["relative_url"] for r in results]
+    valid_results = [r for r in results if r is not None]
+    blurred_local_paths = [r["public_url"] for r in valid_results]
+    relative_original_urls = [r["relative_url"] for r in valid_results]
 
     # Save output paths back to DB — acquire fresh here rather than reusing a
     # connection held since the top, since the work above may have taken

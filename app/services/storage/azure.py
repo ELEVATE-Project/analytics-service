@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timedelta, timezone
 from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPermissions
-from azure.identity import DefaultAzureCredential
+from azure.identity import DefaultAzureCredential, ClientSecretCredential
 from azure.core.exceptions import ResourceNotFoundError, HttpResponseError, ServiceRequestError
 
 from app.config import settings
@@ -20,20 +20,38 @@ class AzureStorage(ObjectStorage):
       - AccessMode.PRIVATE → private_container (internal CSVs; no public access)
     """
 
-    def __init__(self, public_bucket: str, private_bucket: str, connection_string: str = "", account_name: str = ""):
+    def __init__(
+        self,
+        public_bucket: str,
+        private_bucket: str,
+        connection_string: str = "",
+        account_name: str = "",
+        client_id: str = "",
+        client_secret: str = "",
+        tenant_id: str = ""
+    ):
         self.public_bucket = public_bucket
         self.private_bucket = private_bucket
         
         if connection_string:
             self.blob_service_client = BlobServiceClient.from_connection_string(connection_string)
             self.account_name = self.blob_service_client.account_name
-            self.account_key = self.blob_service_client.credential.account_key
+            self.account_key = getattr(self.blob_service_client.credential, "account_key", None)
         else:
-            # Assuming Managed Identity / DefaultAzureCredential if only account_name is provided
             account_url = f"https://{account_name}.blob.core.windows.net"
-            self.blob_service_client = BlobServiceClient(account_url=account_url, credential=DefaultAzureCredential())
+            if client_id and client_secret and tenant_id:
+                credential = ClientSecretCredential(
+                    tenant_id=tenant_id,
+                    client_id=client_id,
+                    client_secret=client_secret
+                )
+            else:
+                credential = DefaultAzureCredential()
+                
+            self.blob_service_client = BlobServiceClient(account_url=account_url, credential=credential)
             self.account_name = account_name
-            self.account_key = None # DefaultAzureCredential doesn't expose account key
+            self.account_key = None
+
 
     def _container_for(self, access_mode: AccessMode) -> str:
         return self.public_bucket if access_mode == AccessMode.PUBLIC else self.private_bucket
@@ -176,5 +194,7 @@ class AzureStorage(ObjectStorage):
             self._handle_error(e)
 
     def generate_public_url(self, object_key: str) -> str:
-        blob_client = self.blob_service_client.get_blob_client(container=self.public_bucket, blob=object_key)
-        return blob_client.url
+        import urllib.parse
+        encoded_key = urllib.parse.quote(object_key, safe="/")
+        return f"/{self.public_bucket}/{encoded_key}"
+

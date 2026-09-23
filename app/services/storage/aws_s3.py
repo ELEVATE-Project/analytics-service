@@ -32,6 +32,9 @@ class AwsS3Storage(ObjectStorage):
         connect_timeout: int = 10,
         read_timeout:    int = 60,
         max_retries:     int = 3,
+        aws_access_key_id: str = "",
+        aws_secret_access_key: str = "",
+        aws_session_token: str = "",
     ):
         self.public_bucket  = public_bucket
         self.private_bucket = private_bucket
@@ -43,11 +46,17 @@ class AwsS3Storage(ObjectStorage):
             signature_version = "s3v4",
         )
 
-        self.s3_client = boto3.client(
-            "s3",
-            region_name = region,
-            config      = config,
-        )
+        client_kwargs = {
+            "region_name": region,
+            "config": config,
+        }
+        if aws_access_key_id and aws_secret_access_key:
+            client_kwargs["aws_access_key_id"] = aws_access_key_id
+            client_kwargs["aws_secret_access_key"] = aws_secret_access_key
+        if aws_session_token:
+            client_kwargs["aws_session_token"] = aws_session_token
+
+        self.s3_client = boto3.client("s3", **client_kwargs)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -184,4 +193,6 @@ class AwsS3Storage(ObjectStorage):
             self._handle_error(e)
 
     def generate_public_url(self, object_key: str) -> str:
-        return f"https://{self.public_bucket}.s3.amazonaws.com/{object_key}"
+        import urllib.parse
+        encoded_key = urllib.parse.quote(object_key, safe="/")
+        return f"/{self.public_bucket}/{encoded_key}"

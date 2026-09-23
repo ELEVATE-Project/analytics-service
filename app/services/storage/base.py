@@ -51,7 +51,11 @@ class ObjectStorage(Protocol):
         access_mode:        AccessMode = AccessMode.PRIVATE,
     ) -> str: ...
 
-    def generate_public_url(self, object_key: str) -> str: ...
+    def generate_public_url(self, object_key: str) -> str:
+        """
+        Returns a relative public URL (e.g., /{bucket}/{key}) for the given object key.
+        """
+        ...
 
 
 # ---------------------------------------------------------------------------

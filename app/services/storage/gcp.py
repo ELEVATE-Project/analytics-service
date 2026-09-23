@@ -29,11 +29,8 @@ class GcpStorage(ObjectStorage):
         self.public_bucket  = public_bucket
         self.private_bucket = private_bucket
         self.project_id     = settings.PROJECT_ID
-
-    def _bucket_for(self, access_mode: AccessMode) -> str:
-        return self.public_bucket if access_mode == AccessMode.PUBLIC else self.private_bucket
-
-    def _get_credentials(self) -> service_account.Credentials:
+        
+        # Initialize credentials and client once to avoid recreating them on every operation
         cred_dict = {
             "type":                        settings.TYPE,
             "project_id":                  settings.PROJECT_ID,
@@ -47,10 +44,11 @@ class GcpStorage(ObjectStorage):
             "client_x509_cert_url":        settings.CLIENT_X509_CERT_URL,
             "universe_domain":             settings.UNIVERSE_DOMAIN,
         }
-        return service_account.Credentials.from_service_account_info(cred_dict)
+        credentials = service_account.Credentials.from_service_account_info(cred_dict)
+        self._client = storage.Client(credentials=credentials, project=self.project_id)
 
-    def _get_client(self) -> storage.Client:
-        return storage.Client(credentials=self._get_credentials(), project=self.project_id)
+    def _bucket_for(self, access_mode: AccessMode) -> str:
+        return self.public_bucket if access_mode == AccessMode.PUBLIC else self.private_bucket
 
     def _handle_error(self, e: Exception) -> None:
         if isinstance(e, NotFound):
@@ -76,8 +74,7 @@ class GcpStorage(ObjectStorage):
     ) -> StoredObject:
         bucket_name = self._bucket_for(access_mode)
         try:
-            client = self._get_client()
-            blob   = client.bucket(bucket_name).blob(object_key)
+            blob   = self._client.bucket(bucket_name).blob(object_key)
             blob.upload_from_filename(local_file_path, content_type=content_type)
 
             # NOTE: We no longer set object ACLs (blob.make_public()) since buckets
@@ -107,8 +104,7 @@ class GcpStorage(ObjectStorage):
     ) -> StoredObject:
         bucket_name = self._bucket_for(access_mode)
         try:
-            client = self._get_client()
-            blob   = client.bucket(bucket_name).blob(object_key)
+            blob   = self._client.bucket(bucket_name).blob(object_key)
             blob.upload_from_string(data, content_type=content_type)
             # Public access is managed via Uniform Bucket-Level Access on the bucket.
 
@@ -138,8 +134,7 @@ class GcpStorage(ObjectStorage):
     ) -> bytes:
         bucket_name = self._bucket_for(access_mode)
         try:
-            client = self._get_client()
-            return client.bucket(bucket_name).blob(object_key).download_as_bytes()
+            return self._client.bucket(bucket_name).blob(object_key).download_as_bytes()
         except Exception as e:
             self._handle_error(e)
 
@@ -154,8 +149,7 @@ class GcpStorage(ObjectStorage):
     ) -> None:
         bucket_name = self._bucket_for(access_mode)
         try:
-            client = self._get_client()
-            client.bucket(bucket_name).blob(object_key).delete()
+            self._client.bucket(bucket_name).blob(object_key).delete()
         except Exception as e:
             self._handle_error(e)
 
@@ -168,8 +162,7 @@ class GcpStorage(ObjectStorage):
         """Generate a V4 signed URL. Meaningful only for private-bucket objects."""
         bucket_name = self._bucket_for(access_mode)
         try:
-            client = self._get_client()
-            blob   = client.bucket(bucket_name).blob(object_key)
+            blob   = self._client.bucket(bucket_name).blob(object_key)
             return blob.generate_signed_url(
                 version    = "v4",
                 expiration = timedelta(seconds=expires_in_seconds),
@@ -179,4 +172,6 @@ class GcpStorage(ObjectStorage):
             self._handle_error(e)
 
     def generate_public_url(self, object_key: str) -> str:
-        return f"https://storage.googleapis.com/{self.public_bucket}/{object_key}"
+        import urllib.parse
+        encoded_key = urllib.parse.quote(object_key, safe="/")
+        return f"/{self.public_bucket}/{encoded_key}"

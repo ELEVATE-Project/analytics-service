@@ -204,5 +204,6 @@ class OciStorage(ObjectStorage):
             self._handle_error(e)
 
     def generate_public_url(self, object_key: str) -> str:
-        endpoint = f"https://objectstorage.{self.region}.oraclecloud.com"
-        return f"{endpoint}/n/{self.namespace}/b/{self.public_bucket}/o/{object_key}"
+        import urllib.parse
+        encoded_key = urllib.parse.quote(object_key, safe="/")
+        return f"/{self.public_bucket}/{encoded_key}"

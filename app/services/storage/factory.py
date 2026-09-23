@@ -4,8 +4,10 @@ from .gcp import GcpStorage
 from .aws_s3 import AwsS3Storage
 from .azure import AzureStorage
 from .oci import OciStorage
+import threading
 
 _storage_adapter: ObjectStorage | None = None
+_storage_lock = threading.Lock()
 
 
 def validate_storage_config(provider: str, settings_obj) -> None:
@@ -42,6 +44,10 @@ def get_object_storage() -> ObjectStorage:
     if _storage_adapter is not None:
         return _storage_adapter
 
+    with _storage_lock:
+        if _storage_adapter is not None:
+            return _storage_adapter
+
     provider = settings.STORAGE_PROVIDER.lower()
     validate_storage_config(provider, settings)
 
@@ -58,6 +64,9 @@ def get_object_storage() -> ObjectStorage:
             connect_timeout = settings.STORAGE_CONNECT_TIMEOUT_SECONDS,
             read_timeout    = settings.STORAGE_READ_TIMEOUT_SECONDS,
             max_retries     = settings.STORAGE_MAX_RETRIES,
+            aws_access_key_id = settings.AWS_ACCESS_KEY_ID,
+            aws_secret_access_key = settings.AWS_SECRET_ACCESS_KEY,
+            aws_session_token = settings.AWS_SESSION_TOKEN,
         )
     elif provider == "azure":
         _storage_adapter = AzureStorage(
@@ -65,6 +74,9 @@ def get_object_storage() -> ObjectStorage:
             private_bucket    = settings.STORAGE_PRIVATE_BUCKET,
             connection_string = settings.AZURE_STORAGE_CONNECTION_STRING,
             account_name      = settings.AZURE_STORAGE_ACCOUNT_NAME,
+            client_id         = settings.AZURE_CLIENT_ID,
+            client_secret     = settings.AZURE_CLIENT_SECRET,
+            tenant_id         = settings.AZURE_TENANT_ID,
         )
     elif provider == "oci":
         _storage_adapter = OciStorage(
