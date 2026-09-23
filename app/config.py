@@ -160,9 +160,12 @@ class Settings(BaseSettings):
     DISCUSSION_BLOB: str = Field(default="")
     MEDIA_BASE_URL: str = Field(default="")
     # Image Blur CPU Throttling
-    # Downscale resolution for face-detection neural network (WxH).
-    # Only affects detection speed — blur is applied to the original full-res image.
-    DEFACE_SCALE: str = Field(default="640x360")
+    # images larger than this cap are proportionally downscaled to fit within it
+    # (saves CPU/RAM on high-res phone photos). Leave empty to always run at
+    # native resolution regardless of image size (safest, most accurate).
+    DEFACE_SCALE: str = Field(default="1920x1080")
+    # deface's built-in default is 0.2; we lower it to 0.1 for group photos.
+    DEFACE_THRESHOLD: float = Field(default=0.05)
 
     model_config = SettingsConfigDict(
         env_file=".env",
