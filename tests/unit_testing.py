@@ -2386,11 +2386,20 @@ def test_storage_009_aws_exception_mapping():
 
 def test_storage_009_gcp_upload_public_goes_to_public_bucket(monkeypatch):
     monkeypatch.setattr("app.services.storage.gcp.settings.PROJECT_ID", "p")
-    storage = GcpStorage(public_bucket="pub-b", private_bucket="priv-b")
+    
     mock_client = MagicMock()
     mock_blob = MagicMock()
     mock_client.bucket.return_value.blob.return_value = mock_blob
-    storage._get_client = MagicMock(return_value=mock_client)
+    monkeypatch.setattr(
+        "app.services.storage.gcp.storage.Client",
+        MagicMock(return_value=mock_client),
+    )
+    monkeypatch.setattr(
+        "app.services.storage.gcp.service_account.Credentials.from_service_account_info",
+        MagicMock(return_value=MagicMock()),
+    )
+    
+    storage = GcpStorage(public_bucket="pub-b", private_bucket="priv-b")
 
     obj = storage.upload_file("local.jpg", "key.jpg", content_type="image/jpeg", access_mode=AccessMode.PUBLIC)
 
@@ -2402,11 +2411,20 @@ def test_storage_009_gcp_upload_public_goes_to_public_bucket(monkeypatch):
 
 def test_storage_010_gcp_upload_private_goes_to_private_bucket(monkeypatch):
     monkeypatch.setattr("app.services.storage.gcp.settings.PROJECT_ID", "p")
-    storage = GcpStorage(public_bucket="pub-b", private_bucket="priv-b")
+    
     mock_client = MagicMock()
     mock_blob = MagicMock()
     mock_client.bucket.return_value.blob.return_value = mock_blob
-    storage._get_client = MagicMock(return_value=mock_client)
+    monkeypatch.setattr(
+        "app.services.storage.gcp.storage.Client",
+        MagicMock(return_value=mock_client),
+    )
+    monkeypatch.setattr(
+        "app.services.storage.gcp.service_account.Credentials.from_service_account_info",
+        MagicMock(return_value=MagicMock()),
+    )
+    
+    storage = GcpStorage(public_bucket="pub-b", private_bucket="priv-b")
 
     obj = storage.upload_file("local.jpg", "key.jpg", content_type="image/jpeg", access_mode=AccessMode.PRIVATE)
 
@@ -2418,15 +2436,26 @@ def test_storage_010_gcp_upload_private_goes_to_private_bucket(monkeypatch):
 
 def test_storage_011_gcp_exception_mapping(monkeypatch):
     monkeypatch.setattr("app.services.storage.gcp.settings.PROJECT_ID", "p")
+    
+    mock_client = MagicMock()
+    monkeypatch.setattr(
+        "app.services.storage.gcp.storage.Client",
+        MagicMock(return_value=mock_client),
+    )
+    monkeypatch.setattr(
+        "app.services.storage.gcp.service_account.Credentials.from_service_account_info",
+        MagicMock(return_value=MagicMock()),
+    )
     storage = GcpStorage(public_bucket="pub-b", private_bucket="priv-b")
-    storage._get_client = MagicMock(side_effect=google.api_core.exceptions.NotFound("not found"))
+
+    mock_client.bucket.return_value.blob.return_value.download_as_bytes.side_effect = google.api_core.exceptions.NotFound("not found")
     try:
         storage.download_bytes("k", AccessMode.PRIVATE)
         assert False
     except StorageNotFoundError:
         pass
 
-    storage._get_client = MagicMock(side_effect=google.api_core.exceptions.Forbidden("forbidden"))
+    mock_client.bucket.return_value.blob.return_value.download_as_bytes.side_effect = google.api_core.exceptions.Forbidden("forbidden")
     try:
         storage.download_bytes("k", AccessMode.PRIVATE)
         assert False
@@ -2436,9 +2465,10 @@ def test_storage_011_gcp_exception_mapping(monkeypatch):
 
 def test_storage_012_resolve_url_public():
     storage = MagicMock()
+    storage.generate_public_url.return_value = "/pub-b/k"
     obj = StoredObject(provider="aws", bucket="pub-b", key="k", access_mode=AccessMode.PUBLIC)
     url = resolve_url(obj, storage)
-    assert url == "https://pub-b.s3.amazonaws.com/k"
+    assert url == "/pub-b/k"
     storage.generate_access_url.assert_not_called()
 
 
