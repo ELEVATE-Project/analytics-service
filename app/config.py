@@ -204,6 +204,32 @@ class Settings(BaseSettings):
             raise ValueError(f"Invalid JSON configuration for {info.field_name}: {e}") from e
         return v
 
+    @field_validator("DEFACE_SCALE")
+    @classmethod
+    def validate_deface_scale(cls, v: str) -> str:
+        if v is None:
+            return v
+        if not isinstance(v, str):
+            raise ValueError(f"DEFACE_SCALE must be a string, got {type(v).__name__}.")
+        s = v.strip()
+        if not s:
+            return v
+        parts = s.lower().split("x")
+        if len(parts) != 2:
+            raise ValueError(
+                f"DEFACE_SCALE must be empty or in 'WIDTHxHEIGHT' format, got {v!r}."
+            )
+        for part in parts:
+            try:
+                val = int(part.strip())
+                if val <= 0:
+                    raise ValueError
+            except ValueError:
+                raise ValueError(
+                    f"DEFACE_SCALE dimensions must be positive integers, got {v!r}."
+                ) from None
+        return v
+
     @field_validator("LOG_DIR")
     @classmethod
     def validate_log_dir(cls, v: str) -> str:
