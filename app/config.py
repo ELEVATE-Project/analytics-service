@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from typing import Dict, Any, List
 from pydantic import Field, field_validator, model_validator
@@ -229,6 +230,17 @@ class Settings(BaseSettings):
                     f"DEFACE_SCALE dimensions must be positive integers, got {v!r}."
                 ) from None
         return v
+
+    @field_validator("DEFACE_THRESHOLD")
+    @classmethod
+    def validate_deface_threshold(cls, v: float) -> float:
+        if v is None or not math.isfinite(v):
+            raise ValueError(f"DEFACE_THRESHOLD must be a finite float, got {v!r}.")
+        if not (0.0 <= float(v) < 1.0):
+            raise ValueError(
+                f"DEFACE_THRESHOLD must be between 0 (inclusive) and 1 (exclusive), got {v!r}."
+            )
+        return float(v)
 
     @field_validator("LOG_DIR")
     @classmethod
