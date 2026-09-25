@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from typing import Dict, Any, List
 from pydantic import Field, field_validator, model_validator
@@ -160,9 +161,12 @@ class Settings(BaseSettings):
     DISCUSSION_BLOB: str = Field(default="")
     MEDIA_BASE_URL: str = Field(default="")
     # Image Blur CPU Throttling
-    # Downscale resolution for face-detection neural network (WxH).
-    # Only affects detection speed — blur is applied to the original full-res image.
-    DEFACE_SCALE: str = Field(default="640x360")
+    # images larger than this cap are proportionally downscaled to fit within it
+    # (saves CPU/RAM on high-res phone photos). Leave empty to always run at
+    # native resolution regardless of image size (safest, most accurate).
+    DEFACE_SCALE: str = Field(default="1280x720")
+    # Face detection confidence threshold (0.0 - 1.0). Lower threshold detects smaller/group faces.
+    DEFACE_THRESHOLD: float = Field(default=0.2)
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -200,6 +204,43 @@ class Settings(BaseSettings):
         except (json.JSONDecodeError, TypeError) as e:
             raise ValueError(f"Invalid JSON configuration for {info.field_name}: {e}") from e
         return v
+
+    @field_validator("DEFACE_SCALE")
+    @classmethod
+    def validate_deface_scale(cls, v: str) -> str:
+        if v is None:
+            return v
+        if not isinstance(v, str):
+            raise ValueError(f"DEFACE_SCALE must be a string, got {type(v).__name__}.")
+        s = v.strip()
+        if not s:
+            return v
+        parts = s.lower().split("x")
+        if len(parts) != 2:
+            raise ValueError(
+                f"DEFACE_SCALE must be empty or in 'WIDTHxHEIGHT' format, got {v!r}."
+            )
+        for part in parts:
+            try:
+                val = int(part.strip())
+                if val <= 0:
+                    raise ValueError
+            except ValueError:
+                raise ValueError(
+                    f"DEFACE_SCALE dimensions must be positive integers, got {v!r}."
+                ) from None
+        return v
+
+    @field_validator("DEFACE_THRESHOLD")
+    @classmethod
+    def validate_deface_threshold(cls, v: float) -> float:
+        if v is None or not math.isfinite(v):
+            raise ValueError(f"DEFACE_THRESHOLD must be a finite float, got {v!r}.")
+        if not (0.0 <= float(v) < 1.0):
+            raise ValueError(
+                f"DEFACE_THRESHOLD must be between 0 (inclusive) and 1 (exclusive), got {v!r}."
+            )
+        return float(v)
 
     @field_validator("LOG_DIR")
     @classmethod
