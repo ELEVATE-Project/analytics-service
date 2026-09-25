@@ -2,6 +2,8 @@ import logging
 import os
 import urllib.request
 import urllib.parse
+import urllib.error
+import mimetypes
 import asyncio
 import concurrent.futures
 import functools
@@ -13,7 +15,7 @@ from app.config import settings
 from app.database.db import db
 from app.database.operations import get_submission_type_and_payload
 from app.services.image_blur import anonymize_face
-from app.services.gcp_storage import upload_to_gcp
+from app.services.storage import get_object_storage, AccessMode, resolve_url
 
 logger = logging.getLogger("analytics_service.temporal.activities")
 
@@ -230,17 +232,30 @@ async def _process_one_image(submission_id: str, tenant_code: str, sub_type: str
                 threshold=deface_threshold,
             )
 
-        # 3. Upload to GCP Storage
+        # 3. Upload to Object Storage
         if "story" in sub_type:
-            blob_prefix = settings.STORY_BLOB or "story_blurred_image"
+            blob_prefix = settings.STORAGE_STORY_PREFIX
         else:
-            blob_prefix = settings.DISCUSSION_BLOB or "dicussion_blurred_image"
+            blob_prefix = settings.STORAGE_DISCUSSION_PREFIX
 
         blob_name = f"{blob_prefix}/{actual_name}"
-        public_url = await _run_in_image_executor(upload_to_gcp, str(output_path), blob_name)
+        content_type = mimetypes.guess_type(blob_name)[0] or "image/jpeg"
+
+        storage = get_object_storage()
+        stored_obj = await _run_in_image_executor(
+            storage.upload_file,
+            local_file_path=str(output_path),
+            object_key=blob_name,
+            content_type=content_type,
+            access_mode=AccessMode.PUBLIC
+        )
+        public_url = resolve_url(stored_obj, storage)
 
         return {"relative_url": parsed_path, "public_url": public_url}
 
+    except urllib.error.URLError as e:
+        logger.warning(f"Failed to download image {resolved_url} (ignoring): {e}")
+        return None
     except Exception as e:
         logger.error(f"Failed face blurring for {resolved_url}: {e}")
         raise
@@ -305,8 +320,9 @@ async def deface_blur_activity(params: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(r, BaseException):
             raise r
 
-    blurred_local_paths = [r["public_url"] for r in results]
-    relative_original_urls = [r["relative_url"] for r in results]
+    valid_results = [r for r in results if r is not None]
+    blurred_local_paths = [r["public_url"] for r in valid_results]
+    relative_original_urls = [r["relative_url"] for r in valid_results]
 
     # Save output paths back to DB — acquire fresh here rather than reusing a
     # connection held since the top, since the work above may have taken

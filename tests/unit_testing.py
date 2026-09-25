@@ -37,6 +37,7 @@ from conftest import (
     make_fake_kafka_producer,
     make_fake_admin_client,
     make_fake_gcs_client,
+    make_fake_object_storage,
     install_fake_llm,
     install_failing_llm,
     install_fake_workflow_context,
@@ -68,10 +69,7 @@ def _find_execute_call(conn, *needles):
     return matches[0]
 
 
-# =============================================================================
 # KAFKA INGESTION (KAFKA-*)
-# =============================================================================
-
 import app.kafka.consumer as consumer_module
 
 
@@ -560,10 +558,7 @@ def test_kafka_025_offset_commits_only_after_success(monkeypatch):
     asyncio.run(run_test())
 
 
-# =============================================================================
 # SECURITY & LOGGING (SEC-*)
-# =============================================================================
-
 def test_sec_001_raw_payload_never_logged_in_plaintext(monkeypatch, caplog):
     async def run_test():
         consumer, insert_mock, _, _ = _consumer_with_mocks(monkeypatch)
@@ -643,10 +638,7 @@ def test_sec_004_thematic_malformed_llm_response_never_logs_full_content(monkeyp
     asyncio.run(run_test())
 
 
-# =============================================================================
 # CONFIG & SETTINGS (CONFIG-*)
-# =============================================================================
-
 from app.config import Settings
 
 
@@ -728,10 +720,7 @@ def test_config_009_unrecognized_submission_type_raises_for_kafka_schema():
         s.get_kafka_ingestion_schema(None)
 
 
-# =============================================================================
 # DATABASE OPERATIONS (DB-*)
-# =============================================================================
-
 from app.database.operations import (
     _normalize_statement_list,
     insert_or_update_submission,
@@ -807,9 +796,7 @@ def test_db_006_duplicate_session_id_raises_clear_error():
     asyncio.run(run_test())
 
 
-# =============================================================================
 # THEMATIC CLASSIFICATION (THEME-*)
-# =============================================================================
 # THEME-018 excluded: "SentenceTransformer calls run off the event loop" is a
 # live concurrent-progress observation, not assertable via mocks.
 
@@ -1109,10 +1096,7 @@ def test_theme_017_embedded_fake_index_fragment_not_misparsed(monkeypatch):
     asyncio.run(run_test())
 
 
-# =============================================================================
 # PII & ABUSIVE LANGUAGE DETECTION (PII-*)
-# =============================================================================
-
 import app.temporal.pii_and_abusive_activity as pii_module
 
 
@@ -1313,11 +1297,7 @@ def test_pii_012_scalar_column_single_entry_list_unwrapped(monkeypatch):
     asyncio.run(run_test())
 
 
-
-# =============================================================================
 # ENVIRONMENT DETECTION (ENV-*)
-# =============================================================================
-
 import app.temporal.environment_activity as environment_module
 
 
@@ -1386,9 +1366,7 @@ def test_env_003_prompt_loader_uses_environment_prompt_name():
     asyncio.run(run_test())
 
 
-# =============================================================================
 # STORY RATING (RATING-*)
-# =============================================================================
 # RATING-009 excluded: "no DB connection held during OpenRouter/PDF calls" is a
 # live connection-pool-contention observation, not assertable via mocks.
 
@@ -1539,9 +1517,7 @@ def test_rating_008_relative_pdf_url_without_media_base_url_raises(monkeypatch):
         rating_module._resolve_url("relative/path/to/file.pdf")
 
 
-# =============================================================================
 # BATCH PROCESSING WORKFLOW (BATCH-*)
-# =============================================================================
 # BATCH-006 excluded: the SKIP overlap policy is enforced by Temporal's own
 # server-side scheduler, not application code — nothing here to unit test.
 
@@ -1670,10 +1646,7 @@ def test_batch_005_exceeding_max_per_run_triggers_continue_as_new(monkeypatch):
     asyncio.run(run_test())
 
 
-# =============================================================================
 # REAL-TIME / MODE HANDLING (MODE-*)
-# =============================================================================
-
 def test_mode_001_real_time_triggers_workflow_immediately(monkeypatch):
     async def run_test():
         consumer, insert_mock, _, trigger_mock = _consumer_with_mocks(monkeypatch)
@@ -1726,10 +1699,7 @@ def test_mode_003b_temporal_connect_failure_leaves_client_none(monkeypatch):
     asyncio.run(run_test())
 
 
-# =============================================================================
 # LLM & COST TRACKING (LLM-*)
-# =============================================================================
-
 from app.services.llm import openrouter_chat_completion, split_llm_usage
 
 
@@ -1766,10 +1736,7 @@ def test_llm_003_fallback_estimate_only_when_no_usage_ever_obtained(monkeypatch)
     asyncio.run(run_test())
 
 
-# =============================================================================
 # CSV UPLOAD & PROCESS API (UPLOAD-*)
-# =============================================================================
-
 from app.api.router import api_router
 from app.api.exceptions import register_exception_handlers
 import app.database.operations as operations_module
@@ -2271,3 +2238,355 @@ def test_upload_032_stale_schedules_deleted_in_realtime_mode(monkeypatch):
 
         assert set(deleted_schedules) == {"daily-batch-processing"}
     asyncio.run(run_test())
+
+# STORAGE ABSTRACTION (STORAGE-*)
+from app.services.storage import StoredObject, AccessMode, StorageNotFoundError, StoragePermissionError, StorageTransientError, StorageError, resolve_url
+from app.services.storage.aws_s3 import AwsS3Storage
+from app.services.storage.gcp import GcpStorage
+from botocore.exceptions import ClientError, EndpointConnectionError
+import google.api_core.exceptions
+import app.api.services.uploads as uploads_service_module
+
+
+def test_storage_001_aws_upload_public_goes_to_public_bucket():
+    storage = AwsS3Storage(public_bucket="pub-b", private_bucket="priv-b", region="us-east-1")
+    storage.s3_client = MagicMock()
+
+    obj = storage.upload_file("local.jpg", "key.jpg", content_type="image/jpeg", access_mode=AccessMode.PUBLIC)
+
+    storage.s3_client.upload_file.assert_called_once_with(
+        "local.jpg", "pub-b", "key.jpg", ExtraArgs={"ContentType": "image/jpeg"}
+    )
+    assert obj.provider == "aws"
+    assert obj.bucket == "pub-b"
+    assert obj.access_mode == AccessMode.PUBLIC
+
+
+def test_storage_002_aws_upload_private_goes_to_private_bucket():
+    storage = AwsS3Storage(public_bucket="pub-b", private_bucket="priv-b", region="us-east-1")
+    storage.s3_client = MagicMock()
+
+    obj = storage.upload_file("local.jpg", "key.jpg", content_type="image/jpeg", access_mode=AccessMode.PRIVATE)
+
+    storage.s3_client.upload_file.assert_called_once_with(
+        "local.jpg", "priv-b", "key.jpg", ExtraArgs={"ContentType": "image/jpeg"}
+    )
+    assert obj.bucket == "priv-b"
+    assert obj.access_mode == AccessMode.PRIVATE
+
+
+def test_storage_003_aws_upload_bytes_private_goes_to_private_bucket():
+    storage = AwsS3Storage(public_bucket="pub-b", private_bucket="priv-b", region="us-east-1")
+    storage.s3_client = MagicMock()
+
+    obj = storage.upload_bytes(b"data", "key.csv", content_type="text/csv", access_mode=AccessMode.PRIVATE)
+
+    storage.s3_client.put_object.assert_called_once_with(
+        Bucket="priv-b", Key="key.csv", Body=b"data", ContentType="text/csv"
+    )
+    assert obj.bucket == "priv-b"
+    assert obj.access_mode == AccessMode.PRIVATE
+
+
+def test_storage_004_aws_upload_bytes_public_goes_to_public_bucket():
+    storage = AwsS3Storage(public_bucket="pub-b", private_bucket="priv-b", region="us-east-1")
+    storage.s3_client = MagicMock()
+
+    obj = storage.upload_bytes(b"data", "key.png", content_type="image/png", access_mode=AccessMode.PUBLIC)
+
+    storage.s3_client.put_object.assert_called_once_with(
+        Bucket="pub-b", Key="key.png", Body=b"data", ContentType="image/png"
+    )
+    assert obj.bucket == "pub-b"
+    assert obj.access_mode == AccessMode.PUBLIC
+
+
+def test_storage_005_aws_download_bytes_uses_private_bucket_by_default():
+    storage = AwsS3Storage(public_bucket="pub-b", private_bucket="priv-b", region="us-east-1")
+    mock_body = MagicMock()
+    mock_body.read.return_value = b"csv-bytes"
+    storage.s3_client = MagicMock()
+    storage.s3_client.get_object.return_value = {"Body": mock_body}
+
+    res = storage.download_bytes("key.csv", AccessMode.PRIVATE)
+    assert res == b"csv-bytes"
+    storage.s3_client.get_object.assert_called_once_with(Bucket="priv-b", Key="key.csv")
+
+
+def test_storage_006_aws_delete_object_private_bucket():
+    storage = AwsS3Storage(public_bucket="pub-b", private_bucket="priv-b", region="us-east-1")
+    storage.s3_client = MagicMock()
+    storage.delete_object("key.csv", AccessMode.PRIVATE)
+    storage.s3_client.delete_object.assert_called_once_with(Bucket="priv-b", Key="key.csv")
+
+
+def test_storage_007_aws_generate_access_url_private_bucket():
+    storage = AwsS3Storage(public_bucket="pub-b", private_bucket="priv-b", region="us-east-1")
+    storage.s3_client = MagicMock()
+    storage.s3_client.generate_presigned_url.return_value = "http://presigned"
+    url = storage.generate_access_url("key.csv", 3600, AccessMode.PRIVATE)
+    assert url == "http://presigned"
+    storage.s3_client.generate_presigned_url.assert_called_once_with(
+        "get_object", Params={"Bucket": "priv-b", "Key": "key.csv"}, ExpiresIn=3600
+    )
+
+
+def test_storage_008_aws_uses_env_defaults_when_values_are_omitted(monkeypatch):
+    import app.services.storage.aws_s3 as aws_s3_module
+
+    monkeypatch.setattr(
+        aws_s3_module,
+        "settings",
+        type("S", (), {
+            "STORAGE_CONNECT_TIMEOUT_SECONDS": 42,
+            "STORAGE_READ_TIMEOUT_SECONDS": 90,
+            "STORAGE_MAX_RETRIES": 7,
+            "STORAGE_REGION": "ap-southeast-2",
+            "AWS_ACCESS_KEY_ID": "env-key",
+            "AWS_SECRET_ACCESS_KEY": "env-secret",
+            "AWS_SESSION_TOKEN": "env-token",
+        })(),
+    )
+
+    storage = aws_s3_module.AwsS3Storage(public_bucket="pub-b", private_bucket="priv-b", region="")
+
+    client_config = storage.s3_client.meta.config
+    assert client_config.connect_timeout == 42
+    assert client_config.read_timeout == 90
+    assert client_config.retries["mode"] == "legacy"
+    assert client_config.retries["total_max_attempts"] >= 7
+    assert storage.s3_client.meta.region_name == "ap-southeast-2"
+
+
+def test_storage_009_aws_exception_mapping():
+    storage = AwsS3Storage(public_bucket="pub-b", private_bucket="priv-b", region="us-east-1")
+    storage.s3_client = MagicMock()
+
+    storage.s3_client.get_object.side_effect = ClientError({"Error": {"Code": "NoSuchKey"}}, "op")
+    try:
+        storage.download_bytes("key.csv", AccessMode.PRIVATE)
+        assert False
+    except StorageNotFoundError:
+        pass
+
+    storage.s3_client.get_object.side_effect = ClientError({"Error": {"Code": "AccessDenied"}}, "op")
+    try:
+        storage.download_bytes("key.csv", AccessMode.PRIVATE)
+        assert False
+    except StoragePermissionError:
+        pass
+
+    storage.s3_client.get_object.side_effect = EndpointConnectionError(endpoint_url="x")
+    try:
+        storage.download_bytes("key.csv", AccessMode.PRIVATE)
+        assert False
+    except StorageTransientError:
+        pass
+
+
+def test_storage_009_gcp_upload_public_goes_to_public_bucket(monkeypatch):
+    monkeypatch.setattr("app.services.storage.gcp.settings.PROJECT_ID", "p")
+    
+    mock_client = MagicMock()
+    mock_blob = MagicMock()
+    mock_client.bucket.return_value.blob.return_value = mock_blob
+    monkeypatch.setattr(
+        "app.services.storage.gcp.storage.Client",
+        MagicMock(return_value=mock_client),
+    )
+    monkeypatch.setattr(
+        "app.services.storage.gcp.service_account.Credentials.from_service_account_info",
+        MagicMock(return_value=MagicMock()),
+    )
+    
+    storage = GcpStorage(public_bucket="pub-b", private_bucket="priv-b")
+
+    obj = storage.upload_file("local.jpg", "key.jpg", content_type="image/jpeg", access_mode=AccessMode.PUBLIC)
+
+    mock_client.bucket.assert_called_once_with("pub-b")
+    mock_blob.upload_from_filename.assert_called_once_with("local.jpg", content_type="image/jpeg")
+    assert obj.bucket == "pub-b"
+    assert obj.access_mode == AccessMode.PUBLIC
+
+
+def test_storage_010_gcp_upload_private_goes_to_private_bucket(monkeypatch):
+    monkeypatch.setattr("app.services.storage.gcp.settings.PROJECT_ID", "p")
+    
+    mock_client = MagicMock()
+    mock_blob = MagicMock()
+    mock_client.bucket.return_value.blob.return_value = mock_blob
+    monkeypatch.setattr(
+        "app.services.storage.gcp.storage.Client",
+        MagicMock(return_value=mock_client),
+    )
+    monkeypatch.setattr(
+        "app.services.storage.gcp.service_account.Credentials.from_service_account_info",
+        MagicMock(return_value=MagicMock()),
+    )
+    
+    storage = GcpStorage(public_bucket="pub-b", private_bucket="priv-b")
+
+    obj = storage.upload_file("local.jpg", "key.jpg", content_type="image/jpeg", access_mode=AccessMode.PRIVATE)
+
+    mock_client.bucket.assert_called_once_with("priv-b")
+    mock_blob.upload_from_filename.assert_called_once_with("local.jpg", content_type="image/jpeg")
+    assert obj.bucket == "priv-b"
+    assert obj.access_mode == AccessMode.PRIVATE
+
+
+def test_storage_011_gcp_exception_mapping(monkeypatch):
+    monkeypatch.setattr("app.services.storage.gcp.settings.PROJECT_ID", "p")
+    
+    mock_client = MagicMock()
+    monkeypatch.setattr(
+        "app.services.storage.gcp.storage.Client",
+        MagicMock(return_value=mock_client),
+    )
+    monkeypatch.setattr(
+        "app.services.storage.gcp.service_account.Credentials.from_service_account_info",
+        MagicMock(return_value=MagicMock()),
+    )
+    storage = GcpStorage(public_bucket="pub-b", private_bucket="priv-b")
+
+    mock_client.bucket.return_value.blob.return_value.download_as_bytes.side_effect = google.api_core.exceptions.NotFound("not found")
+    try:
+        storage.download_bytes("k", AccessMode.PRIVATE)
+        assert False
+    except StorageNotFoundError:
+        pass
+
+    mock_client.bucket.return_value.blob.return_value.download_as_bytes.side_effect = google.api_core.exceptions.Forbidden("forbidden")
+    try:
+        storage.download_bytes("k", AccessMode.PRIVATE)
+        assert False
+    except StoragePermissionError:
+        pass
+
+
+def test_storage_012_resolve_url_public():
+    storage = MagicMock()
+    storage.generate_public_url.return_value = "/pub-b/k"
+    obj = StoredObject(provider="aws", bucket="pub-b", key="k", access_mode=AccessMode.PUBLIC)
+    url = resolve_url(obj, storage)
+    assert url == "/pub-b/k"
+    storage.generate_access_url.assert_not_called()
+
+
+def test_storage_013_resolve_url_private():
+    storage = MagicMock()
+    storage.generate_access_url.return_value = "https://signed"
+    obj = StoredObject(provider="aws", bucket="priv-b", key="k", access_mode=AccessMode.PRIVATE)
+    url = resolve_url(obj, storage)
+    assert url == "https://signed"
+    storage.generate_access_url.assert_called_once_with("k", expires_in_seconds=3600, access_mode=AccessMode.PRIVATE)
+
+
+def test_storage_014_csv_download_always_uses_private_bucket(monkeypatch):
+    """
+    CSV fetch in process_csv_inline must always target the private bucket.
+    """
+    import asyncio
+
+    mock_storage = make_fake_object_storage(download_bytes=b"id,Title\n1,test")
+    recorded = []
+
+    def capturing_download(object_key, access_mode):
+        recorded.append(access_mode)
+        return b"id,Title\n1,test"
+
+    mock_storage.download_bytes = MagicMock(side_effect=capturing_download)
+    monkeypatch.setattr(uploads_service_module, "get_object_storage", MagicMock(return_value=mock_storage))
+
+    conn = install_fake_db(monkeypatch, uploads_service_module)
+    conn.fetchrow.return_value = None
+    record = {
+        "id": 1, "report_type": "story", "cloud_storage_path": "path/to/file.csv",
+        "leader_category": "L", "program_name": "P", "meta_data": {"tenant_code": "mitra"},
+    }
+    monkeypatch.setattr(uploads_service_module.operations, "get_record", AsyncMock(return_value=record))
+    monkeypatch.setattr(uploads_service_module.operations, "update_status", AsyncMock())
+    monkeypatch.setattr(uploads_service_module, "load_csv", MagicMock())
+    monkeypatch.setattr(uploads_service_module, "validate_columns", MagicMock(return_value=(True, [])))
+    monkeypatch.setattr(uploads_service_module, "_push_rows_sync", MagicMock())
+
+    async def run():
+        await uploads_service_module.process_csv_inline(1)
+
+    asyncio.run(run())
+    assert recorded == [AccessMode.PRIVATE], f"Expected PRIVATE, got {recorded}"
+
+
+def test_storage_015_uploads_py_handle_upload_private(monkeypatch):
+    import asyncio
+
+    mock_storage = MagicMock()
+    mock_storage.upload_bytes.return_value = MagicMock(key="k")
+    monkeypatch.setattr(uploads_service_module, "get_object_storage", MagicMock(return_value=mock_storage))
+    monkeypatch.setattr(uploads_service_module.operations, "check_duplicate_file", AsyncMock(return_value=False))
+    monkeypatch.setattr(uploads_service_module.operations, "insert_upload_record", AsyncMock(return_value=1))
+    monkeypatch.setattr(uploads_service_module.settings, "PROCESSING_MODE", "batch")
+    monkeypatch.setattr(uploads_service_module.settings, "STORAGE_PRIVATE_BUCKET", "test-private-bucket")
+    monkeypatch.setattr(uploads_service_module, "validate_columns", MagicMock(return_value=(True, [])))
+
+    async def run():
+        background_tasks_mock = MagicMock()
+        await uploads_service_module.handle_upload("story", "p", "l", "t", "f", b"a,b\n1,2", background_tasks_mock)
+    asyncio.run(run())
+
+    mock_storage.upload_bytes.assert_called_once()
+    assert mock_storage.upload_bytes.call_args.kwargs.get("access_mode") == AccessMode.PRIVATE
+
+
+def test_storage_017_azure_upload_routing(monkeypatch):
+    from app.services.storage.azure import AzureStorage
+    monkeypatch.setattr("app.services.storage.azure.BlobServiceClient", MagicMock())
+    storage = AzureStorage(public_bucket="pub-c", private_bucket="priv-c", account_name="test")
+    mock_blob_client = MagicMock()
+    storage.blob_service_client.get_blob_client.return_value = mock_blob_client
+
+    obj_pub = storage.upload_bytes(b"data", "key.jpg", access_mode=AccessMode.PUBLIC)
+    storage.blob_service_client.get_blob_client.assert_called_with(container="pub-c", blob="key.jpg")
+    assert obj_pub.bucket == "pub-c"
+
+    obj_priv = storage.upload_bytes(b"data", "key.csv", access_mode=AccessMode.PRIVATE)
+    storage.blob_service_client.get_blob_client.assert_called_with(container="priv-c", blob="key.csv")
+    assert obj_priv.bucket == "priv-c"
+
+
+def test_storage_018_oci_upload_routing(monkeypatch):
+    from app.services.storage.oci import OciStorage
+    monkeypatch.setattr("oci.config.from_file", MagicMock(return_value={}))
+    monkeypatch.setattr("oci.object_storage.ObjectStorageClient", MagicMock())
+    storage = OciStorage(public_bucket="pub-b", private_bucket="priv-b", namespace="ns")
+
+    obj_pub = storage.upload_bytes(b"data", "key.jpg", access_mode=AccessMode.PUBLIC)
+    storage.client.put_object.assert_any_call("ns", "pub-b", "key.jpg", b"data", content_type="application/octet-stream")
+    assert obj_pub.bucket == "pub-b"
+
+    obj_priv = storage.upload_bytes(b"data", "key.csv", access_mode=AccessMode.PRIVATE)
+    storage.client.put_object.assert_any_call("ns", "priv-b", "key.csv", b"data", content_type="application/octet-stream")
+    assert obj_priv.bucket == "priv-b"
+
+
+def test_storage_019_oci_uses_env_defaults_when_values_are_omitted(monkeypatch):
+    from app.services.storage import oci as oci_module
+
+    monkeypatch.setattr(
+        oci_module,
+        "settings",
+        type("S", (), {
+            "OCI_NAMESPACE": "env-ns",
+            "OCI_CONFIG_FILE": "/tmp/oci-config",
+            "OCI_CONFIG_PROFILE": "env-profile",
+            "OCI_REGION": "eu-frankfurt-1",
+        })(),
+    )
+    mock_from_file = MagicMock(return_value={"region": "eu-frankfurt-1"})
+    monkeypatch.setattr("oci.config.from_file", mock_from_file)
+    monkeypatch.setattr("oci.object_storage.ObjectStorageClient", MagicMock())
+
+    storage = oci_module.OciStorage(public_bucket="pub-b", private_bucket="priv-b")
+
+    assert storage.namespace == "env-ns"
+    assert storage.region == "eu-frankfurt-1"
+    mock_from_file.assert_called_once_with("/tmp/oci-config", "env-profile")
