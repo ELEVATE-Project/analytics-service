@@ -147,8 +147,8 @@ def _compute_dynamic_scale(image_path: Path, cap: Optional[str]) -> Optional[str
 
     # Proportionally downscale so the long edge meets the cap exactly
     scale_factor = cap_long_edge / img_long_edge
-    target_w = int(img_w * scale_factor)
-    target_h = int(img_h * scale_factor)
+    target_w = max(1, int(img_w * scale_factor))
+    target_h = max(1, int(img_h * scale_factor))
     dynamic_scale = f"{target_w}x{target_h}"
     logger.info(
         f"{image_path.name} is {img_w}x{img_h} (long edge {img_long_edge}px) — "
