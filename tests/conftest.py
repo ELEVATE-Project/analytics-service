@@ -27,10 +27,7 @@ def reset_storage_cache():
     clear_storage_cache()
 
 
-# ---------------------------------------------------------------------------
 # Fake asyncpg pool/connection — used for every db.pool.acquire() call site.
-# ---------------------------------------------------------------------------
-
 class FakeConn:
     """
     Stands in for an asyncpg.Connection. All query methods are AsyncMocks
@@ -73,10 +70,7 @@ def install_fake_db(monkeypatch, module, conn: Optional[FakeConn] = None) -> Fak
     return fake_conn
 
 
-# ---------------------------------------------------------------------------
 # Fake confluent_kafka Producer / AdminClient
-# ---------------------------------------------------------------------------
-
 def make_fake_kafka_producer(delivery_error=None, flush_remaining: int = 0):
     """
     A MagicMock standing in for confluent_kafka.Producer. `.produce()` invokes
@@ -121,10 +115,7 @@ def make_fake_admin_client(topics_exist: bool = True):
     return client
 
 
-# ---------------------------------------------------------------------------
 # Fake GCS storage.Client
-# ---------------------------------------------------------------------------
-
 def make_fake_gcs_client(download_bytes: bytes = b""):
     """
     A MagicMock standing in for google.cloud.storage.Client. Returns
@@ -140,9 +131,7 @@ def make_fake_gcs_client(download_bytes: bytes = b""):
     return client, blob
 
 
-# ---------------------------------------------------------------------------
 # Fake ObjectStorage — used for every get_object_storage() call site.
-# ---------------------------------------------------------------------------
 from app.services.storage import StoredObject, AccessMode
 
 def make_fake_object_storage(download_bytes: bytes = b""):
@@ -183,10 +172,7 @@ def make_fake_object_storage(download_bytes: bytes = b""):
     return storage
 
 
-# ---------------------------------------------------------------------------
 # Fake LLM (OpenRouter) HTTP responses — patches urllib.request.urlopen
-# ---------------------------------------------------------------------------
-
 class _FakeHTTPResponse:
     def __init__(self, body: bytes):
         self._body = body
@@ -293,10 +279,7 @@ def install_fake_workflow_context(monkeypatch, activity_results: Optional[Dict[A
     return execute_activity_mock, continue_as_new_calls, _ContinueAsNew
 
 
-# ---------------------------------------------------------------------------
 # Settings override helper
-# ---------------------------------------------------------------------------
-
 def settings_override(monkeypatch, settings_obj, **overrides):
     """Convenience wrapper for repeated monkeypatch.setattr(settings, k, v) calls."""
     for key, value in overrides.items():

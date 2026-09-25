@@ -3,6 +3,8 @@ import asyncio
 import io
 import json
 import logging
+import os
+import re
 import threading
 import time
 import uuid
@@ -34,7 +36,8 @@ def upload_csv(file_bytes: bytes, report_type: str, original_filename: str) -> s
         raise ValueError("STORAGE_PRIVATE_BUCKET is not configured in settings.")
 
     prefix = (settings.STORAGE_CSV_PREFIX or settings.CSV_BLOB_UPLOADS).strip("/")
-    filename = f"{uuid.uuid4()}_{original_filename}"
+    safe_filename = re.sub(r"[^A-Za-z0-9._-]", "_", os.path.basename(original_filename))
+    filename = f"{uuid.uuid4()}_{safe_filename}"
     object_key = f"{prefix}/{filename}" if prefix else filename
 
     storage = get_object_storage()
@@ -51,10 +54,7 @@ def fetch_csv(bucket_path: str) -> bytes:
     return data
 
 
-# ---------------------------------------------------------------------------
 # CSV Processing & Formatting Helpers
-# ---------------------------------------------------------------------------
-
 def load_csv(csv_file: Union[io.BytesIO, bytes]) -> pd.DataFrame:
     """Parse an in-memory CSV (BytesIO or raw bytes from GCS) into a DataFrame."""
     if isinstance(csv_file, bytes):
@@ -423,10 +423,7 @@ def rows_to_json(
         yield row_to_json(row, report_type, event_type, metadata, expected_cols=expected_cols)
 
 
-# ---------------------------------------------------------------------------
 # Kafka Producer (singleton, thread-safe)
-# ---------------------------------------------------------------------------
-
 _producer: Optional[Producer] = None
 _producer_lock = threading.Lock()
 
@@ -502,10 +499,7 @@ def _push_rows_sync(payloads: List[Any]) -> None:
             )
 
 
-# ---------------------------------------------------------------------------
 # Inline CSV Processing (replaces Temporal activities)
-# ---------------------------------------------------------------------------
-
 async def process_csv_inline(
     record_id: int,
     file_bytes: Optional[bytes] = None,
@@ -739,10 +733,7 @@ async def process_csv_inline(
     logger.info("CSV record %s processed successfully: %d rows pushed to Kafka", record_id, len(payloads))
 
 
-# ---------------------------------------------------------------------------
 # Service Orchestration Logic
-# ---------------------------------------------------------------------------
-
 async def handle_upload(
     report_type: str,
     program_name: str,

@@ -24,15 +24,19 @@ class OciStorage(ObjectStorage):
         self,
         public_bucket: str,
         private_bucket: str,
-        namespace: str,
-        config_file: str = "~/.oci/config",
-        profile: str = "DEFAULT",
-        region: str = "",
+        namespace: str | None = None,
+        config_file: str | None = None,
+        profile: str | None = None,
+        region: str | None = None,
     ):
         self.public_bucket = public_bucket
         self.private_bucket = private_bucket
-        self.namespace = namespace
-        self._pars: dict[tuple[str, str], tuple[str, datetime]] = {}
+        self.namespace = namespace or settings.OCI_NAMESPACE
+        self._pars: dict[tuple[str, str, int], tuple[str, datetime]] = {}
+
+        config_file = config_file or settings.OCI_CONFIG_FILE
+        profile = profile or settings.OCI_CONFIG_PROFILE
+        region = region or settings.OCI_REGION
 
         try:
             # We assume config file authentication is used.
@@ -54,9 +58,6 @@ class OciStorage(ObjectStorage):
 
         self.region = self.config.get("region") or region or "us-ashburn-1"
 
-    def _bucket_for(self, access_mode: AccessMode) -> str:
-        return self.public_bucket if access_mode == AccessMode.PUBLIC else self.private_bucket
-
     def _handle_error(self, e: Exception) -> None:
         if isinstance(e, ServiceError):
             if e.status == 404:
@@ -70,16 +71,13 @@ class OciStorage(ObjectStorage):
             raise StorageTransientError(str(e)) from e
         raise StorageError(str(e)) from e
 
-    # ------------------------------------------------------------------
     # Uploads
-    # ------------------------------------------------------------------
-
     def upload_file(
         self,
         local_file_path: str,
-        object_key:      str,
-        content_type:    str | None = None,
-        access_mode:     AccessMode = AccessMode.PRIVATE,
+        object_key: str,
+        content_type: str | None = None,
+        access_mode: AccessMode = AccessMode.PRIVATE,
     ) -> StoredObject:
         bucket_name = self._bucket_for(access_mode)
         try:
@@ -97,21 +95,21 @@ class OciStorage(ObjectStorage):
                 bucket_name, object_key, access_mode.value,
             )
             return StoredObject(
-                provider=    "oci",
-                bucket=      bucket_name,
-                key=         object_key,
-                access_mode= access_mode,
-                content_type=content_type,
+                provider = "oci",
+                bucket = bucket_name,
+                key = object_key,
+                access_mode = access_mode,
+                content_type = content_type,
             )
         except Exception as e:
             self._handle_error(e)
 
     def upload_bytes(
         self,
-        data:         bytes,
-        object_key:   str,
+        data: bytes,
+        object_key: str,
         content_type: str | None = None,
-        access_mode:  AccessMode = AccessMode.PRIVATE,
+        access_mode: AccessMode = AccessMode.PRIVATE,
     ) -> StoredObject:
         bucket_name = self._bucket_for(access_mode)
         try:
@@ -128,19 +126,16 @@ class OciStorage(ObjectStorage):
                 bucket_name, object_key, access_mode.value,
             )
             return StoredObject(
-                provider=    "oci",
-                bucket=      bucket_name,
-                key=         object_key,
-                access_mode= access_mode,
-                content_type=content_type,
+                provider = "oci",
+                bucket = bucket_name,
+                key = object_key,
+                access_mode = access_mode,
+                content_type = content_type,
             )
         except Exception as e:
             self._handle_error(e)
 
-    # ------------------------------------------------------------------
     # Downloads
-    # ------------------------------------------------------------------
-
     def download_bytes(
         self,
         object_key:  str,
@@ -153,13 +148,10 @@ class OciStorage(ObjectStorage):
         except Exception as e:
             self._handle_error(e)
 
-    # ------------------------------------------------------------------
     # Delete / URL helpers
-    # ------------------------------------------------------------------
-
     def delete_object(
         self,
-        object_key:  str,
+        object_key: str,
         access_mode: AccessMode = AccessMode.PRIVATE,
     ) -> None:
         bucket_name = self._bucket_for(access_mode)
@@ -170,13 +162,13 @@ class OciStorage(ObjectStorage):
 
     def generate_access_url(
         self,
-        object_key:         str,
+        object_key: str,
         expires_in_seconds: int,
-        access_mode:        AccessMode = AccessMode.PRIVATE,
+        access_mode: AccessMode = AccessMode.PRIVATE,
     ) -> str:
         """Generate a pre-authenticated request (PAR) for private objects."""
         bucket_name = self._bucket_for(access_mode)
-        cache_key = (bucket_name, object_key)
+        cache_key = (bucket_name, object_key, expires_in_seconds)
         now = datetime.now(timezone.utc)
         cached_par = self._pars.get(cache_key)
         endpoint = f"https://objectstorage.{self.region}.oraclecloud.com"
@@ -185,10 +177,10 @@ class OciStorage(ObjectStorage):
 
         try:
             par_details = oci.object_storage.models.CreatePreauthenticatedRequestDetails(
-                name=f"par_{uuid.uuid4().hex[:16]}",
-                object_name=object_key,
-                access_type="ObjectRead",
-                time_expires=now + timedelta(seconds=expires_in_seconds)
+                name = f"par_{uuid.uuid4().hex[:16]}",
+                object_name = object_key,
+                access_type = "ObjectRead",
+                time_expires = now + timedelta(seconds=expires_in_seconds)
             )
             
             response = self.client.create_preauthenticated_request(
@@ -202,8 +194,3 @@ class OciStorage(ObjectStorage):
             return f"{endpoint}{full_path}"
         except Exception as e:
             self._handle_error(e)
-
-    def generate_public_url(self, object_key: str) -> str:
-        import urllib.parse
-        encoded_key = urllib.parse.quote(object_key, safe="/")
-        return f"/{self.public_bucket}/{encoded_key}"

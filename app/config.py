@@ -4,6 +4,8 @@ from typing import Dict, Any, List
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+ALLOWED_STORAGE_PROVIDERS = {"gcp", "aws", "azure", "oci"}
+
 class Settings(BaseSettings):
     # Kafka Configuration
     KAFKA_BOOTSTRAP_SERVERS: str = Field(default="localhost:9092")
@@ -143,27 +145,6 @@ class Settings(BaseSettings):
     SIMILARITY_SCORE_THRESHOLD: float = Field(default=0.65)
     LLM_CONFIDENCE_SCORE_THRESHOLD: float = Field(default=0.8)
 
-    # GCP Credentials
-    TYPE: str = Field(default="service_account")
-    PROJECT_ID: str = Field(default="")
-    PRIVATE_KEY_ID: str = Field(default="")
-    PRIVATE_KEY: str = Field(default="")
-    CLIENT_EMAIL: str = Field(default="")
-    CLIENT_ID: str = Field(default="")
-    AUTH_URI: str = Field(default="")
-    TOKEN_URI: str = Field(default="")
-    AUTH_PROVIDER_X509_CERT_URL: str = Field(default="")
-    CLIENT_X509_CERT_URL: str = Field(default="")
-    UNIVERSE_DOMAIN: str = Field(default="googleapis.com")
-    BUCKET_NAME: str = Field(default="")
-    STORY_BLOB: str = Field(default="")
-    DISCUSSION_BLOB: str = Field(default="")
-    MEDIA_BASE_URL: str = Field(default="")
-    # Image Blur CPU Throttling
-    # Downscale resolution for face-detection neural network (WxH).
-    # Only affects detection speed — blur is applied to the original full-res image.
-    DEFACE_SCALE: str = Field(default="640x360")
-
     # Generic Storage Configuration
     STORAGE_PROVIDER: str = Field(default="gcp") # gcp | aws | azure | oci
     STORAGE_PUBLIC_BUCKET: str = Field(default="")   # bucket for AccessMode.PUBLIC objects (blurred images)
@@ -176,6 +157,26 @@ class Settings(BaseSettings):
     STORAGE_CONNECT_TIMEOUT_SECONDS: int = Field(default=10, gt=0)
     STORAGE_READ_TIMEOUT_SECONDS: int = Field(default=60, gt=0)
     STORAGE_MAX_RETRIES: int = Field(default=3, ge=0)
+
+    # GCP Configuration
+    TYPE: str = Field(default="service_account")
+    PROJECT_ID: str = Field(default="")
+    PRIVATE_KEY_ID: str = Field(default="")
+    PRIVATE_KEY: str = Field(default="")
+    CLIENT_EMAIL: str = Field(default="")
+    CLIENT_ID: str = Field(default="")
+    AUTH_URI: str = Field(default="")
+    TOKEN_URI: str = Field(default="")
+    AUTH_PROVIDER_X509_CERT_URL: str = Field(default="")
+    CLIENT_X509_CERT_URL: str = Field(default="")
+    UNIVERSE_DOMAIN: str = Field(default="googleapis.com")
+    STORY_BLOB: str = Field(default="")
+    DISCUSSION_BLOB: str = Field(default="")
+    MEDIA_BASE_URL: str = Field(default="")
+    # Image Blur CPU Throttling
+    # Downscale resolution for face-detection neural network (WxH).
+    # Only affects detection speed — blur is applied to the original full-res image.
+    DEFACE_SCALE: str = Field(default="640x360")
 
     # AWS S3 Configuration
     AWS_ACCESS_KEY_ID: str = Field(default="")
@@ -255,10 +256,9 @@ class Settings(BaseSettings):
     @classmethod
     def validate_storage_provider(cls, v: str) -> str:
         provider = v.strip().lower()
-        allowed_providers = {"gcp", "aws", "azure", "oci"}
-        if provider not in allowed_providers:
+        if provider not in ALLOWED_STORAGE_PROVIDERS:
             raise ValueError(
-                "STORAGE_PROVIDER must be one of: gcp, aws, azure, oci; "
+                f"STORAGE_PROVIDER must be one of: {', '.join(ALLOWED_STORAGE_PROVIDERS)}; "
                 f"got {v!r}."
             )
         return provider

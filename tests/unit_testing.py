@@ -69,10 +69,7 @@ def _find_execute_call(conn, *needles):
     return matches[0]
 
 
-# =============================================================================
 # KAFKA INGESTION (KAFKA-*)
-# =============================================================================
-
 import app.kafka.consumer as consumer_module
 
 
@@ -561,10 +558,7 @@ def test_kafka_025_offset_commits_only_after_success(monkeypatch):
     asyncio.run(run_test())
 
 
-# =============================================================================
 # SECURITY & LOGGING (SEC-*)
-# =============================================================================
-
 def test_sec_001_raw_payload_never_logged_in_plaintext(monkeypatch, caplog):
     async def run_test():
         consumer, insert_mock, _, _ = _consumer_with_mocks(monkeypatch)
@@ -644,10 +638,7 @@ def test_sec_004_thematic_malformed_llm_response_never_logs_full_content(monkeyp
     asyncio.run(run_test())
 
 
-# =============================================================================
 # CONFIG & SETTINGS (CONFIG-*)
-# =============================================================================
-
 from app.config import Settings
 
 
@@ -729,10 +720,7 @@ def test_config_009_unrecognized_submission_type_raises_for_kafka_schema():
         s.get_kafka_ingestion_schema(None)
 
 
-# =============================================================================
 # DATABASE OPERATIONS (DB-*)
-# =============================================================================
-
 from app.database.operations import (
     _normalize_statement_list,
     insert_or_update_submission,
@@ -808,9 +796,7 @@ def test_db_006_duplicate_session_id_raises_clear_error():
     asyncio.run(run_test())
 
 
-# =============================================================================
 # THEMATIC CLASSIFICATION (THEME-*)
-# =============================================================================
 # THEME-018 excluded: "SentenceTransformer calls run off the event loop" is a
 # live concurrent-progress observation, not assertable via mocks.
 
@@ -1110,10 +1096,7 @@ def test_theme_017_embedded_fake_index_fragment_not_misparsed(monkeypatch):
     asyncio.run(run_test())
 
 
-# =============================================================================
 # PII & ABUSIVE LANGUAGE DETECTION (PII-*)
-# =============================================================================
-
 import app.temporal.pii_and_abusive_activity as pii_module
 
 
@@ -1314,11 +1297,7 @@ def test_pii_012_scalar_column_single_entry_list_unwrapped(monkeypatch):
     asyncio.run(run_test())
 
 
-
-# =============================================================================
 # ENVIRONMENT DETECTION (ENV-*)
-# =============================================================================
-
 import app.temporal.environment_activity as environment_module
 
 
@@ -1387,9 +1366,7 @@ def test_env_003_prompt_loader_uses_environment_prompt_name():
     asyncio.run(run_test())
 
 
-# =============================================================================
 # STORY RATING (RATING-*)
-# =============================================================================
 # RATING-009 excluded: "no DB connection held during OpenRouter/PDF calls" is a
 # live connection-pool-contention observation, not assertable via mocks.
 
@@ -1540,9 +1517,7 @@ def test_rating_008_relative_pdf_url_without_media_base_url_raises(monkeypatch):
         rating_module._resolve_url("relative/path/to/file.pdf")
 
 
-# =============================================================================
 # BATCH PROCESSING WORKFLOW (BATCH-*)
-# =============================================================================
 # BATCH-006 excluded: the SKIP overlap policy is enforced by Temporal's own
 # server-side scheduler, not application code — nothing here to unit test.
 
@@ -1671,10 +1646,7 @@ def test_batch_005_exceeding_max_per_run_triggers_continue_as_new(monkeypatch):
     asyncio.run(run_test())
 
 
-# =============================================================================
 # REAL-TIME / MODE HANDLING (MODE-*)
-# =============================================================================
-
 def test_mode_001_real_time_triggers_workflow_immediately(monkeypatch):
     async def run_test():
         consumer, insert_mock, _, trigger_mock = _consumer_with_mocks(monkeypatch)
@@ -1727,10 +1699,7 @@ def test_mode_003b_temporal_connect_failure_leaves_client_none(monkeypatch):
     asyncio.run(run_test())
 
 
-# =============================================================================
 # LLM & COST TRACKING (LLM-*)
-# =============================================================================
-
 from app.services.llm import openrouter_chat_completion, split_llm_usage
 
 
@@ -1767,10 +1736,7 @@ def test_llm_003_fallback_estimate_only_when_no_usage_ever_obtained(monkeypatch)
     asyncio.run(run_test())
 
 
-# =============================================================================
 # CSV UPLOAD & PROCESS API (UPLOAD-*)
-# =============================================================================
-
 from app.api.router import api_router
 from app.api.exceptions import register_exception_handlers
 import app.database.operations as operations_module
@@ -2273,9 +2239,7 @@ def test_upload_032_stale_schedules_deleted_in_realtime_mode(monkeypatch):
         assert set(deleted_schedules) == {"daily-batch-processing"}
     asyncio.run(run_test())
 
-# =============================================================================
 # STORAGE ABSTRACTION (STORAGE-*)
-# =============================================================================
 from app.services.storage import StoredObject, AccessMode, StorageNotFoundError, StoragePermissionError, StorageTransientError, StorageError, resolve_url
 from app.services.storage.aws_s3 import AwsS3Storage
 from app.services.storage.gcp import GcpStorage
@@ -2367,7 +2331,34 @@ def test_storage_007_aws_generate_access_url_private_bucket():
     )
 
 
-def test_storage_008_aws_exception_mapping():
+def test_storage_008_aws_uses_env_defaults_when_values_are_omitted(monkeypatch):
+    import app.services.storage.aws_s3 as aws_s3_module
+
+    monkeypatch.setattr(
+        aws_s3_module,
+        "settings",
+        type("S", (), {
+            "STORAGE_CONNECT_TIMEOUT_SECONDS": 42,
+            "STORAGE_READ_TIMEOUT_SECONDS": 90,
+            "STORAGE_MAX_RETRIES": 7,
+            "STORAGE_REGION": "ap-southeast-2",
+            "AWS_ACCESS_KEY_ID": "env-key",
+            "AWS_SECRET_ACCESS_KEY": "env-secret",
+            "AWS_SESSION_TOKEN": "env-token",
+        })(),
+    )
+
+    storage = aws_s3_module.AwsS3Storage(public_bucket="pub-b", private_bucket="priv-b", region="")
+
+    client_config = storage.s3_client.meta.config
+    assert client_config.connect_timeout == 42
+    assert client_config.read_timeout == 90
+    assert client_config.retries["mode"] == "legacy"
+    assert client_config.retries["total_max_attempts"] >= 7
+    assert storage.s3_client.meta.region_name == "ap-southeast-2"
+
+
+def test_storage_009_aws_exception_mapping():
     storage = AwsS3Storage(public_bucket="pub-b", private_bucket="priv-b", region="us-east-1")
     storage.s3_client = MagicMock()
 
@@ -2545,3 +2536,27 @@ def test_storage_018_oci_upload_routing(monkeypatch):
     obj_priv = storage.upload_bytes(b"data", "key.csv", access_mode=AccessMode.PRIVATE)
     storage.client.put_object.assert_any_call("ns", "priv-b", "key.csv", b"data", content_type="application/octet-stream")
     assert obj_priv.bucket == "priv-b"
+
+
+def test_storage_019_oci_uses_env_defaults_when_values_are_omitted(monkeypatch):
+    from app.services.storage import oci as oci_module
+
+    monkeypatch.setattr(
+        oci_module,
+        "settings",
+        type("S", (), {
+            "OCI_NAMESPACE": "env-ns",
+            "OCI_CONFIG_FILE": "/tmp/oci-config",
+            "OCI_CONFIG_PROFILE": "env-profile",
+            "OCI_REGION": "eu-frankfurt-1",
+        })(),
+    )
+    mock_from_file = MagicMock(return_value={"region": "eu-frankfurt-1"})
+    monkeypatch.setattr("oci.config.from_file", mock_from_file)
+    monkeypatch.setattr("oci.object_storage.ObjectStorageClient", MagicMock())
+
+    storage = oci_module.OciStorage(public_bucket="pub-b", private_bucket="priv-b")
+
+    assert storage.namespace == "env-ns"
+    assert storage.region == "eu-frankfurt-1"
+    mock_from_file.assert_called_once_with("/tmp/oci-config", "env-profile")

@@ -41,9 +41,9 @@ class AzureStorage(ObjectStorage):
             account_url = f"https://{account_name}.blob.core.windows.net"
             if client_id and client_secret and tenant_id:
                 credential = ClientSecretCredential(
-                    tenant_id=tenant_id,
-                    client_id=client_id,
-                    client_secret=client_secret
+                    tenant_id = tenant_id,
+                    client_id = client_id,
+                    client_secret = client_secret
                 )
             else:
                 credential = DefaultAzureCredential()
@@ -52,9 +52,6 @@ class AzureStorage(ObjectStorage):
             self.account_name = account_name
             self.account_key = None
 
-
-    def _container_for(self, access_mode: AccessMode) -> str:
-        return self.public_bucket if access_mode == AccessMode.PUBLIC else self.private_bucket
 
     def _handle_error(self, e: Exception) -> None:
         if isinstance(e, ResourceNotFoundError):
@@ -69,18 +66,15 @@ class AzureStorage(ObjectStorage):
             raise StorageTransientError(str(e)) from e
         raise StorageError(str(e)) from e
 
-    # ------------------------------------------------------------------
     # Uploads
-    # ------------------------------------------------------------------
-
     def upload_file(
         self,
         local_file_path: str,
-        object_key:      str,
-        content_type:    str | None = None,
-        access_mode:     AccessMode = AccessMode.PRIVATE,
+        object_key: str,
+        content_type: str | None = None,
+        access_mode: AccessMode = AccessMode.PRIVATE,
     ) -> StoredObject:
-        container_name = self._container_for(access_mode)
+        container_name = self._bucket_for(access_mode)
         try:
             blob_client = self.blob_service_client.get_blob_client(container=container_name, blob=object_key)
             with open(local_file_path, "rb") as data:
@@ -94,23 +88,23 @@ class AzureStorage(ObjectStorage):
                 container_name, object_key, access_mode.value,
             )
             return StoredObject(
-                provider=    "azure",
-                bucket=      container_name,
-                key=         object_key,
-                access_mode= access_mode,
-                content_type=content_type,
+                provider = "azure",
+                bucket = container_name,
+                key = object_key,
+                access_mode = access_mode,
+                content_type = content_type,
             )
         except Exception as e:
             self._handle_error(e)
 
     def upload_bytes(
         self,
-        data:         bytes,
-        object_key:   str,
+        data: bytes,
+        object_key: str,
         content_type: str | None = None,
-        access_mode:  AccessMode = AccessMode.PRIVATE,
+        access_mode: AccessMode = AccessMode.PRIVATE,
     ) -> StoredObject:
-        container_name = self._container_for(access_mode)
+        container_name = self._bucket_for(access_mode)
         try:
             blob_client = self.blob_service_client.get_blob_client(container=container_name, blob=object_key)
             from azure.storage.blob import ContentSettings
@@ -122,41 +116,35 @@ class AzureStorage(ObjectStorage):
                 container_name, object_key, access_mode.value,
             )
             return StoredObject(
-                provider=    "azure",
-                bucket=      container_name,
-                key=         object_key,
-                access_mode= access_mode,
-                content_type=content_type,
+                provider = "azure",
+                bucket = container_name,
+                key = object_key,
+                access_mode = access_mode,
+                content_type = content_type,
             )
         except Exception as e:
             self._handle_error(e)
 
-    # ------------------------------------------------------------------
     # Downloads
-    # ------------------------------------------------------------------
-
     def download_bytes(
         self,
-        object_key:  str,
+        object_key: str,
         access_mode: AccessMode = AccessMode.PRIVATE,
     ) -> bytes:
-        container_name = self._container_for(access_mode)
+        container_name = self._bucket_for(access_mode)
         try:
             blob_client = self.blob_service_client.get_blob_client(container=container_name, blob=object_key)
             return blob_client.download_blob().readall()
         except Exception as e:
             self._handle_error(e)
 
-    # ------------------------------------------------------------------
     # Delete / URL helpers
-    # ------------------------------------------------------------------
-
     def delete_object(
         self,
         object_key:  str,
         access_mode: AccessMode = AccessMode.PRIVATE,
     ) -> None:
-        container_name = self._container_for(access_mode)
+        container_name = self._bucket_for(access_mode)
         try:
             blob_client = self.blob_service_client.get_blob_client(container=container_name, blob=object_key)
             blob_client.delete_blob()
@@ -165,12 +153,12 @@ class AzureStorage(ObjectStorage):
 
     def generate_access_url(
         self,
-        object_key:         str,
+        object_key: str,
         expires_in_seconds: int,
-        access_mode:        AccessMode = AccessMode.PRIVATE,
+        access_mode: AccessMode = AccessMode.PRIVATE,
     ) -> str:
         """Generate a SAS URL for private objects."""
-        container_name = self._container_for(access_mode)
+        container_name = self._bucket_for(access_mode)
         try:
             if not self.account_key:
                 # Azure supports user-delegation SAS generation with Microsoft Entra credentials,
@@ -189,12 +177,9 @@ class AzureStorage(ObjectStorage):
                 permission=BlobSasPermissions(read=True),
                 expiry=datetime.now(timezone.utc) + timedelta(seconds=expires_in_seconds)
             )
-            return f"https://{self.account_name}.blob.core.windows.net/{container_name}/{object_key}?{sas_token}"
+            import urllib.parse
+            encoded_key = urllib.parse.quote(object_key, safe="/")
+            return f"https://{self.account_name}.blob.core.windows.net/{container_name}/{encoded_key}?{sas_token}"
         except Exception as e:
             self._handle_error(e)
-
-    def generate_public_url(self, object_key: str) -> str:
-        import urllib.parse
-        encoded_key = urllib.parse.quote(object_key, safe="/")
-        return f"/{self.public_bucket}/{encoded_key}"
 
