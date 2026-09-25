@@ -220,7 +220,7 @@ async def _process_one_image(submission_id: str, tenant_code: str, sub_type: str
         # CPU on pixels the model can't use anyway).
         OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
         deface_scale = _compute_dynamic_scale(local_path, settings.DEFACE_SCALE or None)
-        deface_threshold = settings.DEFACE_THRESHOLD if settings.DEFACE_THRESHOLD is not None else 0.1
+        deface_threshold = settings.DEFACE_THRESHOLD if settings.DEFACE_THRESHOLD is not None else 0.2
         async with _get_blur_semaphore():
             await _run_in_image_executor(
                 anonymize_face,

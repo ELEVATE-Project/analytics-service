@@ -164,9 +164,9 @@ class Settings(BaseSettings):
     # images larger than this cap are proportionally downscaled to fit within it
     # (saves CPU/RAM on high-res phone photos). Leave empty to always run at
     # native resolution regardless of image size (safest, most accurate).
-    DEFACE_SCALE: str = Field(default="1920x1080")
-    # deface's built-in default is 0.2; we lower it to 0.1 for group photos.
-    DEFACE_THRESHOLD: float = Field(default=0.05)
+    DEFACE_SCALE: str = Field(default="1280x720")
+    # Face detection confidence threshold (0.0 - 1.0). Lower threshold detects smaller/group faces.
+    DEFACE_THRESHOLD: float = Field(default=0.2)
 
     model_config = SettingsConfigDict(
         env_file=".env",
