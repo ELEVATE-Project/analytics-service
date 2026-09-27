@@ -14,7 +14,12 @@ from app.database.operations import (
     insert_analysis_result,
     copy_parent_analysis_results,
 )
-from app.services.classifier import load_setfit_model, predict_setfit_batch
+from app.services.classifier import (
+    load_setfit_model, 
+    predict_setfit_batch,
+    load_hf_sequence_classification_model,
+    predict_hf_multi_theme_batch
+)
 from app.services.llm import openrouter_chat_completion, split_llm_usage
 
 logger = logging.getLogger("analytics_service.temporal.activities")
@@ -609,42 +614,156 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
 
     theme_id_to_info = {str(t["id"]): t for t in approved_themes}
 
-    # Step 1 — SetFit theme model: batch inference on all Challenge statements
-    setfit_model = await asyncio.to_thread(
-        load_setfit_model,
-        settings.SETFIT_THEME_MODEL_ID,
-        settings.SETFIT_THEME_MODEL_VERSION,
-    )
-    texts = [s["raw_statement"] for s in statements]
-    setfit_preds, setfit_confs = await asyncio.to_thread(predict_setfit_batch, setfit_model, texts)
+    # Separate statements into Discussion Challenges and Others
+    discussion_challenge_stmts = []
+    other_stmts = []
+    for s in statements:
+        if "discussion" in s.get("submission_type", "").lower() and s["statement_type"] == "challenge":
+            discussion_challenge_stmts.append(s)
+        else:
+            other_stmts.append(s)
+
+    setfit_resolved_count = 0
+    hf_resolved_count = 0
+    pending_items: List[Dict] = []
+    all_results: List[Dict] = []
+
+    # Step 1 — SetFit theme model: batch inference on all Other statements
+    if other_stmts:
+        setfit_model = await asyncio.to_thread(
+            load_setfit_model,
+            settings.SETFIT_THEME_MODEL_ID,
+            settings.SETFIT_THEME_MODEL_VERSION,
+        )
+        texts = [s["raw_statement"] for s in other_stmts]
+        setfit_preds, setfit_confs = await asyncio.to_thread(predict_setfit_batch, setfit_model, texts)
 
     setfit_resolved_count = 0
     pending_items: List[Dict] = []
     all_results: List[Dict] = []
 
     async with db.pool.acquire() as conn:
-        for stmt, pred, conf in zip(statements, setfit_preds, setfit_confs):
-            statement      = stmt["raw_statement"]
-            statement_type = stmt["statement_type"]
-            statement_id   = stmt["statement_id"]
+        if other_stmts:
+            for stmt, pred, conf in zip(other_stmts, setfit_preds, setfit_confs):
+                statement      = stmt["raw_statement"]
+                statement_type = stmt["statement_type"]
+                statement_id   = stmt["statement_id"]
+    
+                try:
+                    theme_threshold = settings.get_setfit_theme_threshold(str(pred))
+                except ValueError:
+                    logger.warning(
+                        f"[Thematic Pipeline] SetFit predicted unmapped theme label '{pred}' for statement "
+                        f"{statement_id}; routing to LLM fallback instead of failing the submission."
+                    )
+                    theme_threshold = None
+    
+                if theme_threshold is not None and conf >= theme_threshold:
+                    has_pii_tag = bool(re.search(r'<[A-Z]+>', statement))
+                    is_abusive_flagged_column = statement_type in abusive_masked_at
+                    flagged = has_pii_tag or is_abusive_flagged_column
+    
+                    if flagged:
+                        reason = "PII mask tag" if has_pii_tag else f"abusive column ({statement_type})"
+                        logger.info(f"[Thematic Pipeline] SetFit confident but FLAGGED ({reason}): '{statement[:80]}'")
+                        await insert_analysis_result(
+                            conn,
+                            submission_id=submission_id,
+                            tenant_code=tenant_code,
+                            statement_id=statement_id,
+                            analysis_type=analysis_type,
+                            statement_type=statement_type,
+                            category_type="Flagged",
+                            ml_model_name=settings.SETFIT_THEME_MODEL_ID,
+                            ml_model_version=settings.SETFIT_THEME_MODEL_VERSION,
+                            model_confidence_score=conf,
+                            model_prediction=pred,
+                            threshold=theme_threshold,
+                        )
+                        all_results.append({"statement": statement, "category_type": "Flagged"})
+                        setfit_resolved_count += 1
+                        continue
+    
+                    resolved_theme_id = _resolve_theme_id(pred, theme_id_to_info)
+                    cat_type = "Standard" if resolved_theme_id else "Others"
+    
+                    logger.info(
+                        f"[Thematic Pipeline] SetFit resolved '{statement[:60]}' → theme='{pred}' ({cat_type}, conf={conf:.3f})"
+                    )
+                    await insert_analysis_result(
+                        conn,
+                        submission_id=submission_id,
+                        tenant_code=tenant_code,
+                        statement_id=statement_id,
+                        analysis_type=analysis_type,
+                        statement_type=statement_type,
+                        theme_id=resolved_theme_id,
+                        category_type=cat_type,
+                        ml_model_name=settings.SETFIT_THEME_MODEL_ID,
+                        ml_model_version=settings.SETFIT_THEME_MODEL_VERSION,
+                        model_confidence_score=conf,
+                        model_prediction=pred,
+                        threshold=theme_threshold,
+                    )
+                    all_results.append({
+                        "statement": statement,
+                        "category_type": cat_type,
+                        "theme_id": resolved_theme_id,
+                    })
+                    setfit_resolved_count += 1
+    
+                else:
+                    logger.info(
+                        f"[Thematic Pipeline] SetFit conf {conf:.3f} < threshold {theme_threshold:.3f} for theme '{pred}' on statement '{statement[:60]}' — queued for local pipeline."
+                    )
+                    finished_result, pending_item = await _run_local_classification(
+                        conn=conn,
+                        statement=statement,
+                        submission_id=submission_id,
+                        tenant_code=tenant_code,
+                        statement_type=statement_type,
+                        abusive_masked_at=abusive_masked_at,
+                        analysis_type=analysis_type,
+                        statement_id=statement_id,
+                        setfit_conf=conf,
+                        setfit_pred=pred,
+                    )
+                    if finished_result is not None:
+                        all_results.append(finished_result)
+                    else:
+                        pending_item["statement_id"] = statement_id
+                        pending_items.append(pending_item)
 
-            try:
-                theme_threshold = settings.get_setfit_theme_threshold(str(pred))
-            except ValueError:
-                logger.warning(
-                    f"[Thematic Pipeline] SetFit predicted unmapped theme label '{pred}' for statement "
-                    f"{statement_id}; routing to LLM fallback instead of failing the submission."
-                )
-                theme_threshold = None
+        # Step 2 — HF Multi-Theme model: batch inference on Discussion Challenge statements
+        if discussion_challenge_stmts and settings.HF_THEME_MODEL_ID:
+            hf_model_dict = await asyncio.to_thread(
+                load_hf_sequence_classification_model,
+                settings.HF_THEME_MODEL_ID,
+                settings.HF_THEME_MODEL_VERSION,
+            )
+            texts = [s["raw_statement"] for s in discussion_challenge_stmts]
+            hf_themes_batch, hf_confs_batch = await asyncio.to_thread(
+                predict_hf_multi_theme_batch,
+                hf_model_dict["tokenizer"],
+                hf_model_dict["model"],
+                hf_model_dict["device"],
+                hf_model_dict["class_names"],
+                texts
+            )
 
-            if theme_threshold is not None and conf >= theme_threshold:
+            for stmt, themes, confs in zip(discussion_challenge_stmts, hf_themes_batch, hf_confs_batch):
+                statement      = stmt["raw_statement"]
+                statement_type = stmt["statement_type"]
+                statement_id   = stmt["statement_id"]
+                
                 has_pii_tag = bool(re.search(r'<[A-Z]+>', statement))
                 is_abusive_flagged_column = statement_type in abusive_masked_at
                 flagged = has_pii_tag or is_abusive_flagged_column
 
                 if flagged:
                     reason = "PII mask tag" if has_pii_tag else f"abusive column ({statement_type})"
-                    logger.info(f"[Thematic Pipeline] SetFit confident but FLAGGED ({reason}): '{statement[:80]}'")
+                    logger.info(f"[Thematic Pipeline] HF Multi-Theme FLAGGED ({reason}): '{statement[:80]}'")
+                    # Insert flagged record using the top theme's confidence/prediction
                     await insert_analysis_result(
                         conn,
                         submission_id=submission_id,
@@ -653,65 +772,42 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                         analysis_type=analysis_type,
                         statement_type=statement_type,
                         category_type="Flagged",
-                        ml_model_name=settings.SETFIT_THEME_MODEL_ID,
-                        ml_model_version=settings.SETFIT_THEME_MODEL_VERSION,
-                        model_confidence_score=conf,
-                        model_prediction=pred,
-                        threshold=theme_threshold,
+                        ml_model_name=settings.HF_THEME_MODEL_ID,
+                        ml_model_version=settings.HF_THEME_MODEL_VERSION,
+                        model_confidence_score=confs[0] if confs else 0.0,
+                        model_prediction=themes[0] if themes else None,
                     )
                     all_results.append({"statement": statement, "category_type": "Flagged"})
-                    setfit_resolved_count += 1
+                    hf_resolved_count += 1
                     continue
-
-                resolved_theme_id = _resolve_theme_id(pred, theme_id_to_info)
-                cat_type = "Standard" if resolved_theme_id else "Others"
-
-                logger.info(
-                    f"[Thematic Pipeline] SetFit resolved '{statement[:60]}' → theme='{pred}' ({cat_type}, conf={conf:.3f})"
-                )
-                await insert_analysis_result(
-                    conn,
-                    submission_id=submission_id,
-                    tenant_code=tenant_code,
-                    statement_id=statement_id,
-                    analysis_type=analysis_type,
-                    statement_type=statement_type,
-                    theme_id=resolved_theme_id,
-                    category_type=cat_type,
-                    ml_model_name=settings.SETFIT_THEME_MODEL_ID,
-                    ml_model_version=settings.SETFIT_THEME_MODEL_VERSION,
-                    model_confidence_score=conf,
-                    model_prediction=pred,
-                    threshold=theme_threshold,
-                )
+                
+                is_multi = len(themes) > 1
+                for theme, conf in zip(themes, confs):
+                    resolved_theme_id = _resolve_theme_id(theme, theme_id_to_info)
+                    cat_type = "Standard" if resolved_theme_id else "Others"
+                    logger.info(f"[Thematic Pipeline] HF Multi-Theme resolved '{statement[:60]}' → theme='{theme}' ({cat_type}, conf={conf:.3f})")
+                    
+                    await insert_analysis_result(
+                        conn,
+                        submission_id=submission_id,
+                        tenant_code=tenant_code,
+                        statement_id=statement_id,
+                        analysis_type=analysis_type,
+                        statement_type=statement_type,
+                        theme_id=resolved_theme_id,
+                        category_type=cat_type,
+                        ml_model_name=settings.HF_THEME_MODEL_ID,
+                        ml_model_version=settings.HF_THEME_MODEL_VERSION,
+                        model_confidence_score=conf,
+                        model_prediction=theme,
+                        multi_theme_mapped=is_multi,
+                    )
                 all_results.append({
                     "statement": statement,
-                    "category_type": cat_type,
-                    "theme_id": resolved_theme_id,
+                    "category_type": "Standard" if any(_resolve_theme_id(t, theme_id_to_info) for t in themes) else "Others",
+                    "themes": themes,
                 })
-                setfit_resolved_count += 1
-
-            else:
-                logger.info(
-                    f"[Thematic Pipeline] SetFit conf {conf:.3f} < threshold {theme_threshold:.3f} for theme '{pred}' on statement '{statement[:60]}' — queued for local pipeline."
-                )
-                finished_result, pending_item = await _run_local_classification(
-                    conn=conn,
-                    statement=statement,
-                    submission_id=submission_id,
-                    tenant_code=tenant_code,
-                    statement_type=statement_type,
-                    abusive_masked_at=abusive_masked_at,
-                    analysis_type=analysis_type,
-                    statement_id=statement_id,
-                    setfit_conf=conf,
-                    setfit_pred=pred,
-                )
-                if finished_result is not None:
-                    all_results.append(finished_result)
-                else:
-                    pending_item["statement_id"] = statement_id
-                    pending_items.append(pending_item)
+                hf_resolved_count += 1
 
     if pending_items:
         fallback_results = await _run_batched_llm_fallback(
@@ -727,9 +823,15 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
         )
         all_results.extend(fallback_results)
 
+    async with db.pool.acquire() as conn:
+        intra_submission_copies = await copy_parent_analysis_results(conn, submission_id, tenant_code, analysis_type)
+        if intra_submission_copies > 0:
+            logger.info("[Thematic Pipeline] Copied %d intra-submission parent analysis_results", intra_submission_copies)
+            child_copies += intra_submission_copies
+
     logger.info(
         f"[Thematic Pipeline] Done. Processed {len(all_results)} statement(s) "
-        f"({setfit_resolved_count} by SetFit, {len(all_results) - setfit_resolved_count} by fallback/gates)."
+        f"({setfit_resolved_count} by SetFit, {hf_resolved_count} by HF Multi-Theme, {len(all_results) - setfit_resolved_count - hf_resolved_count} by fallback/gates). Copied {child_copies} child statements."
     )
 
     return {
@@ -738,5 +840,6 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
         "processed": len(all_results),
         "setfit_resolved": setfit_resolved_count,
         "results": all_results,
+        "child_copies": child_copies,
         "warnings": warnings,
     }

@@ -107,7 +107,12 @@ class Settings(BaseSettings):
     # SetFit Thematic Classification model
     SETFIT_THEME_MODEL_ID: str = Field(default="")
     SETFIT_THEME_MODEL_VERSION: str = Field(default="")
+    HF_THEME_MODEL_ID: str = Field(default="")
+    HF_THEME_MODEL_VERSION: str = Field(default="")
     SETFIT_THEME_CONFIDENCE_THRESHOLD: Dict[str, float] = Field(default_factory=dict)
+    HF_THEME_CONFIDENCE_THRESHOLD: str = Field(default="{}")
+    HF_THEME_TOP_K: int = Field(default=3)
+    HF_THEME_MIN_CONFIDENCE: float = Field(default=0.15)
 
     # Story Rating Configuration
     MAX_PDF_TEXT_CHARS: int = Field(default=40000)
