@@ -521,8 +521,11 @@ async def _run_batched_llm_fallback(
                 )
             else:
                 result["category_type"] = "Others"
-                setfit_pred = pending.get("setfit_pred")
-                setfit_threshold = settings.get_setfit_theme_threshold(setfit_pred) if setfit_pred else None
+                model_pred = pending.get("model_pred")
+                model_conf = pending.get("model_conf")
+                model_threshold = pending.get("model_threshold")
+                ml_model_name = pending.get("ml_model_name")
+                ml_model_version = pending.get("ml_model_version")
                 await insert_analysis_result(
                     conn,
                     submission_id=submission_id,
@@ -532,11 +535,11 @@ async def _run_batched_llm_fallback(
                     analysis_type=analysis_type,
                     statement_type=statement_type,
                     category_type="Others",
-                    ml_model_name=settings.SETFIT_THEME_MODEL_ID,
-                    ml_model_version=settings.SETFIT_THEME_MODEL_VERSION,
-                    model_confidence_score=pending.get("setfit_conf"),
-                    model_prediction=setfit_pred,
-                    threshold=setfit_threshold,
+                    ml_model_name=ml_model_name,
+                    ml_model_version=ml_model_version,
+                    model_confidence_score=model_conf,
+                    model_prediction=model_pred,
+                    threshold=model_threshold,
                     llm_confidence_score=llm_confidence,
                     justification=llm_justification,
                     meta_data=diagnostics,
@@ -628,9 +631,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
     other_stmts = []
     is_hf_enabled = bool(settings.HF_THEME_MODEL_ID and settings.HF_THEME_MODEL_ID.strip())
     for s in statements:
-        is_discussion = "discussion" in s.get("submission_type", "").lower()
-        is_target_type = "challenge" in s["statement_type"].lower() or "solution" in s["statement_type"].lower()
-        if is_hf_enabled and is_discussion and is_target_type:
+        if is_hf_enabled:
             discussion_hf_stmts.append(s)
         else:
             other_stmts.append(s)
@@ -649,10 +650,6 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
         )
         texts = [s["raw_statement"] for s in other_stmts]
         setfit_preds, setfit_confs = await asyncio.to_thread(predict_setfit_batch, setfit_model, texts)
-
-    setfit_resolved_count = 0
-    pending_items: List[Dict] = []
-    all_results: List[Dict] = []
 
     async with db.pool.acquire() as conn:
         if other_stmts:
@@ -868,6 +865,18 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                     
                     is_multi = len(themes) > 1
                     for theme, conf in zip(themes, confs):
+                        try:
+                            if theme == top_theme:
+                                curr_threshold = theme_threshold
+                            else:
+                                curr_threshold = settings.get_hf_challenge_multi_theme_threshold(str(theme))
+                        except ValueError:
+                            curr_threshold = None
+
+                        if curr_threshold is not None and conf < curr_threshold:
+                            logger.info(f"[Thematic Pipeline] Secondary theme '{theme}' conf {conf:.3f} < threshold {curr_threshold:.3f}; skipping.")
+                            continue
+
                         resolved_theme_id = _resolve_theme_id(theme, theme_id_to_info)
                         cat_type = "Standard" if resolved_theme_id else "Others"
                         logger.info(f"[Thematic Pipeline] HF Multi-Theme resolved '{statement[:60]}' → theme='{theme}' ({cat_type}, conf={conf:.3f})")
@@ -885,6 +894,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                             ml_model_version=settings.HF_THEME_MODEL_VERSION,
                             model_confidence_score=conf,
                             model_prediction=theme,
+                            threshold=curr_threshold,
                             multi_theme_mapped=is_multi,
                         )
                     all_results.append({
