@@ -23,6 +23,10 @@ torch
 langdetect
 numpy>=1.24.0
 google-cloud-storage
+boto3>=1.34.0
+azure-storage-blob>=12.19.0
+azure-identity>=1.15.0
+oci>=2.115.0
 pypdf>=4.0.0
 setfit
 huggingface_hub<=0.23.5
