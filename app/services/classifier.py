@@ -176,7 +176,12 @@ def load_hf_sequence_classification_model(model_id: str, revision: str = "main")
                         class_names = cfg.get("labels", [])
                 
                 if not class_names:
-                    class_names = list(model.config.id2label.values())
+                    class_names = [
+                        model.config.id2label[i] if i in model.config.id2label else model.config.id2label[str(i)]
+                        for i in range(model.config.num_labels)
+                    ]
+                if len(class_names) != model.config.num_labels:
+                    raise ValueError(f"Label count mismatch: {len(class_names)} class names for {model.config.num_labels} model labels.")
                     
                 _hf_models_cache[cache_key] = {
                     "tokenizer": tokenizer,
@@ -229,13 +234,6 @@ def predict_hf_multi_theme_batch(
             theme = class_names[idx]
             conf = float(probs[idx])
             
-            # 1. Always take the first (top) prediction, regardless of score
-            if i == 0:
-                themes.append(theme)
-                confs.append(conf)
-                continue
-            
-            # 2. For secondary themes, check minimum confidence
             if conf < min_confidence:
                 break
                 
@@ -245,8 +243,12 @@ def predict_hf_multi_theme_batch(
         # 4. Mutually Exclusive Filter for 'Unknown/Unclear'
         if len(themes) > 1 and "Unknown/Unclear" in themes:
             unclear_idx = themes.index("Unknown/Unclear")
-            themes.pop(unclear_idx)
-            confs.pop(unclear_idx)
+            if unclear_idx == 0:
+                themes = [themes[0]]
+                confs = [confs[0]]
+            else:
+                themes.pop(unclear_idx)
+                confs.pop(unclear_idx)
                 
         batch_multi_themes.append(themes)
         batch_multi_confs.append(confs)
