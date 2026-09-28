@@ -229,8 +229,8 @@ CREATE INDEX idx_statements_cleaned_lower
     ON statements (LOWER(cleaned_statement));
 
 -- Submission lookup + cascade delete path.
-CREATE INDEX IF NOT EXISTS idx_statements_submission_parent ON statements (submission_id, parent_id);
-CREATE INDEX IF NOT EXISTS idx_statements_parent ON statements (parent_id) WHERE parent_id IS NOT NULL;
+CREATE INDEX idx_statements_submission_parent ON statements (submission_id, parent_id);
+CREATE INDEX idx_statements_parent ON statements (parent_id) WHERE parent_id IS NOT NULL;
 
 -- =========================================================================
 -- Trigger: automatically promote a duplicate child to be the new parent

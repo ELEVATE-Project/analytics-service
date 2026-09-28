@@ -159,6 +159,7 @@ class ConfigDrivenProcessingWorkflow:
                         {
                             "submission_id": submission_id,
                             "tenant_code": tenant_code,
+                            "analysis_type": step_name,
                             **llm_overrides,
                         },
                         start_to_close_timeout=timedelta(minutes=10),

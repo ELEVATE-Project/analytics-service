@@ -1,8 +1,11 @@
 import json
+import math
 import os
 from typing import Dict, Any, List
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+ALLOWED_STORAGE_PROVIDERS = {"gcp", "aws", "azure", "oci"}
 
 class Settings(BaseSettings):
     # Kafka Configuration
@@ -83,7 +86,7 @@ class Settings(BaseSettings):
         default='["id","Title","User name","Designation","Location","District","Organization","Report Created At","Objective","Challenges","Action Steps","Impact","Duration","Blurb","masked_blurb","Content","masked_content","Images","Pdf","Transcript Link","Session ID"]'
     )
     DISCUSSION_CSV_COLUMN: str = Field(
-        default='["id","Title","User name","User Location","District","Participant Count","Men","Women","Children","Date of Discussion","Organization","Challenges","Solutions","Author","Language","Report Created At","Transcript Link","Image Urls","PDF Urls","Session ID"]'
+        default='["id","Title","User name","User Location","District","Participant Count","Men","Women","Children","Date of Discussion","Organization","Challenges","Solutions","Author","Language","Report Created At","Transcript Link","Image Urls","PDF Urls","Session ID","PRI Member Name","PRI Member Designation","School Representative Name","School Representative Designation"]'
     )
     # Maps a discussion participant "role" to the CSV column name holding its
     # count (JSON object). See get_discussion_participants_map().
@@ -107,7 +110,15 @@ class Settings(BaseSettings):
     # SetFit Thematic Classification model
     SETFIT_THEME_MODEL_ID: str = Field(default="")
     SETFIT_THEME_MODEL_VERSION: str = Field(default="")
+    HF_THEME_MODEL_ID: str = Field(default="")
+    HF_THEME_MODEL_VERSION: str = Field(default="")
     SETFIT_THEME_CONFIDENCE_THRESHOLD: Dict[str, float] = Field(default_factory=dict)
+    HF_THEME_TOP_K: int = Field(default=3)
+    HF_THEME_MIN_CONFIDENCE: float = Field(default=0.15)
+    
+    HF_CHALLENGE_MULTI_THEME_CONFIDENCE_THRESHOLD: Dict[str, float] = Field(default_factory=dict)
+    HF_CHALLENGE_SINGLE_THEME_CONFIDENCE_THRESHOLD: Dict[str, float] = Field(default_factory=dict)
+    HF_SOLUTION_SINGLE_THEME_CONFIDENCE_THRESHOLD: Dict[str, float] = Field(default_factory=dict)
 
     # Story Rating Configuration
     MAX_PDF_TEXT_CHARS: int = Field(default=40000)
@@ -134,7 +145,7 @@ class Settings(BaseSettings):
         default='{"create": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt", "tags.state", "tags.district", "tags.organization", "tags.programId", "tags.programName", "tags.leaderCategoryId", "tags.leaderCategoryName", "data.title", "data.designation", "data.submissionDate", "data.pdfUrls.original", "data.pdfUrls.masked", "data.transcriptLink", "data.challenges", "data.objective", "data.actionSteps", "data.impact", "data.duration", "data.blurb", "data.content"], "optional": ["data.imageUrls"]}, "update": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"], "newValuesNoEmpty": true}, "delete": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"]}}'
     )
     DISCUSSION_KAFKA_SCHEMA: str = Field(
-        default='{"create": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt", "tags.state", "tags.district", "tags.organization", "tags.programId", "tags.programName", "tags.leaderCategoryId", "tags.leaderCategoryName", "data.title", "data.designation", "data.submissionDate", "data.discussionDate", "data.pdfUrls.original", "data.pdfUrls.masked", "data.transcriptLink", "data.challenges", "data.solutions", "data.participantsData"], "optional": ["data.author", "data.language", "data.imageUrls"]}, "update": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"], "newValuesNoEmpty": true}, "delete": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"]}}'
+        default='{"create": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt", "tags.state", "tags.district", "tags.organization", "tags.programId", "tags.programName", "tags.leaderCategoryId", "tags.leaderCategoryName", "data.title", "data.designation", "data.submissionDate", "data.discussionDate", "data.pdfUrls.original", "data.pdfUrls.masked", "data.transcriptLink", "data.challenges", "data.solutions", "data.participantsData", "data.pri_member_information", "data.school_representative_information"], "optional": ["data.author", "data.language", "data.imageUrls"]}, "update": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"], "newValuesNoEmpty": true}, "delete": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"]}}'
     )
 
     # Thematic Classification Configuration
@@ -143,7 +154,20 @@ class Settings(BaseSettings):
     SIMILARITY_SCORE_THRESHOLD: float = Field(default=0.65)
     LLM_CONFIDENCE_SCORE_THRESHOLD: float = Field(default=0.8)
 
-    # GCP Credentials
+    # Generic Storage Configuration
+    STORAGE_PROVIDER: str = Field(default="gcp") # gcp | aws | azure | oci
+    STORAGE_PUBLIC_BUCKET: str = Field(default="")   # bucket for AccessMode.PUBLIC objects (blurred images)
+    STORAGE_PRIVATE_BUCKET: str = Field(default="")  # bucket for AccessMode.PRIVATE objects (CSVs)
+    STORAGE_REGION: str = Field(default="")
+    STORAGE_STORY_PREFIX: str = Field(default="story_blurred_image")
+    STORAGE_DISCUSSION_PREFIX: str = Field(default="discussion_blurred_image")
+    STORAGE_CSV_PREFIX: str = Field(default="mitra_dashboard_api_output")
+    STORAGE_SIGNED_URL_TTL_SECONDS: int = Field(default=3600)
+    STORAGE_CONNECT_TIMEOUT_SECONDS: int = Field(default=10, gt=0)
+    STORAGE_READ_TIMEOUT_SECONDS: int = Field(default=60, gt=0)
+    STORAGE_MAX_RETRIES: int = Field(default=3, ge=0)
+
+    # GCP Configuration
     TYPE: str = Field(default="service_account")
     PROJECT_ID: str = Field(default="")
     PRIVATE_KEY_ID: str = Field(default="")
@@ -155,14 +179,36 @@ class Settings(BaseSettings):
     AUTH_PROVIDER_X509_CERT_URL: str = Field(default="")
     CLIENT_X509_CERT_URL: str = Field(default="")
     UNIVERSE_DOMAIN: str = Field(default="googleapis.com")
-    BUCKET_NAME: str = Field(default="")
     STORY_BLOB: str = Field(default="")
     DISCUSSION_BLOB: str = Field(default="")
     MEDIA_BASE_URL: str = Field(default="")
     # Image Blur CPU Throttling
-    # Downscale resolution for face-detection neural network (WxH).
-    # Only affects detection speed — blur is applied to the original full-res image.
-    DEFACE_SCALE: str = Field(default="640x360")
+    # images larger than this cap are proportionally downscaled to fit within it
+    # (saves CPU/RAM on high-res phone photos). Leave empty to always run at
+    # native resolution regardless of image size (safest, most accurate).
+    DEFACE_SCALE: str = Field(default="1280x720")
+    # Face detection confidence threshold (0.0 - 1.0). Lower threshold detects smaller/group faces.
+    DEFACE_THRESHOLD: float = Field(default=0.2)
+
+    # AWS S3 Configuration
+    AWS_ACCESS_KEY_ID: str = Field(default="")
+    AWS_SECRET_ACCESS_KEY: str = Field(default="")
+    AWS_SESSION_TOKEN: str = Field(default="")
+    AWS_DEFAULT_REGION: str = Field(default="")
+
+    # OCI Configuration
+    OCI_NAMESPACE: str = Field(default="")
+    OCI_CONFIG_FILE: str = Field(default="~/.oci/config")
+    OCI_CONFIG_PROFILE: str = Field(default="DEFAULT")
+    OCI_REGION: str = Field(default="")
+
+    # Azure Configuration
+    AZURE_STORAGE_ACCOUNT_NAME: str = Field(default="")
+    AZURE_STORAGE_CONNECTION_STRING: str = Field(default="")
+    AZURE_STORAGE_CONTAINER: str = Field(default="")
+    AZURE_CLIENT_ID: str = Field(default="")
+    AZURE_CLIENT_SECRET: str = Field(default="")
+    AZURE_TENANT_ID: str = Field(default="")
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -201,6 +247,43 @@ class Settings(BaseSettings):
             raise ValueError(f"Invalid JSON configuration for {info.field_name}: {e}") from e
         return v
 
+    @field_validator("DEFACE_SCALE")
+    @classmethod
+    def validate_deface_scale(cls, v: str) -> str:
+        if v is None:
+            return v
+        if not isinstance(v, str):
+            raise ValueError(f"DEFACE_SCALE must be a string, got {type(v).__name__}.")
+        s = v.strip()
+        if not s:
+            return v
+        parts = s.lower().split("x")
+        if len(parts) != 2:
+            raise ValueError(
+                f"DEFACE_SCALE must be empty or in 'WIDTHxHEIGHT' format, got {v!r}."
+            )
+        for part in parts:
+            try:
+                val = int(part.strip())
+                if val <= 0:
+                    raise ValueError
+            except ValueError:
+                raise ValueError(
+                    f"DEFACE_SCALE dimensions must be positive integers, got {v!r}."
+                ) from None
+        return v
+
+    @field_validator("DEFACE_THRESHOLD")
+    @classmethod
+    def validate_deface_threshold(cls, v: float) -> float:
+        if v is None or not math.isfinite(v):
+            raise ValueError(f"DEFACE_THRESHOLD must be a finite float, got {v!r}.")
+        if not (0.0 <= float(v) < 1.0):
+            raise ValueError(
+                f"DEFACE_THRESHOLD must be between 0 (inclusive) and 1 (exclusive), got {v!r}."
+            )
+        return float(v)
+
     @field_validator("LOG_DIR")
     @classmethod
     def validate_log_dir(cls, v: str) -> str:
@@ -217,6 +300,17 @@ class Settings(BaseSettings):
                 f"LOG_LEVEL must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL; got {v!r}."
             )
         return level
+
+    @field_validator("STORAGE_PROVIDER", mode="before")
+    @classmethod
+    def validate_storage_provider(cls, v: str) -> str:
+        provider = v.strip().lower()
+        if provider not in ALLOWED_STORAGE_PROVIDERS:
+            raise ValueError(
+                f"STORAGE_PROVIDER must be one of: {', '.join(ALLOWED_STORAGE_PROVIDERS)}; "
+                f"got {v!r}."
+            )
+        return provider
 
     @field_validator("STORY_CSV_COLUMN", "DISCUSSION_CSV_COLUMN")
     @classmethod
@@ -312,6 +406,50 @@ class Settings(BaseSettings):
         raise ValueError(
             f"SetFit threshold for theme '{theme_name}' is not configured in SETFIT_THEME_CONFIDENCE_THRESHOLD."
         )
+
+    @field_validator(
+        "HF_CHALLENGE_MULTI_THEME_CONFIDENCE_THRESHOLD",
+        "HF_CHALLENGE_SINGLE_THEME_CONFIDENCE_THRESHOLD",
+        "HF_SOLUTION_SINGLE_THEME_CONFIDENCE_THRESHOLD",
+        mode="before"
+    )
+    @classmethod
+    def validate_hf_theme_threshold(cls, v: Any) -> Dict[str, float]:
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                return {}
+            try:
+                v = json.loads(v)
+            except (json.JSONDecodeError, TypeError) as e:
+                raise ValueError(f"Invalid JSON for HF_THEME_CONFIDENCE_THRESHOLD: {e}") from e
+        if isinstance(v, dict):
+            return {str(k): float(val) for k, val in v.items()}
+        if isinstance(v, (int, float)):
+            return {}
+        return v or {}
+
+    def _get_mapped_threshold(self, config_dict: Dict[str, float], theme_name: str, config_name: str) -> float:
+        """Helper method to extract threshold from a specific dictionary."""
+        if isinstance(config_dict, dict) and theme_name in config_dict:
+            return float(config_dict[theme_name])
+        if isinstance(config_dict, dict):
+            normalized = {k.strip().lower(): v for k, v in config_dict.items()}
+            theme_norm = theme_name.strip().lower()
+            if theme_norm in normalized:
+                return float(normalized[theme_norm])
+        raise ValueError(
+            f"HF threshold for theme '{theme_name}' is not configured in {config_name}."
+        )
+
+    def get_hf_challenge_multi_theme_threshold(self, theme_name: str) -> float:
+        return self._get_mapped_threshold(self.HF_CHALLENGE_MULTI_THEME_CONFIDENCE_THRESHOLD, theme_name, "HF_CHALLENGE_MULTI_THEME_CONFIDENCE_THRESHOLD")
+
+    def get_hf_challenge_single_theme_threshold(self, theme_name: str) -> float:
+        return self._get_mapped_threshold(self.HF_CHALLENGE_SINGLE_THEME_CONFIDENCE_THRESHOLD, theme_name, "HF_CHALLENGE_SINGLE_THEME_CONFIDENCE_THRESHOLD")
+
+    def get_hf_solution_single_theme_threshold(self, theme_name: str) -> float:
+        return self._get_mapped_threshold(self.HF_SOLUTION_SINGLE_THEME_CONFIDENCE_THRESHOLD, theme_name, "HF_SOLUTION_SINGLE_THEME_CONFIDENCE_THRESHOLD")
 
     def get_process_config(self, submission_type: str) -> List[Dict[str, Any]]:
         """

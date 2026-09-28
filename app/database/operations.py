@@ -472,6 +472,34 @@ async def insert_or_update_submission(
                 if disc_date_str else None
             )
 
+            # Extract PRI member info (nested object or legacy flat keys)
+            pri_info = (
+                data.get("pri_member_information")
+                or data.get("priMemberInformation")
+                or data.get("pri_member_info")
+                or data.get("priMemberInfo")
+            )
+            if isinstance(pri_info, dict):
+                pri_member_name = pri_info.get("name") or data.get("priMemberName")
+                pri_member_designation = pri_info.get("designation") or data.get("priMemberDesignation")
+            else:
+                pri_member_name = data.get("priMemberName")
+                pri_member_designation = data.get("priMemberDesignation")
+
+            # Extract School Representative info (nested object or legacy flat keys)
+            school_info = (
+                data.get("school_representative_information")
+                or data.get("schoolRepresentativeInformation")
+                or data.get("school_representative_info")
+                or data.get("schoolRepresentativeInfo")
+            )
+            if isinstance(school_info, dict):
+                school_rep_name = school_info.get("name") or data.get("schoolRepresentativeName")
+                school_rep_designation = school_info.get("designation") or data.get("schoolRepresentativeDesignation")
+            else:
+                school_rep_name = data.get("schoolRepresentativeName")
+                school_rep_designation = data.get("schoolRepresentativeDesignation")
+
             if row_exists:
                 await conn.execute(
                     """
@@ -486,6 +514,10 @@ async def insert_or_update_submission(
                         masked_pdf_urls = COALESCE($10, masked_pdf_urls),
                         transcript_link = COALESCE($11, transcript_link),
                         discussion_date = COALESCE($12, discussion_date),
+                        pri_member_name = COALESCE($13, pri_member_name),
+                        pri_member_designation = COALESCE($14, pri_member_designation),
+                        school_representative_name = COALESCE($15, school_representative_name),
+                        school_representative_designation = COALESCE($16, school_representative_designation),
                         updated_at = now()
                     WHERE submission_id = $1 AND tenant_code = $2
                     """,
@@ -499,16 +531,21 @@ async def insert_or_update_submission(
                     pdf_urls,
                     masked_pdf_urls,
                     data.get("transcriptLink"),
-                    discussion_date
+                    discussion_date,
+                    pri_member_name,
+                    pri_member_designation,
+                    school_rep_name,
+                    school_rep_designation,
                 )
             else:
                 await conn.execute(
                     """
                     INSERT INTO discussion_submissions (
                         submission_id, tenant_code, title, challenges, solutions,
-                        author, language, image_urls, pdf_urls, masked_pdf_urls, transcript_link, discussion_date
+                        author, language, image_urls, pdf_urls, masked_pdf_urls, transcript_link, discussion_date,
+                        pri_member_name, pri_member_designation, school_representative_name, school_representative_designation
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                     """,
                     submission_id, tenant_code,
                     data.get("title"),
@@ -520,7 +557,11 @@ async def insert_or_update_submission(
                     pdf_urls,
                     masked_pdf_urls,
                     data.get("transcriptLink"),
-                    discussion_date
+                    discussion_date,
+                    pri_member_name,
+                    pri_member_designation,
+                    school_rep_name,
+                    school_rep_designation,
                 )
 
             # Dynamic KPI metrics: participantsData is a full snapshot when present;
@@ -980,11 +1021,16 @@ async def fetch_statements_for_submission(
     rows = await conn.fetch(
         """
         SELECT id, raw_statement, statement_type, submission_type
-        FROM statements
-        WHERE submission_id = $1
-          AND tenant_code = $2
-          AND parent_id IS NULL
-        ORDER BY created_at ASC
+        FROM statements s
+        WHERE s.submission_id = $1
+          AND s.tenant_code = $2
+          AND s.parent_id IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM analysis_results existing
+              WHERE existing.statement_id = s.id
+                AND existing.analysis_type = 'statement_category'
+          )
+        ORDER BY s.created_at ASC
         """,
         str(submission_id), tenant_code
     )
@@ -1015,7 +1061,8 @@ async def fetch_challenge_and_solution_statements_for_submission(
         SELECT
             ar.statement_id,
             s.raw_statement,
-            s.statement_type
+            s.statement_type,
+            s.submission_type
         FROM analysis_results ar
         JOIN statements s ON s.id = ar.statement_id
         WHERE ar.submission_id  = $1
@@ -1026,42 +1073,17 @@ async def fetch_challenge_and_solution_statements_for_submission(
               (ar.llm_prediction IS NULL     AND LOWER(ar.model_prediction) IN ('challenge', 'solution or action'))
            OR (ar.llm_prediction IS NOT NULL AND LOWER(ar.llm_prediction)   IN ('challenge', 'solution or action'))
           )
+          AND NOT EXISTS (
+              SELECT 1 FROM analysis_results existing
+              WHERE existing.statement_id = s.id
+                AND existing.analysis_type = 'thematic_classification'
+          )
         ORDER BY ar.created_at ASC
         """,
         str(submission_id), tenant_code,
     )
     return [dict(row) for row in rows]
 
-
-async def fetch_child_statements(
-    conn: asyncpg.Connection,
-    parent_statement_id: Any,
-    submission_id: str,
-    tenant_code: str,
-) -> List[Dict[str, Any]]:
-    """
-    Fetches all duplicate (child) statements whose parent_id equals the given
-    parent_statement_id within the same submission.
-
-    These are statements that were deduplicated at insert time and therefore
-    skipped during analysis. Their analysis_results rows should be copied from
-    the parent after the parent is processed.
-
-    Returns rows with: id (the child statement_id), statement_type.
-    Returns an empty list when no children exist.
-    """
-    rows = await conn.fetch(
-        """
-        SELECT id, statement_type
-        FROM statements
-        WHERE parent_id   = $1
-          AND submission_id = $2
-          AND tenant_code   = $3
-        ORDER BY created_at ASC
-        """,
-        str(parent_statement_id), str(submission_id), tenant_code,
-    )
-    return [dict(row) for row in rows]
 async def reclaim_stale_in_progress(stale_minutes: int = 30) -> int:
     """
     Reset any csv_uploads rows that have been stuck at status='in_progress'
@@ -1097,4 +1119,58 @@ async def reclaim_stale_in_progress(stale_minutes: int = 30) -> int:
     try:
         return int(result.split()[-1])
     except (AttributeError, ValueError, IndexError):
+        return 0
+
+async def copy_parent_analysis_results(
+    conn: asyncpg.Connection,
+    submission_id: str,
+    tenant_code: str,
+    analysis_type: str,
+) -> int:
+    """
+    Copies analysis_results from parent statements to child statements within a submission.
+    This effectively "pulls" historical AI classification results forward when a new
+    submission contains statements that were deduplicated against an older submission.
+    """
+    query = """
+        INSERT INTO analysis_results (
+            submission_id, tenant_code, statement_id, analysis_type, analysis_column,
+            ml_model_name, ml_model_version, model_confidence_score, model_prediction,
+            llm_confidence_score, llm_prediction, threshold, theme_id,
+            justification, multi_theme_mapped, category_type, meta_data
+        )
+        SELECT 
+            $1 AS submission_id,
+            $2 AS tenant_code,
+            child.id AS statement_id,
+            ar.analysis_type,
+            ARRAY[child.statement_type] AS analysis_column,
+            ar.ml_model_name,
+            ar.ml_model_version,
+            ar.model_confidence_score,
+            ar.model_prediction,
+            ar.llm_confidence_score,
+            ar.llm_prediction,
+            ar.threshold,
+            ar.theme_id,
+            ar.justification,
+            ar.multi_theme_mapped,
+            ar.category_type,
+            jsonb_build_object('deduped_from', child.parent_id::text) AS meta_data
+        FROM statements child
+        JOIN analysis_results ar ON ar.statement_id = child.parent_id
+        WHERE child.submission_id = $1
+          AND child.tenant_code = $2
+          AND child.parent_id IS NOT NULL
+          AND ar.analysis_type = $3
+          AND NOT EXISTS (
+              SELECT 1 FROM analysis_results existing
+              WHERE existing.statement_id = child.id
+                AND existing.analysis_type = $3
+          )
+    """
+    result = await conn.execute(query, submission_id, tenant_code, analysis_type)
+    try:
+        return int(result.split()[-1])
+    except Exception:
         return 0
