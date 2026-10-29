@@ -403,7 +403,7 @@ class BulkStepRetryWorkflow:
                 workflow.execute_child_workflow(
                     ConfigDrivenProcessingWorkflow.run,
                     sub,
-                    id=f"step-retry-{sub['submission_id']}-{sub['tenant_code']}-{workflow.uuid4().hex[:8]}"
+                    id=f"step-retry-{sub['submission_id']}-{sub['tenant_code']}"
                 )
                 for sub in failed_list
             ]

@@ -24,6 +24,7 @@ from app.database.db import db
 from app.database.operations import fetch_retryable_failed_submissions
 from app.temporal.client import get_temporal_client
 from app.temporal.workflows import ConfigDrivenProcessingWorkflow
+from temporalio.exceptions import WorkflowAlreadyStartedError
 
 logger = logging.getLogger("analytics_service.api.routes.uploads")
 
@@ -129,7 +130,8 @@ async def retry_step(
         existing_steps = (process_status or {}).get("steps", [])
 
         submission_id = row["submission_id"]
-        workflow_id = f"step-retry-{submission_id}-{body.tenant_code}-{uuid.uuid4().hex[:8]}"
+        # Stable workflow ID prevents concurrent duplicate retries for the same submission
+        workflow_id = f"step-retry-{submission_id}-{body.tenant_code}"
 
         payload = {
             "submission_id": submission_id,
@@ -142,12 +144,18 @@ async def retry_step(
 
         # 5. Dispatch to Temporal using shared singleton client
         client = await get_temporal_client()
-        await client.start_workflow(
-            ConfigDrivenProcessingWorkflow.run,
-            payload,
-            id=workflow_id,
-            task_queue=settings.TEMPORAL_QUEUE,
-        )
+        try:
+            await client.start_workflow(
+                ConfigDrivenProcessingWorkflow.run,
+                payload,
+                id=workflow_id,
+                task_queue=settings.TEMPORAL_QUEUE,
+            )
+        except WorkflowAlreadyStartedError:
+            raise HTTPException(
+                status_code=409,
+                detail=f"A retry workflow for submission '{submission_id}' is already running.",
+            )
 
         return StepRetryResponse(
             workflow_id=workflow_id,
@@ -178,7 +186,6 @@ async def retry_all_failed(
         )
 
     tasks = []
-    started_count = 0
     for row in rows:
         process_status = row.get("process_status") or {}
         if isinstance(process_status, str):
@@ -190,7 +197,8 @@ async def retry_all_failed(
         sub_type = row["submission_type"]
         process_steps = settings.get_process_config(sub_type)
         existing_steps = process_status.get("steps", [])
-        workflow_id = f"step-retry-{row['submission_id']}-{row['tenant_code']}-{uuid.uuid4().hex[:8]}"
+        # Stable workflow ID prevents concurrent duplicate executions
+        workflow_id = f"step-retry-{row['submission_id']}-{row['tenant_code']}"
 
         tasks.append(
             client.start_workflow(
@@ -207,14 +215,24 @@ async def retry_all_failed(
                 task_queue=settings.TEMPORAL_QUEUE,
             )
         )
-        started_count += 1
 
+    success_count = 0
+    failed_count = 0
     if tasks:
-        await asyncio.gather(*tasks)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, Exception):
+                failed_count += 1
+                logger.warning(f"Failed to dispatch retry workflow: {r}")
+            else:
+                success_count += 1
 
-    logger.info(f"Triggered {started_count} direct retry workflows for tenant_code={body.tenant_code or 'all'}.")
+    logger.info(
+        f"Bulk retry dispatch for tenant_code={body.tenant_code or 'all'}: "
+        f"{success_count} succeeded, {failed_count} skipped/failed."
+    )
 
     return BulkRetryResponse(
-        workflow_id=f"dispatched-{started_count}",
-        message=f"Dispatched {started_count} retry workflows directly (tenant_code={body.tenant_code or 'all'}).",
+        workflow_id=f"dispatched-{success_count}",
+        message=f"Dispatched {success_count} retry workflows directly (tenant_code={body.tenant_code or 'all'}).",
     )
