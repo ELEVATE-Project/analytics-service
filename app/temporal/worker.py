@@ -10,10 +10,12 @@ from app.database.db import db
 from app.temporal.workflows import (
     ConfigDrivenProcessingWorkflow,
     BatchProcessingWorkflow,
+    BulkStepRetryWorkflow,
 )
 from app.temporal.activities import (
     update_status_activity,
-    fetch_pending_submissions_activity
+    fetch_pending_submissions_activity,
+    fetch_failed_submissions_activity,
 )
 from app.temporal.deface_blur_activity import deface_blur_activity
 from app.temporal.pii_and_abusive_activity import pii_and_abusive_language_detection_activity
@@ -68,6 +70,7 @@ async def start_worker():
     workflows = [
         ConfigDrivenProcessingWorkflow,
         BatchProcessingWorkflow,
+        BulkStepRetryWorkflow,
     ]
     activities = [
         pii_and_abusive_language_detection_activity,
@@ -78,6 +81,7 @@ async def start_worker():
         statement_category_activity,
         update_status_activity,
         fetch_pending_submissions_activity,
+        fetch_failed_submissions_activity,
     ]
 
     worker = Worker(
@@ -88,15 +92,15 @@ async def start_worker():
         max_concurrent_activities=settings.WORKER_MAX_CONCURRENT_ACTIVITIES,
     )
 
+    from temporalio.client import (
+        Schedule,
+        ScheduleActionStartWorkflow,
+        ScheduleSpec,
+        ScheduleAlreadyRunningError,
+    )
+
     # Register daily batch schedules if configured for batch mode
     if settings.PROCESSING_MODE.lower().strip() == "batch":
-        from temporalio.client import (
-            Schedule,
-            ScheduleActionStartWorkflow,
-            ScheduleSpec,
-            ScheduleAlreadyRunningError,
-        )
-
         # Register daily analysis batch processing schedule
         try:
             logger.info(f"Registering daily analysis batch schedule '{settings.BATCH_SCHEDULE_CRON}' in Temporal...")
@@ -130,6 +134,38 @@ async def start_worker():
                 logger.info("Deleted stale batch schedule '%s' (PROCESSING_MODE=real-time).", sched_id)
             except Exception:
                 pass  # schedule doesn't exist — nothing to clean up
+
+    # Register retry cron schedule if enabled
+    if settings.ENABLE_RETRY_CRON:
+        try:
+            logger.info(f"Registering retry cron schedule '{settings.RETRY_CRON_SCHEDULE}' in Temporal...")
+            await client.create_schedule(
+                id="daily-failed-submissions-retry",
+                schedule=Schedule(
+                    action=ScheduleActionStartWorkflow(
+                        BulkStepRetryWorkflow.run,
+                        {"tenant_code": None, "batch_size": settings.BATCH_SIZE},
+                        id="automated-daily-retry-sweep",
+                        task_queue=settings.TEMPORAL_QUEUE,
+                    ),
+                    spec=ScheduleSpec(
+                        cron_expressions=[settings.RETRY_CRON_SCHEDULE]
+                    ),
+                ),
+            )
+            logger.info("Retry cron schedule successfully registered.")
+        except ScheduleAlreadyRunningError:
+            logger.info("Retry cron schedule already exists in Temporal. Skipping registration.")
+        except Exception as e:
+            logger.error(f"Failed to register retry cron schedule: {e}")
+    else:
+        # Clean up stale retry schedule if ENABLE_RETRY_CRON was toggled off
+        try:
+            handle = client.get_schedule_handle("daily-failed-submissions-retry")
+            await handle.delete()
+            logger.info("Deleted stale retry cron schedule (ENABLE_RETRY_CRON=false).")
+        except Exception:
+            pass  # schedule doesn't exist — nothing to clean up
 
     logger.info(f"🚀 Temporal Worker started. Listening on task queue '{settings.TEMPORAL_QUEUE}'...")
     try:

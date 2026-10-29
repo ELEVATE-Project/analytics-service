@@ -1174,3 +1174,27 @@ async def copy_parent_analysis_results(
         return int(result.split()[-1])
     except Exception:
         return 0
+
+
+async def fetch_retryable_failed_submissions(
+    conn: asyncpg.Connection,
+    tenant_code: Optional[str] = None,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    """
+    Fetches submissions with status = 'failed' for retry.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT submission_id, session_id, tenant_code, submission_type, status, process_status
+        FROM submissions
+        WHERE status = 'failed'
+          AND ($1::text IS NULL OR tenant_code = $1)
+        ORDER BY updated_at ASC
+        LIMIT $2
+        """,
+        tenant_code,
+        limit,
+    )
+    return [dict(row) for row in rows]
+
