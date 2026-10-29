@@ -224,12 +224,13 @@ class ConfigDrivenProcessingWorkflow:
             workflow.logger.error(f"Ingestion processing failed for {submission_id}: {e}")
             
             # Locate which step failed and mark it, plus mark remaining as skipped
-            for s in steps_execution:
-                if s["status"] == "pending":
-                    s["status"] = "failed"
-                    s["error"] = str(e)
-                    s["completed_timestamp"] = workflow.now().isoformat()
-                    break
+            if not any(s["status"] == "failed" for s in steps_execution):
+                for s in steps_execution:
+                    if s["status"] == "pending":
+                        s["status"] = "failed"
+                        s["error"] = str(e)
+                        s["completed_timestamp"] = workflow.now().isoformat()
+                        break
 
             # Mark remaining pending steps as skipped
             for s in steps_execution:
