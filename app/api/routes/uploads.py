@@ -92,7 +92,8 @@ async def retry_step(
     _token: HTTPAuthorizationCredentials = Depends(verify_auth_token),
 ):
     """
-    Retry a single failed submission from the failed step (or a specified step).
+    Retry a single failed submission. Automatically resumes from the failed
+    step using the persisted process status in the database.
     """
     async with db.pool.acquire() as conn:
         # 1. Look up the submission (both submission_id and session_id mandatory)
