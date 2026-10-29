@@ -1180,21 +1180,27 @@ async def fetch_retryable_failed_submissions(
     conn: asyncpg.Connection,
     tenant_code: Optional[str] = None,
     limit: int = 100,
+    failed_before: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     """
     Fetches submissions with status = 'failed' for retry.
+    Optionally filters by updated_at < failed_before to avoid re-fetching
+    submissions that failed again during the current sweep.
     """
+    cutoff_dt = datetime.fromisoformat(failed_before) if isinstance(failed_before, str) else failed_before
     rows = await conn.fetch(
         """
         SELECT submission_id, session_id, tenant_code, submission_type, status, process_status
         FROM submissions
         WHERE status = 'failed'
           AND ($1::text IS NULL OR tenant_code = $1)
+          AND ($3::timestamptz IS NULL OR updated_at < $3)
         ORDER BY updated_at ASC
         LIMIT $2
         """,
         tenant_code,
         limit,
+        cutoff_dt,
     )
     return [dict(row) for row in rows]
 

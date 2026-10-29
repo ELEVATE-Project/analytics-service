@@ -74,10 +74,11 @@ async def fetch_failed_submissions_activity(params: Optional[Dict[str, Any]] = N
     params = params or {}
     tenant_code = params.get("tenant_code")  # None = all tenants
     limit = params.get("limit", settings.BATCH_SIZE)
+    failed_before = params.get("failed_before")
 
     async with db.pool.acquire() as conn:
         from app.database.operations import fetch_retryable_failed_submissions
-        rows = await fetch_retryable_failed_submissions(conn, tenant_code, limit)
+        rows = await fetch_retryable_failed_submissions(conn, tenant_code, limit, failed_before=failed_before)
 
         results = []
         for row in rows:

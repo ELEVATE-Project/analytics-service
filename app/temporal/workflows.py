@@ -386,12 +386,13 @@ class BulkStepRetryWorkflow:
         total_success = carry_over.get("total_success", 0)
         total_failed = carry_over.get("total_failed", 0)
         chunk_index = carry_over.get("chunk_index", 0)
+        cutoff = carry_over.get("cutoff") or workflow.now().isoformat()
         processed_this_generation = 0
 
         while True:
             failed_list: List[Dict[str, Any]] = await workflow.execute_activity(
                 fetch_failed_submissions_activity,
-                {"tenant_code": tenant_code, "limit": batch_size},
+                {"tenant_code": tenant_code, "limit": batch_size, "failed_before": cutoff},
                 start_to_close_timeout=timedelta(minutes=2),
                 retry_policy=RetryPolicy(maximum_attempts=2)
             )
@@ -437,6 +438,7 @@ class BulkStepRetryWorkflow:
                     "total_success": total_success,
                     "total_failed": total_failed,
                     "chunk_index": chunk_index,
+                    "cutoff": cutoff,
                 }])
 
         if total_processed == 0:
