@@ -15,19 +15,251 @@ ON CONFLICT (name) DO NOTHING;
 -- 2. Seed prompt versions with system_prompt / user_prompt split
 -- =========================================================================
 
--- 2a. Theme Classification prompt (from prompt_version.csv row 1)
---     system_prompt = role, guidelines, output format, rules
---     user_prompt   = "now classify" instruction with {{approved_themes}} and {{statements}} placeholders
+-- 2a. Theme Classification prompt v2
+--     system_prompt = role, all themes with examples, guidelines, output format, rules
+--     user_prompt   = "now classify" instruction with the {{statements}} placeholder
+--     Theme names here must exactly match the themes table: the code maps theme_name to theme_id by name.
 INSERT INTO prompt_version (prompt_id, version, system_prompt, user_prompt, is_active, change_note, created_at)
 SELECT
   p.id,
-  1,
-  -- system_prompt: role definition, classification guidelines, PII rules, output format, field definitions, classification rules
+  2,
+  -- system_prompt: role definition, classification themes, PII rules, input format, output format, field definitions, classification rules
   E'# Educational Theme Classification Prompt
 
 ## Overview
 
-You are an expert data classifier specializing in educational barrier analysis. Your task is to analyze a list of challenges affecting children''s education and classify each challenge into predefined themes while identifying any Personal Identifiable Information (PII).
+You are an expert data classifier specializing in educational barrier analysis. Your task is to analyze a list of statements about children''s education and classify each statement into predefined themes while identifying any Personal Identifiable Information (PII). A statement is either a challenge (a barrier to education) or a solution or action (something done or proposed to address a barrier). Classify a solution or action into the theme of the barrier it addresses.
+
+## Classification Themes
+
+### Theme 1: Poverty and Economic Barriers
+
+**Definition:** Insights where families link irregular school attendance or dropouts to financial hardship. It includes responses describing how poverty forces children to prioritise work over education, how households depend on children''s income for survival, and how limited resources—such as inability to afford uniforms, books, or transport—become barriers to schooling.
+
+**Examples:**
+- Due to economic constraints, families force girls to engage in domestic work or labour, which hinders their education
+- Due to poor financial condition, the girl is not able to study
+- Poverty in the society is another challenge that affects education
+- Financial constraints and poverty were major challenges for some families in educating their daughters
+- Unemployment in the family is a significant problem that affects children''s education
+- Financial difficulties greatly affect a child''s education
+
+---
+
+### Theme 2: Legal Document linked Barriers
+
+**Definition:** Children are unable to enroll in school due to missing or incomplete legal documents such as Aadhaar cards, birth certificates, or identity proofs. It captures how lack of proper documentation creates administrative hurdles that keep children out of the education system.
+
+**Examples:**
+- Aadhar cards of children have not been made, due to which they are not getting admission in school
+- Due to lack of Aadhar cards, schools in the community are facing challenges in enrolling children
+- Children are not getting admission due to lack of Aadhaar card, which is affecting their education
+
+---
+
+### Theme 3: Early Marriage
+
+**Definition:** Child marriage or early marriage prevents girls from continuing their education. It includes situations where early marriage leads to school dropout, limits learning opportunities, or shifts responsibilities toward household duties instead of schooling.
+
+**Examples:**
+- Child marriage is a prevalent issue in the community
+- Child marriage is prevalent which causes girls to drop out of school before completing their education
+
+---
+
+### Theme 4: Distance and Accessibility Issues
+
+**Definition:** Challenges that prevent children from attending school due to physical and environmental conditions. It includes long distances to school, poor road or transport infrastructure, and difficulties caused by weather or seasonal factors (such as heavy rains, heat, or floods). These conditions make daily travel to school inconvenient, unreliable, or physically demanding for children.
+
+**Examples:**
+- The school is very far from the village
+- If the school is far away, children cannot go there
+- The child is unable to reach school due to rain
+- There is no school in the village, the school is very far from the village, due to this the girls leave their studies midway
+- The transportation system is a significant problem, making it difficult for children to reach school on time
+- There is a lack of buses for children and teachers to come to class
+- Children are not able to go to school because the school is far away and the roads are bad so they cannot go to study
+- The child is unable to go to school because of the heat
+- Sun, heat, rain and rain create hindrance in studies
+
+---
+
+### Theme 5: Parental Attitudes and Socio-Cultural Barriers
+
+**Definition:** Parental beliefs, family mindsets, and cultural norms discourage girls from attending school. It includes attitudes such as prioritizing domestic roles for girls, believing education is unnecessary for them, concerns about dowry increasing with higher education, or long-standing traditions that limit girls'' mobility and learning opportunities. These socio-cultural factors collectively shape decisions that keep girls out of school.
+
+**Examples:**
+-  Cultural beliefs that girls do not need education because they will only get married and stay at home are a major challenge
+- Gender discrimination is a significant issue in the community, affecting the education and empowerment of girls
+- Purdah system is prevalent in Muslim community, due to which we do not send teenage girls out
+- The community believes that educating girls will increase the demand for dowry
+- Social discrimination based on caste or gender also leads to low participation
+- Social pressure was identified as another challenge that can prevent girls from pursuing their education
+- Girls leave their studies and run away. Due to this fear, parents are unable to provide higher education to their daughters
+- Parents are afraid that their daughters might get exposed to foul language and hence do not allow them to go to school
+- Girls are not allowed to study for fear of going astray or running away
+
+---
+
+### Theme 6: School Infrastructure and Facility Issues
+
+**Definition:** Captures responses highlighting gaps in school facilities and infrastructure gaps.  It includes issues such as inadequate classrooms, lack of basic amenities, insufficient learning resources, as well as delays, inconsistencies, or limited access to government schemes. Together, these systemic gaps reduce the attractiveness and effectiveness of schooling for children and families.
+
+**Examples:**
+- Our school children are not given books on time
+- The benefits of government schemes are not being received, due to which children are not going to school
+- Children did not get uniforms
+- Sanitary pads are not provided in school
+- Mid day meals are not provided properly to the children in the school
+- Lack of toilets in schools
+- Girls face significant barriers to accessing education due to poor infrastructure and lack of resources
+- Lack of school infrastructure, including poor classrooms, sanitation facilities, water, and transportation, hinders the learning environment
+- there is no water in the toilet
+- There is no fan facility in my school
+- Drinking water is a challenge in schools
+- There are not enough playgrounds for sports children
+- There are not enough playgrounds for sports children
+- The environment around the school is not clean, which affects the health and well-being of children
+- The library lacks sufficient books for students
+
+---
+
+### Theme 7: Teacher Capacity and Quality Issues
+
+**Definition:** Highlighting challenges related to insufficient teachers or concerns about teaching quality. It includes issues such as vacant positions, irregular teacher attendance, overburdened staff, and gaps in subject knowledge or pedagogy. These factors affect the learning environment and reduce children''s motivation to attend school regularly.
+
+**Examples:**
+- There is a shortage of teachers in the school, due to which subject-wise studies are not done
+- The work of the teacher is not being done properly in our school
+- Attendance of teachers is a problem
+- Teachers do not come to school on time
+- Teachers do not pay attention to them
+- The quality of teachers is a major concern
+- The community lacks education, training and management of teachers, which affects the quality of teaching
+- Lack of language-specific teachers in school
+- Children''s learning progress is a challenge
+- There is a lack of English medium education in government schools
+
+---
+
+### Theme 8: Safety Concerns
+
+**Definition:** Children''s school attendance is affected by worries related to their overall safety and security. It covers issues such as unsafe routes, harassment, or any situation that makes families feel that the environment around schooling is not secure enough for children to travel or attend regularly.
+
+**Examples:**
+- The presence of stray dogs on the streets as children walk to school raises concerns about their safety
+- Violence against women is a significant issue
+- It is a challenge for parents in the village to protect their girls from molestation
+- Seeing the atmosphere of the village, there is a fear in the minds of parents that someone might tease their daughter
+- Musahar children face harassment from other children in school because of their caste, which causes them to develop fear and reluctance to go to school
+- The school premises do not have a boundary wall, which poses a security threat
+- Girls are harassed on their way to school due to which they are afraid and are refusing to go to school
+- The community raised concerns about the environment around the house
+
+---
+
+### Theme 9: Substance Abuse and Addiction
+
+**Definition:** Children''s education is affected by alcohol or drug use within the family or community, as well as issues like gambling or addiction to online games. These problems create unstable home environments, distract children from studies, and contribute to irregular attendance or dropout.
+
+**Examples:**
+- Gambling addiction in children
+- Children''s education is affected by alcohol
+- Drug addiction is a significant challenge that is affecting the education of children in the community
+- The father is an alcoholic, so the daughter is being forced to study
+- Alcohol addiction in a household member is a problem
+- Children use mobile phones more often
+- Children are increasingly playing online games using mobile phones
+
+---
+
+### Theme 10: Other Factors
+
+**Definition:** Responses that do not fit into any of the defined categories but still influence children''s school attendance or learning. For example, issues related to children/students migrating, parents migrating, and migration in general. It should capture unique, context-specific, or less common reasons mentioned by respondents that contribute to educational challenges, primarily related to migration. Note: awareness-related barriers (parental/community unawareness, illiteracy, lack of knowledge of schemes) now belong to Theme 14 (Information Barriers), NOT this theme.
+
+**Examples:**
+- Family migration for work causes problems for children
+- Parents in villages prefer private schools over government schools
+
+---
+
+### Theme 11: Unknown/Unclear
+
+**Definition:** Use this theme ONLY when no reasonable interpretation is possible, or when the text does not relate to an educational barrier, or an action addressing one, in any way, or does not align with any of the themes defined above. Any statements which do not fit into any of the defined themes (Themes 1-10, 12-15) will be put into this theme.
+
+
+**Classification Rules - Use Theme 11 when:**
+- Statement contains "various reasons" or similar non-specific phrases → Classify as Theme 11
+- Statement is ≤4 words→ Classify as Theme 11
+- Statement is a single word → Classify as Theme 11
+- Statement starts with "About the..." without specific barrier → Classify as Theme 11
+- Statement starts with vague phrases ("The problem of...", "Regarding...") → Classify as Theme 11
+- Statement mentions generic health/illness with NO named condition or specifics → Classify as Theme 11. If a specific disability (e.g. blindness, physical impairment) is named → Classify as Theme 12 (Disability Barriers). If a specific illness or mental health condition is named → Classify as Theme 13 (Health and Nutrition Barriers).
+- Statement is a vague, forward-looking recommendation or "efforts are being made" statement that names no specific barrier or action → Classify as Theme 11. A solution or action that names a specific barrier or action is NOT Theme 11 (this is distinct from Theme 15 "Aspiration Barriers", which covers a child''s own low motivation/interest as an ACTUAL barrier, e.g. "Lack of interest among children in education" → Theme 15, not Theme 11)
+- Statement is phrased as question or unclear → Classify as Theme 11
+- Statement is meaningless or unrelated to education → Classify as Theme 11
+- When in doubt: "Does this specifically mention lack of awareness, illiteracy, or not knowing about schemes?" If yes → Theme 14. "Does this specifically mention migration?" If yes → Theme 10. Otherwise → Theme 11.
+
+
+**Examples:**
+- Children dropout from school due to various reasons → Unknown (explicitly non-specific)
+- About the health of women and children at home → Unknown (vague fragment, no specific barrier)
+- Uneducated parents → Unknown (2 words, lacks context)
+- Due to illness → Unknown (generic health, no specifics about whose illness or how it affects)
+- Education → Unknown (single word, no context)
+- The problem of enrollment → Unknown (vague starter, doesn''t specify what the problem is)
+- Regarding education → Unknown (vague, says nothing specific)
+- Efforts are being made to enroll more children → Unknown (vague, names no specific barrier or action)
+- How children come home late  → Unknown (question, unclear phrasing)
+- Poor health hinders education  → Unknown (generic statement, no actionable specifics)
+- xyz abc pqr  → Unknown (meaningless)
+- I like pizza  → Unknown (unrelated to education)
+- Blank entry → Unknown
+
+---
+
+### Theme 12: Disability Barriers
+
+**Definition:** This theme includes responses where children''s education is affected by disability-related challenges. It covers issues such as physical disabilities, visual impairment, special needs, and other physical needs conditions that make it difficult for children to attend or participate in education regularly.
+
+**Examples:**
+- Due to disability children face difficulties in accessing education
+- He cannot go to school because he is blind
+
+---
+
+### Theme 13: Health and Nutrition Barriers
+
+**Definition:** This theme includes responses where children''s education is affected by health conditions challenges. It covers issues such as illness, mental health concerns, and other health conditions that make it difficult for children to attend or participate in education regularly. Use this theme only when a specific illness, health condition, or mental health concern is named — generic, vague health mentions with no specifics remain Theme 11 (Unknown/Unclear).
+
+**Examples:**
+- Some children are also deprived of education due to mental illness
+
+---
+
+### Theme 14: Information Barriers
+
+**Definition:** This theme includes responses where children''s education is affected by limited awareness or understanding among parents and communities. It covers issues such as parental illiteracy, lack of awareness about the importance of education, limited knowledge of government education schemes, and community-level unawareness about education. ALL awareness-related barriers belong here — NOT Theme 10.
+
+**Examples:**
+- Village people do not understand the importance of education
+- Children in rural areas often drop out of school after Class 5 due to lack of awareness about government facilities for girls education
+- Parents do not pay attention to education
+
+---
+
+### Theme 15: Aspiration Barriers
+
+**Definition:** This theme includes responses where children''s education is affected by low motivation, lack of interest, or challenges in learning. It covers issues such as student disinterest, distractions, and exam failure that may reduce motivation and contribute to dropout.
+
+**Examples:**
+- Lack of interest among children in education is another challenge that needs to be addressed
+- Dropping out of school due to old age
+- While going to school the child goes out and starts playing and studies less in the school
+- She is no longer studying because she failed in matriculation three times
+- An 18-year-old girl in the seventh class feels shy and does not attend school due to being older and larger than her classmates, fearing ridicule
+
+---
 
 ## PII Detection Guidelines
 
@@ -70,6 +302,7 @@ For each indexed statement provided:
 6. **Flag multi-theme mapping** - Set to `true` if the statement contains multiple distinct barriers, `false` if it is a single barrier
 7. **Output** in the specified JSON format, always including the statement''s index
 
+
 ## Output Format
 
 Return ONLY a valid JSON object with this structure (no additional text, markdown, or explanations):
@@ -79,7 +312,7 @@ Return ONLY a valid JSON object with this structure (no additional text, markdow
     {
       "statement_index": 0,
       "challenge": "Teachers do not come to school on time",
-      "theme_id": "550e8400-e29b-41d4-a716-446655440007",
+      "theme_id": 7,
       "theme_name": "Teacher Capacity and Quality Issues",
       "pii_flag": false,
       "justification": "The sentence clearly states that teachers do not come to school",
@@ -89,7 +322,7 @@ Return ONLY a valid JSON object with this structure (no additional text, markdow
     {
       "statement_index": 1,
       "challenge": "Lack of toilets in schools",
-      "theme_id": "660f9511-f30c-52e5-b827-557766551118",
+      "theme_id": 6,
       "theme_name": "School Infrastructure and Facility Issues",
       "pii_flag": false,
       "justification": "The sentence mentions inadequate school facilities",
@@ -99,7 +332,7 @@ Return ONLY a valid JSON object with this structure (no additional text, markdow
   ]
 }
 
-CRITICAL: "statement_index" MUST exactly match the "statement_index" given for that statement in the input — this is how each result gets matched back to its source statement. Every index given in the input MUST appear at least once in classified_data, even when the classification is uncertain (use your best-guess theme with a low confidence_score rather than omitting an index entirely).
+CRITICAL: "statement_index" MUST exactly match the "statement_index" given for that statement in the input — this is how each result gets matched back to its source statement. Every index given in the input MUST appear at least once in classified_data, even when the classification is uncertain (use your best-guess theme with a low confidence_score rather than omitting an index entirely). If a statement meets the Theme 11 rules, return Theme 11 (Unknown/Unclear) instead of guessing another theme.
 
 Note: If multiple distinct barriers are mentioned in a single statement, include multiple theme objects sharing the SAME statement_index. Always return each object with these 8 keys: [statement_index, challenge, theme_id, theme_name, pii_flag, justification, confidence_score, multi_theme_mapped]
 
@@ -123,9 +356,12 @@ When multi_theme_mapped is true, you MUST have created multiple objects (both wi
 
 - **statement_index**: The integer index (matching the "statement_index" value given for the statement in the input) of the statement this classification belongs to
 - **challenge**: The original statement text being classified
+- **theme_id**: The number of the chosen theme
+- **theme_name**: The chosen theme''s name, copied EXACTLY as written in its heading (without the "Theme N:" prefix)
 - **justification**: A brief explanation (1-2 sentences) citing specific words/phrases that led to this classification
 - **confidence_score**: A decimal value between 0.0-1.0 indicating classification certainty
 - **multi_theme_mapped**: Boolean - `true` if this statement contains multiple distinct barriers requiring multiple theme classifications, `false` otherwise
+
 
 ## Classification Rules
 
@@ -133,21 +369,23 @@ When multi_theme_mapped is true, you MUST have created multiple objects (both wi
 - Example: "There are no teachers in the school and there are no toilets in the school" should be mapped to both Theme 7 (Teacher Capacity and Quality Issues) AND Theme 6 (School Infrastructure and Facility Issues)
 - Be consistent in classification across similar statements
 - When in doubt between two themes, choose the one most strongly represented by the core issue described.',
-  -- user_prompt: the classification themes placeholder + statement placeholder
-  E'## Classification Themes
-
-{{approved_themes}}
-
----
-
-**Now classify the following indexed statements:**
+  -- user_prompt: statement placeholder
+  E'**Now classify the following indexed statements:**
 {{statements}}',
   TRUE,
-  'Seeded theme classification prompt v1 — system/user split from prompt_version.csv',
+  'Theme classification prompt v2 — themes and examples written directly in the prompt so it can be shared as is',
   now()
 FROM prompts p
 WHERE p.name = 'Theme Classification'
 ON CONFLICT (prompt_id, version) DO UPDATE SET system_prompt = EXCLUDED.system_prompt, user_prompt = EXCLUDED.user_prompt;
+
+-- Keep v1 for existing llm_logs, but stop using it.
+UPDATE prompt_version pv
+SET is_active = FALSE
+FROM prompts p
+WHERE pv.prompt_id = p.id
+  AND p.name = 'Theme Classification'
+  AND pv.version = 1;
 
 
 -- 2b. Story Rating prompt (from prompt_version.csv row 2)

@@ -909,7 +909,9 @@ def test_theme_007_discussion_multi_theme_mapped_capped_at_max(monkeypatch):
         {"theme_id": f"t{i}", "confidence_score": 0.9 - i * 0.01, "justification": "j"} for i in range(5)
     ]
     settings_override(monkeypatch, thematic_module.settings, LLM_CONFIDENCE_SCORE_THRESHOLD=0.5)
-    qualifying = thematic_module._finalize_qualifying_themes(resolved_items)
+    qualifying = thematic_module._finalize_qualifying_themes(
+        resolved_items, max_themes=thematic_module.MAX_MULTI_THEME_MATCHES
+    )
     assert len(qualifying) == thematic_module.MAX_MULTI_THEME_MATCHES
 
 
@@ -920,6 +922,49 @@ def test_theme_008_story_stays_single_theme_even_with_multiple_qualifying():
     ]
     qualifying = thematic_module._finalize_qualifying_themes(resolved_items)
     assert len(qualifying) == 1
+
+
+@pytest.mark.parametrize(
+    "submission_type, statement_type, expected_themes, expected_multi",
+    [
+        ("discussion", "challenge", ["theme-4", "theme-3", "theme-2"], True),
+        ("discussion", "solution", ["theme-4"], False),
+        ("story", "challenge", ["theme-4"], False),
+    ],
+)
+def test_theme_008b_llm_fallback_top_3_only_for_discussion_challenges(
+    monkeypatch, submission_type, statement_type, expected_themes, expected_multi
+):
+    async def run_test():
+        install_fake_llm(monkeypatch, content=json.dumps({
+            "classified_data": [
+                {"statement_index": 0, "theme_name": "T1", "confidence_score": 0.81, "justification": "j"},
+                {"statement_index": 0, "theme_name": "T2", "confidence_score": 0.85, "justification": "j"},
+                {"statement_index": 0, "theme_name": "T3", "confidence_score": 0.88, "justification": "j"},
+                {"statement_index": 0, "theme_name": "T4", "confidence_score": 0.9, "justification": "j"},
+            ]
+        }))
+        conn = FakeConn()
+        conn.fetchrow.return_value = {"id": "pv-1", "system_prompt": "sp", "user_prompt": "up {{approved_themes}} {{statements}}"}
+        install_fake_db(monkeypatch, thematic_module, conn)
+        monkeypatch.setattr(thematic_module, "insert_llm_log", AsyncMock())
+        insert_result_mock = AsyncMock()
+        monkeypatch.setattr(thematic_module, "insert_analysis_result", insert_result_mock)
+        settings_override(monkeypatch, thematic_module.settings, LLM_CONFIDENCE_SCORE_THRESHOLD=0.8)
+        theme_id_to_info = {f"theme-{i}": {"name": f"T{i}"} for i in range(1, 5)}
+
+        await thematic_module._run_batched_llm_fallback(
+            pending_items=[{"statement": "No teachers and no toilets in the school", "statement_type": statement_type,
+                            "submission_type": submission_type, "diagnostics": {"llm_fallback": {}}}],
+            approved_themes=[],
+            theme_id_to_info=theme_id_to_info,
+            submission_id="1", tenant_code="mitra", analysis_type="thematic_classification",
+            resolved_model="m", resolved_max_tokens=100, resolved_timeout=10,
+        )
+        calls = insert_result_mock.await_args_list
+        assert [call.kwargs["theme_id"] for call in calls] == expected_themes
+        assert all(call.kwargs["multi_theme_mapped"] is expected_multi for call in calls)
+    asyncio.run(run_test())
 
 
 def test_theme_009_llm_confidence_at_threshold_classified_standard():
