@@ -2,6 +2,8 @@ import asyncio
 import json
 import uuid
 import logging
+from datetime import datetime, timezone
+from typing import Optional
 from fastapi import APIRouter, Depends, Form, UploadFile, File, BackgroundTasks, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 
@@ -21,7 +23,10 @@ from app.api.models.submissions import (
 from app.api.services import uploads as upload_service
 from app.config import settings
 from app.database.db import db
-from app.database.operations import fetch_retryable_failed_submissions
+from app.database.operations import (
+    fetch_failed_submission_for_retry,
+    fetch_retryable_failed_submissions,
+)
 from app.temporal.client import get_temporal_client
 from app.temporal.workflows import ConfigDrivenProcessingWorkflow
 from temporalio.exceptions import WorkflowAlreadyStartedError
@@ -97,11 +102,8 @@ async def retry_step(
     step using the persisted process status in the database.
     """
     async with db.pool.acquire() as conn:
-        # 1. Look up the submission (both submission_id and session_id mandatory)
-        row = await conn.fetchrow(
-            "SELECT submission_id, session_id, tenant_code, submission_type, status, process_status "
-            "FROM submissions WHERE submission_id = $1 AND session_id = $2 AND tenant_code = $3",
-            body.submission_id, body.session_id, body.tenant_code
+        row = await fetch_failed_submission_for_retry(
+            conn, body.submission_id, body.session_id, body.tenant_code
         )
 
         if not row:
@@ -110,14 +112,14 @@ async def retry_step(
                 detail=f"Submission not found with submission_id='{body.submission_id}', session_id='{body.session_id}', and tenant_code='{body.tenant_code}'."
             )
 
-        # 3. Status check
+        # Status check
         if row["status"] != "failed":
             raise HTTPException(
                 status_code=400,
                 detail=f"Submission status is '{row['status']}'. Only failed submissions can be retried."
             )
 
-        # 4. Parse process_status
+        # Parse process_status
         process_status = row.get("process_status") or {}
         if isinstance(process_status, str):
             try:
@@ -165,74 +167,116 @@ async def retry_step(
         )
 
 
+async def _dispatch_all_retry_workflows(
+    tenant_code: Optional[str],
+    cutoff: str,
+    sweep_id: str,
+) -> None:
+    """
+    Background worker: pages through ALL retryable failed submissions (100 at a time)
+    and fires an individual ConfigDrivenProcessingWorkflow for each one.
+    Only submissions that failed BEFORE this sweep started are picked up,
+    so failures that occur during the sweep are not re-fetched mid-run.
+    No parent workflow is created in Temporal — only individual step-retry-* entries appear.
+    """
+    client = await get_temporal_client()
+    total_success = 0
+    total_failed = 0
+    page = 0
+
+    while True:
+        async with db.pool.acquire() as conn:
+            rows = await fetch_retryable_failed_submissions(
+                conn, tenant_code, settings.BATCH_SIZE, failed_before=cutoff
+            )
+
+        if not rows:
+            break
+
+        page += 1
+        tasks = []
+        for row in rows:
+            process_status = row.get("process_status") or {}
+            if isinstance(process_status, str):
+                try:
+                    process_status = json.loads(process_status)
+                except Exception:
+                    process_status = {}
+
+            sub_type = row["submission_type"]
+            tasks.append(
+                client.start_workflow(
+                    ConfigDrivenProcessingWorkflow.run,
+                    {
+                        "submission_id": row["submission_id"],
+                        "session_id": row.get("session_id"),
+                        "tenant_code": row["tenant_code"],
+                        "submission_type": sub_type,
+                        "process_steps": settings.get_process_config(sub_type),
+                        "existing_steps": (process_status or {}).get("steps", []),
+                    },
+                    # Stable ID: prevents duplicate retries if called twice
+                    id=f"step-retry-{row['submission_id']}-{row['tenant_code']}",
+                    task_queue=settings.TEMPORAL_QUEUE,
+                )
+            )
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        page_success = sum(1 for r in results if not isinstance(r, Exception))
+        page_failed = len(results) - page_success
+        for r in results:
+            if isinstance(r, Exception) and not isinstance(r, WorkflowAlreadyStartedError):
+                logger.warning(f"[{sweep_id}] Failed to dispatch retry workflow: {r}")
+
+        total_success += page_success
+        total_failed += page_failed
+        logger.info(
+            f"[{sweep_id}] Page {page}: dispatched {len(rows)} "
+            f"({page_success} ok, {page_failed} skipped/failed) — running total {total_success}."
+        )
+
+        if len(rows) < settings.BATCH_SIZE:
+            # Last page — no more rows to fetch
+            break
+
+    logger.info(
+        f"[{sweep_id}] Bulk retry sweep complete for tenant_code={tenant_code or 'all'}: "
+        f"{total_success} started, {total_failed} skipped/failed across {page} page(s)."
+    )
+
+
 @uploads_router.post("/retry-step/all", response_model=BulkRetryResponse, tags=["Step Retry"])
 async def retry_all_failed(
     body: BulkRetryRequest,
+    background_tasks: BackgroundTasks,
     _token: HTTPAuthorizationCredentials = Depends(verify_auth_token),
 ):
     """
-    Start individual retry workflows for all retryable failed submissions directly.
-    No parent bulk workflow is created in Temporal.
+    Enqueue a background sweep that pages through ALL retryable failed submissions
+    (BATCH_SIZE at a time) and fires an individual ConfigDrivenProcessingWorkflow
+    for each one. Only individual step-retry-* workflows appear in Temporal UI.
+    Returns immediately with a sweep_id you can use to correlate logs.
     """
-    client = await get_temporal_client()
+    cutoff = datetime.now(timezone.utc).isoformat()
+    sweep_id = f"bulk-retry-sweep-{body.tenant_code or 'all'}-{uuid.uuid4().hex[:8]}"
 
-    async with db.pool.acquire() as conn:
-        rows = await fetch_retryable_failed_submissions(conn, body.tenant_code, settings.BATCH_SIZE)
-
-    if not rows:
-        return BulkRetryResponse(
-            workflow_id="none",
-            message=f"No retryable failed submissions found (tenant_code={body.tenant_code or 'all'}).",
-        )
-
-    tasks = []
-    for row in rows:
-        process_status = row.get("process_status") or {}
-        if isinstance(process_status, str):
-            try:
-                process_status = json.loads(process_status)
-            except Exception:
-                process_status = {}
-
-        sub_type = row["submission_type"]
-        process_steps = settings.get_process_config(sub_type)
-        existing_steps = process_status.get("steps", [])
-        # Stable workflow ID prevents concurrent duplicate executions
-        workflow_id = f"step-retry-{row['submission_id']}-{row['tenant_code']}"
-
-        tasks.append(
-            client.start_workflow(
-                ConfigDrivenProcessingWorkflow.run,
-                {
-                    "submission_id": row["submission_id"],
-                    "session_id": row.get("session_id"),
-                    "tenant_code": row["tenant_code"],
-                    "submission_type": sub_type,
-                    "process_steps": process_steps,
-                    "existing_steps": existing_steps,
-                },
-                id=workflow_id,
-                task_queue=settings.TEMPORAL_QUEUE,
-            )
-        )
-
-    success_count = 0
-    failed_count = 0
-    if tasks:
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for r in results:
-            if isinstance(r, Exception):
-                failed_count += 1
-                logger.warning(f"Failed to dispatch retry workflow: {r}")
-            else:
-                success_count += 1
+    background_tasks.add_task(
+        _dispatch_all_retry_workflows,
+        body.tenant_code,
+        cutoff,
+        sweep_id,
+    )
 
     logger.info(
-        f"Bulk retry dispatch for tenant_code={body.tenant_code or 'all'}: "
-        f"{success_count} succeeded, {failed_count} skipped/failed."
+        f"Bulk retry sweep '{sweep_id}' enqueued for tenant_code={body.tenant_code or 'all'} "
+        f"(cutoff={cutoff}, batch_size={settings.BATCH_SIZE})."
     )
 
     return BulkRetryResponse(
-        workflow_id=f"dispatched-{success_count}",
-        message=f"Dispatched {success_count} retry workflows directly (tenant_code={body.tenant_code or 'all'}).",
+        workflow_id=sweep_id,
+        message=(
+            f"Bulk retry sweep started (tenant_code={body.tenant_code or 'all'}). "
+            f"Individual step-retry-* workflows will appear in Temporal as they are dispatched. "
+            f"Track progress in logs with sweep_id='{sweep_id}'."
+        ),
     )

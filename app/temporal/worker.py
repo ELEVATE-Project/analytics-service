@@ -97,30 +97,35 @@ async def start_worker():
         ScheduleActionStartWorkflow,
         ScheduleSpec,
         ScheduleAlreadyRunningError,
+        ScheduleUpdate,
     )
 
     # Register daily batch schedules if configured for batch mode
     if settings.PROCESSING_MODE.lower().strip() == "batch":
-        # Register daily analysis batch processing schedule
+        batch_schedule = Schedule(
+            action=ScheduleActionStartWorkflow(
+                BatchProcessingWorkflow.run,
+                settings.BATCH_SIZE,
+                id="daily-batch-processing-run",
+                task_queue=settings.TEMPORAL_QUEUE,
+            ),
+            spec=ScheduleSpec(
+                cron_expressions=[settings.BATCH_SCHEDULE_CRON]
+            ),
+        )
         try:
             logger.info(f"Registering daily analysis batch schedule '{settings.BATCH_SCHEDULE_CRON}' in Temporal...")
             await client.create_schedule(
                 id="daily-batch-processing",
-                schedule=Schedule(
-                    action=ScheduleActionStartWorkflow(
-                        BatchProcessingWorkflow.run,
-                        settings.BATCH_SIZE,
-                        id="daily-batch-processing-run",
-                        task_queue=settings.TEMPORAL_QUEUE,
-                    ),
-                    spec=ScheduleSpec(
-                        cron_expressions=[settings.BATCH_SCHEDULE_CRON]
-                    ),
-                ),
+                schedule=batch_schedule,
             )
             logger.info("Daily analysis batch schedule successfully registered.")
         except ScheduleAlreadyRunningError:
-            logger.info("Daily analysis batch schedule already exists in Temporal. Skipping registration.")
+            # Schedule exists — update it so a changed cron expression or batch size takes effect
+            logger.info("Daily analysis batch schedule already exists — updating with current config.")
+            handle = client.get_schedule_handle("daily-batch-processing")
+            await handle.update(lambda _: ScheduleUpdate(schedule=batch_schedule))
+            logger.info("Daily analysis batch schedule updated.")
         except Exception as e:
             logger.error(f"Failed to register daily analysis batch schedule in Temporal: {e}")
     else:
@@ -137,25 +142,30 @@ async def start_worker():
 
     # Register retry cron schedule if enabled
     if settings.ENABLE_RETRY_CRON:
+        retry_schedule = Schedule(
+            action=ScheduleActionStartWorkflow(
+                BulkStepRetryWorkflow.run,
+                {"tenant_code": None, "batch_size": settings.BATCH_SIZE},
+                id="automated-daily-retry-sweep",
+                task_queue=settings.TEMPORAL_QUEUE,
+            ),
+            spec=ScheduleSpec(
+                cron_expressions=[settings.RETRY_CRON_SCHEDULE]
+            ),
+        )
         try:
             logger.info(f"Registering retry cron schedule '{settings.RETRY_CRON_SCHEDULE}' in Temporal...")
             await client.create_schedule(
                 id="daily-failed-submissions-retry",
-                schedule=Schedule(
-                    action=ScheduleActionStartWorkflow(
-                        BulkStepRetryWorkflow.run,
-                        {"tenant_code": None, "batch_size": settings.BATCH_SIZE},
-                        id="automated-daily-retry-sweep",
-                        task_queue=settings.TEMPORAL_QUEUE,
-                    ),
-                    spec=ScheduleSpec(
-                        cron_expressions=[settings.RETRY_CRON_SCHEDULE]
-                    ),
-                ),
+                schedule=retry_schedule,
             )
             logger.info("Retry cron schedule successfully registered.")
         except ScheduleAlreadyRunningError:
-            logger.info("Retry cron schedule already exists in Temporal. Skipping registration.")
+            # Schedule exists — update it so a changed cron expression takes effect on restart
+            logger.info("Retry cron schedule already exists — updating with current config.")
+            handle = client.get_schedule_handle("daily-failed-submissions-retry")
+            await handle.update(lambda _: ScheduleUpdate(schedule=retry_schedule))
+            logger.info("Retry cron schedule updated.")
         except Exception as e:
             logger.error(f"Failed to register retry cron schedule: {e}")
     else:
