@@ -73,6 +73,22 @@ VALUES
   'approved'
 ),
 (
+  '550e8400-e29b-41d4-a716-446655440014'::UUID,
+  'Other Factors',
+  'This theme includes responses that do not fit into any of the defined categories but still influence children''s school attendance or learning, primarily issues related to children, students or parents migrating, and migration in general.',
+  'migration,migrating,migrant,family migration,parents migrating,children migrating',
+  'Family migration for work causes problems for children|Parents in villages prefer private schools over government schools',
+  'approved'
+),
+(
+  '550e8400-e29b-41d4-a716-446655440015'::UUID,
+  'Unknown/Unclear',
+  'Use this theme ONLY when no reasonable interpretation is possible, or when the text does not relate to an educational barrier, or an action addressing one, in any way, or does not align with any of the other themes.',
+  'various reasons,non-specific,vague,unclear,meaningless,unrelated to education,generic health',
+  'Children dropout from school due to various reasons|About the health of women and children at home|Uneducated parents|Due to illness|Education|The problem of enrollment|Regarding education|Efforts are being made to enroll more children|How children come home late|Poor health hinders education|xyz abc pqr|I like pizza',
+  'approved'
+),
+(
   '550e8400-e29b-41d4-a716-446655440010'::UUID,
   'Disability Barriers',
   'This theme includes responses where children''s education is affected by disability-related challenges. It covers issues such as physical disabilities, visual impairment, special needs, and other physical needs conditions that make it difficult for children to attend or participate in education regularly.',
