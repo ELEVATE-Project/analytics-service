@@ -7,7 +7,8 @@ with workflow.unsafe.imports_passed_through():
     from temporalio.common import RetryPolicy
     from app.temporal.activities import (
         update_status_activity,
-        fetch_pending_submissions_activity
+        fetch_pending_submissions_activity,
+        fetch_failed_submissions_activity
     )
     from app.temporal.deface_blur_activity import deface_blur_activity
     from app.temporal.pii_and_abusive_activity import pii_and_abusive_language_detection_activity
@@ -23,6 +24,8 @@ class ConfigDrivenProcessingWorkflow:
         submission_id = payload["submission_id"]
         tenant_code = payload["tenant_code"]
         process_steps = payload.get("process_steps", [])
+        start_from_step: Optional[str] = payload.get("start_from_step")
+        existing_steps: List[dict] = payload.get("existing_steps", [])
 
         # Set up a generic, resilient retry policy for LLM/CV activities
         retry_policy = RetryPolicy(
@@ -39,19 +42,41 @@ class ConfigDrivenProcessingWorkflow:
             retry_policy=retry_policy
         )
 
+        # Build lookup of existing steps from previous runs
+        prior_steps = {s.get("name"): s for s in existing_steps if isinstance(s, dict)}
+
+        start_idx = 0
+        if start_from_step:
+            matched = [i for i, s in enumerate(process_steps) if s.get("name") == start_from_step]
+            if matched:
+                start_idx = matched[0]
+
         completed_steps = []
         steps_execution = []
-        for step in process_steps:
-            steps_execution.append({
-                "name": step.get("name"),
-                "status": "pending",
-                "error": None,
-                "completed_timestamp": None
-            })
+        for idx, step in enumerate(process_steps):
+            step_name = step.get("name")
+            prior = prior_steps.get(step_name)
+
+            # If step already succeeded and not forced to rerun, preserve and skip it
+            if (not start_from_step or idx < start_idx) and prior and prior.get("status") == "success":
+                steps_execution.append(prior)
+                completed_steps.append(step_name)
+            else:
+                steps_execution.append({
+                    "name": step_name,
+                    "status": "pending",
+                    "error": None,
+                    "completed_timestamp": None
+                })
 
         try:
             for idx, step in enumerate(process_steps):
                 step_name = step.get("name")
+
+                # If this step already succeeded, skip executing it
+                if steps_execution[idx].get("status") == "success":
+                    workflow.logger.info(f"Skipping already successful step: '{step_name}' for submission_id: {submission_id}")
+                    continue
                 target_columns = step.get("columns", [])
                 # Optional per-step LLM overrides; activities fall back to global .env settings if omitted
                 llm_overrides = {
@@ -199,16 +224,18 @@ class ConfigDrivenProcessingWorkflow:
             workflow.logger.error(f"Ingestion processing failed for {submission_id}: {e}")
             
             # Locate which step failed and mark it, plus mark remaining as skipped
-            failed_found = False
-            for s in steps_execution:
-                if s["status"] == "pending":
-                    if not failed_found:
+            if not any(s["status"] == "failed" for s in steps_execution):
+                for s in steps_execution:
+                    if s["status"] == "pending":
                         s["status"] = "failed"
                         s["error"] = str(e)
                         s["completed_timestamp"] = workflow.now().isoformat()
-                        failed_found = True
-                    else:
-                        s["status"] = "skipped"
+                        break
+
+            # Mark remaining pending steps as skipped
+            for s in steps_execution:
+                if s["status"] == "pending":
+                    s["status"] = "skipped"
 
             # Update status to 'failed' with error details
             await workflow.execute_activity(
@@ -219,7 +246,6 @@ class ConfigDrivenProcessingWorkflow:
                     "status": "failed",
                     "process_status": {
                         "status": "failed",
-                        "failed_at_step": completed_steps[-1] if completed_steps else "ingestion",
                         "error_message": str(e),
                         "steps": steps_execution,
                         "timestamp": workflow.now().isoformat()
@@ -342,5 +368,88 @@ class BatchProcessingWorkflow:
             "failed_count": total_failed,
             "chunks": chunk_index,
         }
+
+
+@workflow.defn
+class BulkStepRetryWorkflow:
+    @workflow.run
+    async def run(self, params: Dict[str, Any], carry_over: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Fetches all retryable failed submissions and fans out child
+        ConfigDrivenProcessingWorkflow instances in bounded chunks.
+        """
+        tenant_code = params.get("tenant_code")
+        batch_size = params.get("batch_size", 100)
+
+        carry_over = carry_over or {}
+        total_processed = carry_over.get("total_processed", 0)
+        total_success = carry_over.get("total_success", 0)
+        total_failed = carry_over.get("total_failed", 0)
+        chunk_index = carry_over.get("chunk_index", 0)
+        cutoff = carry_over.get("cutoff") or workflow.now().isoformat()
+        processed_this_generation = 0
+
+        while True:
+            failed_list: List[Dict[str, Any]] = await workflow.execute_activity(
+                fetch_failed_submissions_activity,
+                {"tenant_code": tenant_code, "limit": batch_size, "failed_before": cutoff},
+                start_to_close_timeout=timedelta(minutes=2),
+                retry_policy=RetryPolicy(maximum_attempts=2)
+            )
+
+            if not failed_list:
+                break
+
+            chunk_index += 1
+            child_tasks = [
+                workflow.execute_child_workflow(
+                    ConfigDrivenProcessingWorkflow.run,
+                    sub,
+                    id=f"step-retry-{sub['submission_id']}-{sub['tenant_code']}"
+                )
+                for sub in failed_list
+            ]
+            results = await asyncio.gather(*child_tasks, return_exceptions=True)
+
+            success_count = sum(1 for r in results if not isinstance(r, Exception))
+            failed_count = len(results) - success_count
+
+            total_processed += len(failed_list)
+            total_success += success_count
+            total_failed += failed_count
+            processed_this_generation += len(failed_list)
+
+            workflow.logger.info(
+                f"BulkStepRetryWorkflow chunk {chunk_index}: {len(failed_list)} retries "
+                f"({success_count} succeeded, {failed_count} failed); running total {total_processed}."
+            )
+
+            if len(failed_list) < batch_size:
+                break
+
+            if processed_this_generation >= MAX_SUBMISSIONS_PER_RUN:
+                workflow.logger.info(
+                    f"BulkStepRetryWorkflow processed {processed_this_generation} retries in "
+                    f"this generation (running total {total_processed}) — continuing as new to keep "
+                    f"workflow history bounded. Remaining retryable failures continue in the next generation."
+                )
+                workflow.continue_as_new(args=[params, {
+                    "total_processed": total_processed,
+                    "total_success": total_success,
+                    "total_failed": total_failed,
+                    "chunk_index": chunk_index,
+                    "cutoff": cutoff,
+                }])
+
+        if total_processed == 0:
+            return {"processed_count": 0, "message": "No retryable failed submissions found."}
+
+        return {
+            "processed_count": total_processed,
+            "success_count": total_success,
+            "failed_count": total_failed,
+            "chunks": chunk_index,
+        }
+
 
 

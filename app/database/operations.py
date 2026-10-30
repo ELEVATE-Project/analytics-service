@@ -1174,3 +1174,63 @@ async def copy_parent_analysis_results(
         return int(result.split()[-1])
     except Exception:
         return 0
+
+
+async def fetch_retryable_failed_submissions(
+    conn: asyncpg.Connection,
+    tenant_code: Optional[str] = None,
+    limit: int = None,
+    failed_before: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Fetches submissions with status = 'failed' for retry.
+    `limit` must be supplied by the caller (e.g. settings.BATCH_SIZE) — no default
+    is applied here so the batch size is always driven by configuration, not this function.
+    Optionally filters by updated_at < failed_before to avoid re-fetching
+    submissions that failed again during the current sweep.
+    """
+    if limit is None:
+        raise ValueError("limit must be provided by the caller; do not rely on a hardcoded default.")
+    cutoff_dt = datetime.fromisoformat(failed_before) if isinstance(failed_before, str) else failed_before
+    rows = await conn.fetch(
+        """
+        SELECT submission_id, session_id, tenant_code, submission_type, status, process_status
+        FROM submissions
+        WHERE status = 'failed'
+          AND ($1::text IS NULL OR tenant_code = $1)
+          AND ($3::timestamptz IS NULL OR updated_at < $3)
+        ORDER BY updated_at ASC
+        LIMIT $2
+        """,
+        tenant_code,
+        limit,
+        cutoff_dt,
+    )
+    return [dict(row) for row in rows]
+
+
+
+async def fetch_failed_submission_for_retry(
+    conn: asyncpg.Connection,
+    submission_id: str,
+    session_id: str,
+    tenant_code: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Returns the single submission row needed to build a step-retry payload,
+    or None if no matching row exists.
+    Only columns required for retry dispatch are selected.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT submission_id, session_id, tenant_code, submission_type, status, process_status
+        FROM submissions
+        WHERE submission_id = $1
+          AND session_id    = $2
+          AND tenant_code   = $3
+        """,
+        submission_id,
+        session_id,
+        tenant_code,
+    )
+    return dict(row) if row else None
