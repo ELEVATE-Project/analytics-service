@@ -15,6 +15,7 @@ from app.services.feedback_constants import (
     FEEDBACK_PROGRAM_NAME,
     FEEDBACK_TENANT_CODE,
     PERSONAS,
+    gforms_config_v1,
     mitra_config_v1,
 )
 from conftest import FakeConn
@@ -34,13 +35,15 @@ def _tenant_present_conn():
     return conn
 
 
-def test_seed_issues_four_statements_per_persona():
+def test_seed_issues_six_statements_per_persona():
     conn = _tenant_present_conn()
     _seed(conn)
     stmts = _statements(conn)
-    assert len(stmts) == 4 * len(PERSONAS)
+    assert len(stmts) == 6 * len(PERSONAS)
     tables = [re.search(r"INSERT INTO (\w+)", sql).group(1) for sql, _ in stmts]
-    assert tables == ["leader_category", "programs", "config", "config_version"] * len(PERSONAS)
+    # per persona: leader category, program, then the Mitra config + version and the Google Forms config + version
+    assert tables == ["leader_category", "programs", "config", "config_version",
+                      "config", "config_version"] * len(PERSONAS)
     conn.fetchval.assert_awaited_once()
     assert conn.fetchval.call_args.args[1] == FEEDBACK_TENANT_CODE
 
@@ -64,15 +67,23 @@ def test_seed_parameters_use_fixed_ids_and_constants():
         assert by_table["leader_category"][i] == (p["leader_category_id"], persona, "mitra")
         assert by_table["programs"][i] == (
             p["program_id"], p["leader_category_id"], FEEDBACK_PROGRAM_NAME, "mitra")
-        assert by_table["config"][i] == (
+        mitra_cfg, gforms_cfg = by_table["config"][2 * i], by_table["config"][2 * i + 1]
+        assert mitra_cfg == (
             p["config_id"], "mitra", p["config_name"], CONFIG_TYPE_FEEDBACK_UPLOAD,
             p["program_id"], "mitra", p["bot_id"], p["bot_name"])
-        cv = by_table["config_version"][i]
-        assert cv[0] == p["config_id"]
-        # jsonb parameter is a JSON string (asyncpg's default jsonb codec takes text), not a dict
-        assert isinstance(cv[1], str)
-        assert json.loads(cv[1]) == mitra_config_v1(persona)
-        assert cv[2:] == ("seed", "Initial format")
+        # Google Forms: same program, no bot (bot_id / bot_name NULL), its own fixed id
+        assert gforms_cfg == (
+            p["gforms_config_id"], "google_forms", f"{persona} form CSV validator", CONFIG_TYPE_FEEDBACK_UPLOAD,
+            p["program_id"], "mitra", None, None)
+        for cv, config_id, expected in (
+            (by_table["config_version"][2 * i], p["config_id"], mitra_config_v1(persona)),
+            (by_table["config_version"][2 * i + 1], p["gforms_config_id"], gforms_config_v1(persona)),
+        ):
+            assert cv[0] == config_id
+            # jsonb parameter is a JSON string (asyncpg's default jsonb codec takes text), not a dict
+            assert isinstance(cv[1], str)
+            assert json.loads(cv[1]) == expected
+            assert cv[2:] == ("seed", "Initial format")
 
     assert [p[1] for p in by_table["leader_category"]] == ["Youth", "Parent", "General Public"]
 
@@ -83,6 +94,17 @@ def test_seed_config_row_has_null_leader_and_version_is_active_v1():
     sqls = {re.search(r"INSERT INTO (\w+)", s).group(1): s for s, _ in _statements(conn)}
     assert "NULL" in sqls["config"] and "leader_id" in sqls["config"]
     assert re.search(r"SELECT \$1::uuid, 1, TRUE, \$2::jsonb", sqls["config_version"])
+
+
+def test_seed_gforms_and_mitra_rows_of_a_program_have_distinct_unique_keys():
+    conn = _tenant_present_conn()
+    _seed(conn)
+    configs = [params for sql, params in _statements(conn) if "INSERT INTO config " in sql]
+    # the unique index: (source, type, program, COALESCE(bot_id, ''))
+    keys = [(c[1], c[3], c[4], "" if c[6] is None else c[6]) for c in configs]
+    assert len(configs) == 2 * len(PERSONAS)
+    assert len(set(keys)) == len(keys)
+    assert len({c[0] for c in configs}) == len(configs)  # every config has its own fixed id
 
 
 def test_seed_called_twice_issues_identical_statements():

@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import asyncpg
 import json5
 import pytest
 
@@ -340,3 +341,221 @@ def test_is_feedback_type():
     assert operations.is_feedback_type("feedback") and operations.is_feedback_type(" Feedback ")
     assert not operations.is_feedback_type("story") and not operations.is_feedback_type("discussion")
     assert not operations.is_feedback_type(None)
+
+
+# Google Forms (Phase 2, slice 2c) -------------------------------------------------------------
+
+GF_ID = "6f1d2c3a-8b4e-4f7a-9c1d-2e5b7a9f0c11"
+GF_REF = "2026-10-02T10:09:20:" + "ab" * 32
+STORED_ID = "0e9c8a77-1d2b-4c3d-8e4f-5a6b7c8d9e0f"
+
+
+def _gforms_event(**data_overrides):
+    event = _feedback_event(submissionId=GF_ID, sessionId=GF_ID)
+    event["tags"]["source"] = "google_forms"
+    event["data"].update(source="google_forms", language="en", completionStatus="COMPLETED", sourceRef=GF_REF)
+    event["data"].update(data_overrides)
+    return event
+
+
+def _stored_row(status="success"):
+    return {"id": "stored-uuid", "submission_id": STORED_ID, "tenant_code": "mitra", "status": status}
+
+
+def _violation(constraint="feedback_submissions_tenant_code_source_ref_key", table="feedback_submissions"):
+    return asyncpg.exceptions.UniqueViolationError.new(
+        {"M": "duplicate key value violates unique constraint", "n": constraint, "t": table, "C": "23505"})
+
+
+def _gforms_new_conn():
+    conn = FakeConn()
+    conn.fetchrow = AsyncMock(side_effect=[
+        None,                                                                              # lookup by source_ref: new
+        {"id": "sub-uuid", "status": "pending", "session_id": GF_ID, "inserted": True},    # submissions
+        {"completion_status": "COMPLETED", "inserted": True},                              # feedback_submissions
+    ])
+    conn.fetchval = AsyncMock(return_value=None)                                           # submission id not taken
+    conn.fetch = AsyncMock(side_effect=[
+        [{"sequence": 1, "inserted": True}, {"sequence": 2, "inserted": True}], [], [{"id": "child"}],
+    ])
+    return conn
+
+
+def test_gforms_new_response_is_looked_up_then_stored_with_source_ref():
+    async def run():
+        conn = _gforms_new_conn()
+        res = await insert_or_update_submission(conn, _gforms_event())
+        first_sql = conn.fetchrow.await_args_list[0].args[0]
+        assert "feedback_submissions" in first_sql and "source_ref" in first_sql
+        assert conn.fetchrow.await_args_list[0].args[1:] == ("mitra", GF_REF)
+        fs_args = conn.fetchrow.await_args_list[2].args
+        assert "INSERT INTO feedback_submissions" in fs_args[0] and "source_ref" in fs_args[0]
+        assert fs_args[3] == "google_forms" and fs_args[-1] == GF_REF
+        assert res["changed"] is True and res["submission_id"] == GF_ID and res["messages_inserted"] == 2
+        conn.transaction.assert_called_once()
+    asyncio.run(run())
+
+
+def test_mitra_event_writes_null_source_ref():
+    async def run():
+        conn = _ops_conn()
+        await insert_or_update_submission(conn, _feedback_event())
+        fs_args = conn.fetchrow.await_args_list[1].args
+        assert "INSERT INTO feedback_submissions" in fs_args[0] and fs_args[-1] is None
+        conn.fetchval.assert_not_awaited()  # no google_forms lookup for mitra
+    asyncio.run(run())
+
+
+def test_gforms_already_stored_response_is_a_noop_with_stored_identity():
+    async def run():
+        conn = FakeConn()
+        conn.fetchrow = AsyncMock(return_value=_stored_row("success"))
+        res = await insert_or_update_submission(conn, _gforms_event())  # event carries a different, fresh uuid
+        assert res == {"id": "stored-uuid", "submission_id": STORED_ID, "tenant_code": "mitra", "status": "success",
+                       "changed": False, "messages_inserted": 0, "messages_updated": 0, "parents_set": 0}
+        conn.transaction.assert_not_called()
+        conn.execute.assert_not_awaited()
+        conn.fetch.assert_not_awaited()
+        assert conn.fetchrow.await_count == 1
+    asyncio.run(run())
+
+
+def test_gforms_new_ref_with_taken_submission_id_is_rejected_before_writing():
+    async def run():
+        conn = FakeConn()
+        conn.fetchrow = AsyncMock(return_value=None)
+        conn.fetchval = AsyncMock(return_value=1)
+        with pytest.raises(ValueError, match="never updates an existing submission"):
+            await insert_or_update_submission(conn, _gforms_event())
+        conn.transaction.assert_not_called()
+        conn.execute.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_gforms_lost_race_unique_violation_is_a_clean_noop():
+    async def run():
+        conn = FakeConn()
+        # asyncpg raises on the losing insert, so an item that is an exception is raised rather than returned
+        async def fetchrow(*args, **kwargs):
+            item = fetchrow.items.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+        fetchrow.items = [None, {"id": "sub-uuid", "status": "pending", "session_id": GF_ID, "inserted": True},
+                          _violation(), _stored_row("pending")]
+        conn.fetchrow = fetchrow
+        conn.fetchval = AsyncMock(return_value=None)
+        res = await insert_or_update_submission(conn, _gforms_event())
+        assert res["changed"] is False and res["submission_id"] == STORED_ID and res["status"] == "pending"
+        assert res["messages_inserted"] == 0
+        conn.transaction.assert_called_once()  # entered once; the violation left it, which rolls it back
+    asyncio.run(run())
+
+
+def test_gforms_payload_row_that_already_existed_rolls_back_as_stored():
+    async def run():
+        conn = FakeConn()
+        conn.fetchrow = AsyncMock(side_effect=[
+            None,
+            {"id": "sub-uuid", "status": "pending", "session_id": GF_ID, "inserted": False},
+            None,                       # feedback_submissions DO UPDATE matched, changed nothing
+            _stored_row("success"),     # re-lookup
+        ])
+        conn.fetchval = AsyncMock(return_value=None)
+        res = await insert_or_update_submission(conn, _gforms_event())
+        assert res["changed"] is False and res["submission_id"] == STORED_ID
+        conn.fetch.assert_not_awaited()  # never reached the feedbacks upsert
+    asyncio.run(run())
+
+
+def test_other_unique_violations_are_not_swallowed():
+    async def run():
+        conn = FakeConn()
+        async def fetchrow(*args, **kwargs):
+            if "INSERT INTO feedback_submissions" in args[0]:
+                raise _violation("feedback_submissions_submission_id_tenant_code_key")
+            if "INSERT INTO submissions" in args[0]:
+                return {"id": "sub-uuid", "status": "pending", "session_id": GF_ID, "inserted": True}
+            return None
+        conn.fetchrow = fetchrow
+        conn.fetchval = AsyncMock(return_value=None)
+        with pytest.raises(asyncpg.exceptions.UniqueViolationError):
+            await insert_or_update_submission(conn, _gforms_event())
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mutate, needle", [
+    (lambda e: e["data"].pop("sourceRef"), "sourceRef must be a non-empty string"),
+    (lambda e: e["data"].update(sourceRef="  "), "sourceRef must be a non-empty string"),
+    (lambda e: e["data"].update(sourceRef=None), "sourceRef must be a non-empty string"),
+    (lambda e: e.update(sessionId="x" * 32), "same value as submissionId and sessionId"),
+])
+def test_gforms_branch_rejects_bad_identity_before_any_query(mutate, needle):
+    async def run():
+        conn = FakeConn()
+        event = _gforms_event()
+        mutate(event)
+        with pytest.raises(ValueError, match=needle):
+            await insert_or_update_submission(conn, event)
+        conn.fetchrow.assert_not_awaited()
+        conn.fetchval.assert_not_awaited()
+        conn.transaction.assert_not_called()
+    asyncio.run(run())
+
+
+def test_mitra_event_with_source_ref_is_rejected_before_any_query():
+    async def run():
+        conn = FakeConn()
+        event = _feedback_event()
+        event["data"]["sourceRef"] = GF_REF
+        with pytest.raises(ValueError, match="sourceRef must be absent or null"):
+            await insert_or_update_submission(conn, event)
+        conn.fetchrow.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_mitra_event_with_null_source_ref_is_accepted():
+    async def run():
+        conn = _ops_conn()
+        event = _feedback_event()
+        event["data"]["sourceRef"] = None
+        res = await insert_or_update_submission(conn, event)
+        assert res["changed"] is True
+    asyncio.run(run())
+
+
+# consumer behaviour for Google Forms events
+
+def test_consumer_new_gforms_response_is_processed_under_its_own_id(monkeypatch):
+    async def run():
+        consumer, conn, insert_mock, _, trigger_mock, dlq_mock = _consumer(
+            monkeypatch, insert_result={"id": "u", "submission_id": GF_ID, "status": "pending", "changed": True})
+        await consumer.process_message(json.dumps(_gforms_event()))
+        conn.fetchval.assert_not_awaited()  # no submission-id duplicate pre-check for feedback
+        insert_mock.assert_awaited_once()
+        trigger_mock.assert_awaited_once_with(GF_ID, "mitra", "feedback")
+        dlq_mock.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_consumer_already_stored_gforms_response_is_unchanged_not_dlqd(monkeypatch):
+    async def run():
+        consumer, conn, insert_mock, _, trigger_mock, dlq_mock = _consumer(
+            monkeypatch,
+            insert_result={"id": "u", "submission_id": STORED_ID, "status": "success", "changed": False})
+        await consumer.process_message(json.dumps(_gforms_event()))
+        conn.fetchval.assert_not_awaited()
+        insert_mock.assert_awaited_once()
+        trigger_mock.assert_not_awaited()
+        dlq_mock.assert_not_awaited()
+    asyncio.run(run())
+
+
+def test_consumer_already_stored_but_pending_gforms_response_is_processed_under_the_stored_id(monkeypatch):
+    async def run():
+        consumer, _, _, _, trigger_mock, _ = _consumer(
+            monkeypatch,
+            insert_result={"id": "u", "submission_id": STORED_ID, "status": "pending", "changed": False})
+        await consumer.process_message(json.dumps(_gforms_event()))
+        trigger_mock.assert_awaited_once_with(STORED_ID, "mitra", "feedback")  # not the event's fresh uuid
+    asyncio.run(run())

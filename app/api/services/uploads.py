@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 import asyncio
 import io
 import json
@@ -21,14 +21,18 @@ from app.database import operations
 from app.database import feedback_operations
 from app.database.db import db
 from app.services.ingestion_validation import validate_ingestion_schema
-from app.services.feedback_constants import FEEDBACK_REPORT_TYPE, SOURCE_MITRA
-from app.api.services import feedback_uploads
+from app.services.feedback_constants import (
+    COMPLETION_COMPLETED,
+    FEEDBACK_REPORT_TYPE,
+    SOURCE_GOOGLE_FORMS,
+    SOURCE_MITRA,
+)
+from app.api.services import feedback_gforms, feedback_uploads
 from app.api.exceptions import (
     DuplicateFile,
     FeedbackProgramNotFound,
     InvalidCsvColumns,
     InvalidFeedbackFile,
-    InvalidFeedbackSource,
     RecordNotFound,
     RecordAlreadyProcessing,
     RecordNotPending,
@@ -768,6 +772,13 @@ def _distinct_bot_ids(df: pd.DataFrame) -> List[str]:
     return sorted(set(values[values != ""]))
 
 
+def _parse_feedback_file(file_bytes: bytes, source: str) -> pd.DataFrame:
+    """Parse an uploaded feedback CSV for its source (every cell a string). Raises ValueError."""
+    if source == SOURCE_GOOGLE_FORMS:
+        return feedback_gforms.parse_gforms_csv(file_bytes)
+    return feedback_uploads.parse_feedback_csv(file_bytes)
+
+
 async def _resolve_feedback_context(
     df: pd.DataFrame,
     program_name: str,
@@ -778,8 +789,12 @@ async def _resolve_feedback_context(
 ) -> Dict[str, Any]:
     """
     Resolves everything a feedback file needs and runs the file-level checks:
-      program + persona (by name and tenant), the file's single bot_id, the active config for
-      (program, bot_id) and — when check_file — check_feedback_file against that config.
+      program + persona (by name and tenant), the active config and — when check_file — the
+      file check against that config.
+      Mitra: the file's single bot_id picks the config row (program, bot_id) and the file is checked
+        by check_feedback_file.
+      Google Forms: the config row is the persona program's (bot_id NULL) and the file is checked by
+        check_gforms_file (the form must match the persona's config).
     Never fabricates a program/leader. Raises FeedbackProgramNotFound / InvalidFeedbackFile.
     """
     resolved = await feedback_operations.get_program_and_leader(program_name, leader_category, tenant_code)
@@ -788,23 +803,35 @@ async def _resolve_feedback_context(
             f"Program {program_name!r} with leader category {leader_category!r} does not exist for tenant {tenant_code!r}."
         )
 
-    bot_ids = _distinct_bot_ids(df)
-    if not bot_ids:
-        raise InvalidFeedbackFile(["bot_id is blank on every row; a feedback file must contain exactly one bot_id"])
-    if len(bot_ids) > 1:
-        raise InvalidFeedbackFile([
-            f"File contains more than one bot_id: {bot_ids}. Upload one persona's bot per file."
-        ])
-    bot_id = bot_ids[0]
+    bot_id: Optional[str] = None
+    if source == SOURCE_GOOGLE_FORMS:
+        active = await feedback_operations.get_active_feedback_config(resolved["program"]["id"], None, source)
+        if active is None:
+            raise InvalidFeedbackFile([
+                f"No Google Forms upload config is set up for {resolved['leader']['name']}"
+            ])
+        if check_file:
+            file_errors = await asyncio.to_thread(feedback_gforms.check_gforms_file, df, active["config"])
+            if file_errors:
+                raise InvalidFeedbackFile(list(file_errors))
+    else:
+        bot_ids = _distinct_bot_ids(df)
+        if not bot_ids:
+            raise InvalidFeedbackFile(["bot_id is blank on every row; a feedback file must contain exactly one bot_id"])
+        if len(bot_ids) > 1:
+            raise InvalidFeedbackFile([
+                f"File contains more than one bot_id: {bot_ids}. Upload one persona's bot per file."
+            ])
+        bot_id = bot_ids[0]
 
-    active = await feedback_operations.get_active_feedback_config(resolved["program"]["id"], bot_id, source)
-    if active is None:
-        raise InvalidFeedbackFile([f"bot_id {bot_id} is not configured for {resolved['leader']['name']}"])
+        active = await feedback_operations.get_active_feedback_config(resolved["program"]["id"], bot_id, source)
+        if active is None:
+            raise InvalidFeedbackFile([f"bot_id {bot_id} is not configured for {resolved['leader']['name']}"])
 
-    if check_file:
-        file_errors = await asyncio.to_thread(feedback_uploads.check_feedback_file, df, active["config"], bot_id)
-        if file_errors:
-            raise InvalidFeedbackFile(list(file_errors))
+        if check_file:
+            file_errors = await asyncio.to_thread(feedback_uploads.check_feedback_file, df, active["config"], bot_id)
+            if file_errors:
+                raise InvalidFeedbackFile(list(file_errors))
 
     return {
         "program_info": resolved["program"],
@@ -874,7 +901,7 @@ def _push_dlq_sync(messages: List[Any]) -> None:
 
 def _build_dlq_messages(skipped: List[dict], record_id: int, tenant_code: str, source: str) -> List[Any]:
     """
-    One DLQ message per skipped session. Identifiers go in headers (as the consumer's DLQ does);
+    One DLQ message per skipped session / response. Identifiers go in headers (as the consumer's DLQ does);
     the value is a small JSON envelope with the problems and NO conversation text (a session that
     could not be built has no event, and answers may come from children). The original file is in
     the bucket (csv_uploads.cloud_storage_path) for replay after the fix.
@@ -894,14 +921,227 @@ def _build_dlq_messages(skipped: List[dict], record_id: int, tenant_code: str, s
             "problems": problems,
             "skippedAt": skipped_at,
         }
+        # A response the Google Forms adapter could not build has no ids: the source row number
+        # (and, for a response whose event failed the schema check, its natural key) identify it.
+        if entry.get("row") is not None:
+            value["row"] = entry["row"]
+        if entry.get("sourceRef") is not None:
+            value["sourceRef"] = entry["sourceRef"]
+        where = f" (row {entry['row']})" if entry.get("row") is not None else ""
         headers = {
-            "reason": f"Skipped feedback session: {'; '.join(problems)}"[:1000],
+            "reason": f"Skipped feedback session{where}: {'; '.join(problems)}"[:1000],
             "submissionId": entry.get("submissionId"),
             "tenantCode": tenant_code,
             "sessionId": entry.get("sessionId"),
         }
         messages.append((json.dumps(value, default=str), headers))
     return messages
+
+
+class _FeedbackStageFailure(Exception):
+    """A step of the feedback background processing failed; the record is put on_hold with this stage."""
+
+    def __init__(self, stage: str, error: str, cause: Exception):
+        super().__init__(error)
+        self.stage = stage
+        self.error = error
+        self.cause = cause
+
+
+def _session_stats(event: dict) -> Tuple[int, int, str]:
+    """(message_count, max_sequence, completion_status) of a feedback event."""
+    messages = event["data"]["messages"]
+    return len(messages), max(m["sequence"] for m in messages), event["data"]["completionStatus"]
+
+
+def _classify_mitra_events(
+    events: List[dict],
+    state: Dict[str, Dict[str, Any]],
+) -> Tuple[List[Tuple[dict, str]], int, List[dict]]:
+    """
+    Mitra delta check (plan: Incremental uploads). Compares each session event with the stored state
+    from get_mitra_session_state and returns (to_publish, unchanged_count, conflicts):
+      - session not stored                                   -> publish, kind "new";
+      - stored with a different session_id                   -> conflict (skipped, reported, dead-lettered);
+      - stored, event has more messages or a higher sequence -> publish the FULL event, kind "updated"
+        (the consumer's row upserts are idempotent and every parentSequence must resolve inside the event);
+      - stored, event COMPLETED but stored is not            -> publish, kind "updated" (status flip);
+      - otherwise (nothing the file adds)                    -> unchanged: not published, not an error.
+    """
+    to_publish: List[Tuple[dict, str]] = []
+    unchanged = 0
+    conflicts: List[dict] = []
+    for event in events:
+        submission_id = str(event["submissionId"])
+        stored = state.get(submission_id)
+        if stored is None:
+            to_publish.append((event, "new"))
+            continue
+        if stored["session_id"] != event["sessionId"]:
+            conflicts.append({
+                "submissionId": event["submissionId"],
+                "sessionId": event["sessionId"],
+                "problems": [
+                    f"submission_id {submission_id} is already stored under a different session_id; "
+                    "the same chat session cannot carry two session tokens"
+                ],
+            })
+            continue
+        message_count, max_sequence, completion_status = _session_stats(event)
+        grown = message_count > stored["message_count"] or max_sequence > stored["max_sequence"]
+        status_flip = (
+            completion_status == COMPLETION_COMPLETED and stored["completion_status"] != COMPLETION_COMPLETED
+        )
+        if grown or status_flip:
+            to_publish.append((event, "updated"))
+        else:
+            unchanged += 1
+    return to_publish, unchanged, conflicts
+
+
+def _validate_for_publish(
+    candidates: List[Tuple[dict, str]],
+    record_id: int,
+) -> Tuple[List[Any], List[dict], List[str]]:
+    """
+    Schema-validates each (event, kind) with validate_ingestion_schema. Returns (payloads, skipped,
+    kinds_published): the Kafka payloads of the valid events, an entry per event that failed (with
+    submissionId / sessionId, plus the response's sourceRef for Google Forms) and the kind of each
+    published event.
+    """
+    payloads: List[Any] = []
+    skipped: List[dict] = []
+    kinds: List[str] = []
+    for event, kind in candidates:
+        problems = validate_ingestion_schema(event, FEEDBACK_REPORT_TYPE, "create")
+        if problems:
+            entry = {
+                "submissionId": event.get("submissionId"),
+                "sessionId": event.get("sessionId"),
+                "problems": problems,
+            }
+            source_ref = (event.get("data") or {}).get("sourceRef")
+            if source_ref is not None:
+                entry["sourceRef"] = source_ref
+            skipped.append(entry)
+            continue
+        payloads.append((json.dumps(event, default=str), f"{record_id}-{len(payloads)}"))
+        kinds.append(kind)
+    return payloads, skipped, kinds
+
+
+async def _prepare_mitra_payloads(
+    record_id: int,
+    df: pd.DataFrame,
+    ctx: Dict[str, Any],
+    tenant_code: str,
+    source: str,
+) -> Tuple[List[Any], List[dict], Dict[str, Any]]:
+    """
+    Mitra session level: one event per session (feedback_uploads.build_feedback_events), the delta check
+    against the stored sessions, then schema validation of the sessions to publish. Returns
+    (payloads, skipped, report). Raises _FeedbackStageFailure.
+    """
+    def _build_sync() -> tuple:
+        return feedback_uploads.build_feedback_events(
+            df,
+            ctx["config"],
+            program_info=ctx["program_info"],
+            leader_info=ctx["leader_info"],
+            tenant_code=tenant_code,
+            source=source,
+        )
+
+    try:
+        events, builder_skipped = await asyncio.to_thread(_build_sync)
+    except Exception as exc:
+        raise _FeedbackStageFailure("Feedback Event Building", "Failed to build feedback events", exc)
+
+    skipped: List[dict] = [dict(entry) for entry in builder_skipped]
+
+    # A failed state lookup must not turn into blind publishing of the whole file.
+    try:
+        state = await feedback_operations.get_mitra_session_state(
+            tenant_code, [str(event["submissionId"]) for event in events]
+        )
+    except Exception as exc:
+        raise _FeedbackStageFailure(
+            "Feedback Delta Lookup", "Failed to read the stored state of the sessions in the file", exc
+        )
+
+    def _classify_and_validate_sync() -> tuple:
+        to_publish, unchanged, conflicts = _classify_mitra_events(events, state)
+        payloads, schema_skipped, kinds = _validate_for_publish(to_publish, record_id)
+        return payloads, conflicts + schema_skipped, kinds, unchanged
+
+    try:
+        payloads, more_skipped, kinds, unchanged = await asyncio.to_thread(_classify_and_validate_sync)
+    except Exception as exc:
+        raise _FeedbackStageFailure("Feedback Event Building", "Failed to validate feedback events", exc)
+    skipped.extend(more_skipped)
+
+    report = {
+        "rows_read": len(df),
+        "sessions_new": kinds.count("new"),
+        "sessions_updated": kinds.count("updated"),
+        "sessions_unchanged": unchanged,
+    }
+    return payloads, skipped, report
+
+
+async def _prepare_gforms_payloads(
+    record_id: int,
+    df: pd.DataFrame,
+    ctx: Dict[str, Any],
+    tenant_code: str,
+) -> Tuple[List[Any], List[dict], Dict[str, Any]]:
+    """
+    Google Forms response level: the adapter reshapes each wide row into a response, the responses
+    already stored (by source_ref) are looked up, events are built only for the new ones and
+    schema-validated. Returns (payloads, skipped, report). Raises _FeedbackStageFailure.
+    """
+    try:
+        responses, adapter_skipped, stats = await asyncio.to_thread(
+            feedback_gforms.prepare_gforms_responses, df, ctx["config"]
+        )
+    except Exception as exc:
+        raise _FeedbackStageFailure("Feedback Event Building", "Failed to convert the Google Forms rows", exc)
+
+    # A failed lookup must not turn into blind publishing of the whole file.
+    try:
+        known_refs = await feedback_operations.get_known_source_refs(
+            tenant_code, [response["source_ref"] for response in responses]
+        )
+    except Exception as exc:
+        raise _FeedbackStageFailure(
+            "Feedback Delta Lookup", "Failed to look up the responses already stored", exc
+        )
+
+    def _build_and_validate_sync() -> tuple:
+        events, build_stats = feedback_gforms.build_gforms_events(
+            responses,
+            known_refs=known_refs,
+            program_info=ctx["program_info"],
+            leader_info=ctx["leader_info"],
+            tenant_code=tenant_code,
+            config=ctx["config"],
+        )
+        payloads, schema_skipped, kinds = _validate_for_publish([(event, "new") for event in events], record_id)
+        return payloads, schema_skipped, kinds, build_stats
+
+    try:
+        payloads, schema_skipped, kinds, build_stats = await asyncio.to_thread(_build_and_validate_sync)
+    except Exception as exc:
+        raise _FeedbackStageFailure("Feedback Event Building", "Failed to build feedback events", exc)
+
+    skipped = [dict(entry) for entry in adapter_skipped] + schema_skipped
+    report = {
+        "rows_read": stats["rows_read"],
+        "responses_new": len(kinds),
+        "responses_already_stored": build_stats["already_stored"],
+        "collapsed_duplicates": stats["collapsed_duplicates"],
+    }
+    return payloads, skipped, report
 
 
 async def _process_feedback_inline(
@@ -912,14 +1152,17 @@ async def _process_feedback_inline(
 ) -> None:
     """
     Session-level processing of a `feedback` csv_uploads record (called by process_csv_inline):
-    re-resolve program/leader/config, build one event per session, schema-validate each, publish the
-    valid ones to Kafka and send every skipped session to the DLQ. File-level problems were rejected
-    in handle_upload; a bad session is skipped (not fatal), so the record still ends 'success'.
-    Fetch / config-resolution / Kafka-publish failures end 'on_hold', exactly as story/discussion.
+    re-resolve program/leader/config, build one event per session (Mitra) or per new response
+    (Google Forms), apply the delta check, schema-validate each event, publish the valid ones to
+    Kafka and send every skipped session / response to the DLQ. File-level problems were rejected in
+    handle_upload; a bad session is skipped (not fatal), so the record still ends 'success'.
+    Fetch / config-resolution / delta-lookup / Kafka-publish failures end 'on_hold', exactly as
+    story/discussion.
     """
     cloud_storage_path = record["cloud_storage_path"]
     record_meta = _record_meta(record)
     loaded_here = df is None
+    source = record_meta.get("source", SOURCE_MITRA)
 
     # --- 1. Fetch/Parse CSV (pre-parsed df from handle_upload if available, else fetch from storage) ---
     try:
@@ -941,8 +1184,8 @@ async def _process_feedback_inline(
                             await asyncio.sleep(wait)
                 else:
                     raise last_exc
-            # dtype=str, keep_default_na=False: "NA" / "None" answers must survive
-            df = await asyncio.to_thread(feedback_uploads.parse_feedback_csv, file_bytes)
+            # every cell a string: "NA" / "None" answers must survive
+            df = await asyncio.to_thread(_parse_feedback_file, file_bytes, source)
     except Exception as exc:
         logger.exception("Failed to fetch/load feedback CSV for record %s", record_id)
         error_meta = {
@@ -958,7 +1201,6 @@ async def _process_feedback_inline(
 
     # --- 2. Re-resolve program / leader / active config (never fabricated) ---
     tenant_code = record_meta.get("tenant_code")
-    source = record_meta.get("source", SOURCE_MITRA)
     try:
         if tenant_code is None:
             raise InvalidFeedbackFile(["tenant_code is missing from the upload record"])
@@ -984,46 +1226,28 @@ async def _process_feedback_inline(
         })
         return
 
-    # --- 3. Build one event per session and schema-validate each (in a thread, like story/discussion) ---
-    def _build_payloads_sync() -> tuple[list, list, int]:
-        events, builder_skipped = feedback_uploads.build_feedback_events(
-            df,
-            ctx["config"],
-            program_info=ctx["program_info"],
-            leader_info=ctx["leader_info"],
-            tenant_code=tenant_code,
-            source=source,
-        )
-        _skipped: list = [dict(entry) for entry in builder_skipped]
-        _payloads: list = []
-        for event in events:
-            problems = validate_ingestion_schema(event, FEEDBACK_REPORT_TYPE, "create")
-            if problems:
-                _skipped.append({
-                    "submissionId": event.get("submissionId"),
-                    "sessionId": event.get("sessionId"),
-                    "problems": problems,
-                })
-                continue
-            _payloads.append((json.dumps(event, default=str), f"{record_id}-{len(_payloads)}"))
-        return _payloads, _skipped, len(events) + len(builder_skipped)
-
+    # --- 3. Build events, delta check against what is stored, schema-validate each ---
     try:
-        payloads, skipped, session_count = await asyncio.to_thread(_build_payloads_sync)
-    except Exception as exc:
-        logger.exception("Failed to build feedback events for record %s", record_id)
+        if source == SOURCE_GOOGLE_FORMS:
+            payloads, skipped, report = await _prepare_gforms_payloads(record_id, df, ctx, tenant_code)
+        else:
+            payloads, skipped, report = await _prepare_mitra_payloads(record_id, df, ctx, tenant_code, source)
+    except _FeedbackStageFailure as failure:
+        logger.error(
+            "Feedback record %s failed at %r: %s", record_id, failure.stage, failure.cause, exc_info=failure.cause
+        )
         await operations.update_status(record_id, "on_hold", {
-            "stage": "Feedback Event Building",
-            "error": "Failed to build feedback events",
-            "exception": str(exc),
+            "stage": failure.stage,
+            "error": failure.error,
+            "exception": str(failure.cause),
             "timestamp": datetime.utcnow().isoformat() + "Z",
         })
         return
 
     if skipped:
         logger.warning(
-            "record %s: %d of %d session(s) were skipped (sent to the DLQ): %s",
-            record_id, len(skipped), session_count, skipped[:20],
+            "record %s: %d session(s)/response(s) were skipped (sent to the DLQ): %s",
+            record_id, len(skipped), skipped[:20],
         )
 
     # --- 4. Publish valid sessions to Kafka ---
@@ -1045,6 +1269,7 @@ async def _process_feedback_inline(
     final_meta: Dict[str, Any] = {
         "rows_pushed": len(payloads),
         "sessions_skipped": len(skipped),
+        **report,
         "config_version_id": ctx["config_version_id"],
         "processed_at": datetime.utcnow().isoformat() + "Z",
     }
@@ -1054,7 +1279,7 @@ async def _process_feedback_inline(
             await asyncio.to_thread(_push_dlq_sync, dlq_messages)
             final_meta["sessions_dead_lettered"] = len(dlq_messages)
         except Exception as exc:
-            logger.exception("DLQ publish failed for feedback record %s (%d skipped session(s))", record_id, len(skipped))
+            logger.exception("DLQ publish failed for feedback record %s (%d skipped)", record_id, len(skipped))
             final_meta["dlq_publish_error"] = str(exc)
         final_meta["schema_validation_errors"] = skipped[:FEEDBACK_MAX_REPORTED_ERRORS]
         if len(skipped) > FEEDBACK_MAX_REPORTED_ERRORS:
@@ -1063,8 +1288,8 @@ async def _process_feedback_inline(
     # --- 6. Success (bad sessions are skipped, not fatal) ---
     await operations.update_status(record_id, "success", final_meta)
     logger.info(
-        "Feedback record %s processed successfully: %d session(s) pushed to Kafka, %d skipped",
-        record_id, len(payloads), len(skipped),
+        "Feedback record %s processed successfully: %d event(s) pushed to Kafka, %d skipped, report %s",
+        record_id, len(payloads), len(skipped), report,
     )
 
 
@@ -1081,10 +1306,6 @@ async def handle_upload(
 ) -> dict:
     normalized_type = report_type.lower().strip()
     file_size = len(file_bytes)
-
-    if normalized_type == FEEDBACK_REPORT_TYPE and source != SOURCE_MITRA:
-        # The Google Forms adapter (wide CSV -> question/answer rows) is Phase 2.
-        raise InvalidFeedbackSource(f"source {source!r} is not supported yet; only {SOURCE_MITRA!r} uploads are accepted.")
 
     # Duplicate check
     is_duplicate = await operations.check_duplicate_file(
@@ -1106,10 +1327,11 @@ async def handle_upload(
     }
 
     if normalized_type == FEEDBACK_REPORT_TYPE:
-        # File-level checks (nothing is stored if any fails). The message-level CSV is parsed with
-        # dtype=str / keep_default_na=False so "NA" / "None" answers survive.
+        # File-level checks (nothing is stored if any fails). Mitra: the message-level CSV is parsed
+        # with dtype=str / keep_default_na=False so "NA" / "None" answers survive. Google Forms: the
+        # original wide CSV is parsed by the adapter and its form must match the persona's config.
         try:
-            df = await asyncio.to_thread(feedback_uploads.parse_feedback_csv, file_bytes)
+            df = await asyncio.to_thread(_parse_feedback_file, file_bytes, source)
         except ValueError as exc:
             raise InvalidFeedbackFile([f"Failed to parse CSV: {exc}"])
         ctx = await _resolve_feedback_context(
@@ -1118,11 +1340,12 @@ async def handle_upload(
         meta_data.update({
             "source": source,
             "persona": ctx["leader_info"]["name"],
-            "bot_id": ctx["bot_id"],
             "config_id": ctx["config_id"],
             "config_version_id": ctx["config_version_id"],
             "config_version": ctx["config_version"],
         })
+        if ctx["bot_id"] is not None:
+            meta_data["bot_id"] = ctx["bot_id"]
     else:
         # Validate CSV content and structure
         parse_errors = []

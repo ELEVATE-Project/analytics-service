@@ -1,8 +1,13 @@
+import uuid
+
 from app.config import settings
 from app.services.feedback_constants import (
+    COMPLETION_COMPLETED,
     COMPLETION_STATUSES,
     FEEDBACK_REPORT_TYPE,
     FEEDBACK_SOURCES,
+    SOURCE_GOOGLE_FORMS,
+    SOURCE_MITRA,
 )
 
 
@@ -113,6 +118,55 @@ def _validate_feedback_messages(messages) -> list:
     return problems
 
 
+def _is_uuid(value) -> bool:
+    """True for a string that parses as a UUID."""
+    if not isinstance(value, str):
+        return False
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_feedback_source_rules(event: dict, source, completion) -> list:
+    """Rules that depend on data.source (only called when data.source is a known source):
+    sourceRef is required for google_forms and absent / null for mitra; a google_forms event carries
+    one generated UUID as submissionId and sessionId and is always COMPLETED."""
+    problems = []
+    source_ref, ref_found = _get_nested(event, "data.sourceRef")
+
+    if source == SOURCE_GOOGLE_FORMS:
+        if not ref_found:
+            problems.append("'data.sourceRef' is missing")
+        elif _is_empty(source_ref):
+            problems.append(f"'data.sourceRef' is {_emptiness_label(source_ref)}")
+        elif not isinstance(source_ref, str):
+            problems.append(f"'data.sourceRef' must be a string, got {type(source_ref).__name__}")
+        elif len(source_ref.strip()) == 0:
+            problems.append("'data.sourceRef' is blank")
+
+        submission_id = event.get("submissionId")
+        session_id = event.get("sessionId")
+        if "submissionId" in event and not _is_empty(submission_id) and not _is_uuid(submission_id):
+            problems.append(f"'submissionId' must be a UUID for source {SOURCE_GOOGLE_FORMS}, got {submission_id!r}")
+        if "sessionId" in event and not _is_empty(session_id) and not _is_uuid(session_id):
+            problems.append(f"'sessionId' must be a UUID for source {SOURCE_GOOGLE_FORMS}, got {session_id!r}")
+        if (_is_uuid(submission_id) and _is_uuid(session_id)) and submission_id != session_id:
+            problems.append(
+                f"'sessionId' must equal 'submissionId' for source {SOURCE_GOOGLE_FORMS}, "
+                f"got {session_id!r} and {submission_id!r}"
+            )
+
+        if completion in COMPLETION_STATUSES and completion != COMPLETION_COMPLETED:
+            problems.append(f"'data.completionStatus' must be {COMPLETION_COMPLETED} for source {SOURCE_GOOGLE_FORMS}, got {completion!r}")
+    elif source == SOURCE_MITRA:
+        if ref_found and source_ref is not None:
+            problems.append(f"'data.sourceRef' must be absent or null for source {SOURCE_MITRA}, got {source_ref!r}")
+
+    return problems
+
+
 def _validate_feedback_create(event: dict) -> list:
     """Feedback-specific checks that the generic required-path mechanism cannot express."""
     problems = []
@@ -129,6 +183,8 @@ def _validate_feedback_create(event: dict) -> list:
     source, found = _get_nested(event, "data.source")
     if found and not _is_empty(source) and source not in FEEDBACK_SOURCES:
         problems.append(f"'data.source' must be one of {', '.join(FEEDBACK_SOURCES)}, got {source!r}")
+    elif found and source in FEEDBACK_SOURCES:
+        problems.extend(_validate_feedback_source_rules(event, source, completion))
 
     messages, found = _get_nested(event, "data.messages")
     if found:

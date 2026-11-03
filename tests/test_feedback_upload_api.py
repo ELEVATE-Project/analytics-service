@@ -1,15 +1,20 @@
 """
-Tests for the `feedback` report type on POST /v1/upload/ (slice 1e): file-level checks in
-handle_upload, session-level processing + DLQ in process_csv_inline, size cap, `source`
-validation, and (opt-in) the real-Postgres lookups in app/database/feedback_operations.py.
+Tests for the `feedback` report type on POST /v1/upload/ (slice 1e + 2d): file-level checks in
+handle_upload (Mitra and Google Forms), session-level processing + DLQ in process_csv_inline, size cap,
+`source` validation, and (opt-in) the real-Postgres lookups in app/database/feedback_operations.py.
+The delta check (new / unchanged / updated sessions, already stored responses) is in
+tests/test_feedback_delta.py.
 
 Everything is in-memory fakes (same conventions as tests/unit_testing.py) except the last section,
 which is skipped unless FEEDBACK_TEST_DATABASE_URL points at a scratch database that already has
 schema.sql applied.
 """
 import asyncio
+import csv
+import io
 import json
 import os
+import uuid
 from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock
 
@@ -23,7 +28,7 @@ import app.api.services.uploads as uploads_service_module
 import app.database.feedback_operations as feedback_ops
 import app.database.operations as operations_module
 from app.config import settings
-from app.services.feedback_constants import PERSONAS, mitra_config_v1
+from app.services.feedback_constants import PERSONAS, gforms_config_v1, mitra_config_v1
 from tests.conftest import FakeConn, install_fake_db, settings_override
 
 YOUTH = PERSONAS["Youth"]
@@ -53,6 +58,36 @@ def _session(sess, sid, bot="90", status="COMPLETED", answer="17"):
         _row(bot, sess, sid, 3, "English", "", "LANG_Q", 120, status),
         _row(bot, sess, sid, 4, "Thanks", "Thanks", "THANK_YOU", 1, status),
     ]
+
+
+GFORMS_ACTIVE_CONFIG = {
+    "config_id": YOUTH["gforms_config_id"],
+    "config_version_id": "22222222-2222-2222-2222-222222222222",
+    "version": 3,
+    "config": gforms_config_v1("Youth"),
+}
+
+
+def _gforms_headers(persona: str) -> List[str]:
+    """The headers of the persona's (single) configured Google Forms form, as exported."""
+    form = next(iter(gforms_config_v1(persona)["forms"].values()))
+    return [q["headers"][0] for q in form["questions"]]
+
+
+def _gforms_csv(persona: str = "Youth", responses: int = 2, headers: Optional[List[str]] = None,
+                timestamp_header: Optional[str] = "Timestamp", first_second: int = 0) -> bytes:
+    """An ORIGINAL-format wide Google Forms CSV: Timestamp + one column per question, synthetic answers."""
+    question_headers = headers if headers is not None else _gforms_headers(persona)
+    header = ([timestamp_header] if timestamp_header is not None else []) + question_headers
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(header)
+    for n in range(responses):
+        stamp = f"10/2/2026 10:09:{first_second + n:02d}"
+        row = [stamp] if timestamp_header is not None else []
+        row += [f"answer {n} {i}" for i in range(len(question_headers))]
+        writer.writerow(row)
+    return buf.getvalue().encode("utf-8")
 
 
 def _csv(rows: List[str], header: str = HEADER) -> bytes:
@@ -260,11 +295,122 @@ def test_feedback_source_defaults_to_mitra_and_is_case_insensitive(client, monke
     assert stores.insert.await_args.kwargs["meta_data"]["source"] == "mitra"
 
 
-def test_feedback_google_forms_source_not_supported_yet(client, monkeypatch):
-    stores = _patch_upload_pipeline(monkeypatch)
-    resp = client.post("/v1/upload/", headers=_headers(), data=_form(source="google_forms"), files=_files())
+# GOOGLE FORMS FILE LEVEL (the original wide CSV, checked by the adapter against the persona's config)
+def test_gforms_good_persona_file_accepted(client, monkeypatch):
+    stores = _patch_upload_pipeline(monkeypatch, active=GFORMS_ACTIVE_CONFIG)
+    resp = client.post("/v1/upload/", headers=_headers(), data=_form(source="google_forms"), files=_files(_gforms_csv()))
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"message": "Successfully uploaded to cloud", "id": 7, "status": "pending"}
+
+    stores.lookup.assert_awaited_once_with("1M Voice", "Youth", "mitra")
+    stores.config.assert_awaited_once_with(PROGRAM["id"], None, "google_forms")  # bot_id NULL
+    stores.upload.assert_called_once()
+    meta = stores.insert.await_args.kwargs["meta_data"]
+    assert meta["source"] == "google_forms"
+    assert meta["persona"] == "Youth"
+    assert meta["config_id"] == YOUTH["gforms_config_id"]
+    assert meta["config_version_id"] == GFORMS_ACTIVE_CONFIG["config_version_id"]
+    assert meta["config_version"] == 3
+    assert meta["tenant_code"] == "mitra"
+    assert "bot_id" not in meta
+
+
+def test_gforms_background_task_gets_parsed_wide_dataframe(monkeypatch):
+    _patch_upload_pipeline(monkeypatch, active=GFORMS_ACTIVE_CONFIG)
+    monkeypatch.setattr(operations_module, "try_claim_for_processing", AsyncMock(return_value="success"))
+    tasks = MagicMock()
+
+    async def run():
+        return await uploads_service_module.handle_upload(
+            "feedback", "1M Voice", "Youth", "mitra", "forms.csv", _gforms_csv(), tasks, source="google_forms")
+
+    assert asyncio.run(run())["status"] == "in_progress"
+    fn, record_id, file_bytes, df = tasks.add_task.call_args.args
+    assert fn is uploads_service_module.process_csv_inline
+    assert "Timestamp" in df.columns and len(df) == 2
+
+
+def test_gforms_wrong_persona_form_rejected_listing_unmapped_headers(client, monkeypatch):
+    # a Parents form uploaded under Youth: the Youth config does not know its headers
+    stores = _patch_upload_pipeline(monkeypatch, active=GFORMS_ACTIVE_CONFIG)
+    resp = client.post("/v1/upload/", headers=_headers(), data=_form(source="google_forms"),
+                       files=_files(_gforms_csv("Parent")))
     assert resp.status_code == 400
-    assert "not supported yet" in resp.json()["detail"]
+    errors = " | ".join(resp.json()["errors"])
+    assert "Unmapped column(s)" in errors
+    assert "Which State do you stay in?" in errors  # a Parents-only header is named
+    _assert_nothing_stored(stores)
+
+
+def test_gforms_unmapped_header_rejects_whole_file(client, monkeypatch):
+    stores = _patch_upload_pipeline(monkeypatch, active=GFORMS_ACTIVE_CONFIG)
+    headers = _gforms_headers("Youth") + ["Favourite colour"]
+    resp = client.post("/v1/upload/", headers=_headers(), data=_form(source="google_forms"),
+                       files=_files(_gforms_csv(headers=headers)))
+    assert resp.status_code == 400
+    assert any("Favourite colour" in e for e in resp.json()["errors"])
+    _assert_nothing_stored(stores)
+
+
+def test_gforms_missing_timestamp_column_rejected(client, monkeypatch):
+    stores = _patch_upload_pipeline(monkeypatch, active=GFORMS_ACTIVE_CONFIG)
+    resp = client.post("/v1/upload/", headers=_headers(), data=_form(source="google_forms"),
+                       files=_files(_gforms_csv(timestamp_header=None)))
+    assert resp.status_code == 400
+    assert any("Timestamp" in e for e in resp.json()["errors"])
+    _assert_nothing_stored(stores)
+
+
+def test_gforms_source_with_mitra_shaped_file_rejected(client, monkeypatch):
+    stores = _patch_upload_pipeline(monkeypatch, active=GFORMS_ACTIVE_CONFIG)
+    resp = client.post("/v1/upload/", headers=_headers(), data=_form(source="google_forms"), files=_files())  # Mitra CSV
+    assert resp.status_code == 400
+    errors = " | ".join(resp.json()["errors"])
+    assert "Timestamp" in errors and "bot_id" in errors  # the Mitra columns are unmapped
+    _assert_nothing_stored(stores)
+
+
+def test_mitra_source_with_gforms_shaped_file_rejected(client, monkeypatch):
+    stores = _patch_upload_pipeline(monkeypatch)
+    resp = client.post("/v1/upload/", headers=_headers(), data=_form(source="mitra"), files=_files(_gforms_csv()))
+    assert resp.status_code == 400
+    assert resp.json()["errors"] == ["Missing columns: ['bot_id']"]
+    stores.config.assert_not_called()
+    _assert_nothing_stored(stores)
+
+
+def test_gforms_no_config_for_persona_rejected(client, monkeypatch):
+    stores = _patch_upload_pipeline(monkeypatch, active=None)
+    resp = client.post("/v1/upload/", headers=_headers(), data=_form(source="google_forms"), files=_files(_gforms_csv()))
+    assert resp.status_code == 400
+    assert resp.json()["errors"] == ["No Google Forms upload config is set up for Youth"]
+    _assert_nothing_stored(stores)
+
+
+def test_gforms_unknown_program_or_leader_rejected_never_fabricated(client, monkeypatch):
+    stores = _patch_upload_pipeline(monkeypatch, resolved=None, active=GFORMS_ACTIVE_CONFIG)
+    resp = client.post("/v1/upload/", headers=_headers(),
+                       data=_form(source="google_forms", leader_category="Nobody"), files=_files(_gforms_csv()))
+    assert resp.status_code == 404
+    stores.config.assert_not_called()
+    _assert_nothing_stored(stores)
+
+
+def test_gforms_unparseable_file_rejected(client, monkeypatch):
+    stores = _patch_upload_pipeline(monkeypatch, active=GFORMS_ACTIVE_CONFIG)
+    headers_only = (",".join(["Timestamp"] + _gforms_headers("Youth")) + "\n").encode()
+    resp = client.post("/v1/upload/", headers=_headers(), data=_form(source="google_forms"), files=_files(headers_only))
+    assert resp.status_code == 400
+    assert resp.json()["errors"][0].startswith("Failed to parse CSV")
+    _assert_nothing_stored(stores)
+
+
+def test_gforms_duplicate_file_still_rejected(client, monkeypatch):
+    stores = _patch_upload_pipeline(monkeypatch, active=GFORMS_ACTIVE_CONFIG)
+    monkeypatch.setattr(operations_module, "check_duplicate_file", AsyncMock(return_value=True))
+    resp = client.post("/v1/upload/", headers=_headers(), data=_form(source="google_forms"), files=_files(_gforms_csv()))
+    assert resp.status_code == 400 and "ALREADY EXISTS" in resp.json()["detail"]
+    stores.lookup.assert_not_called()
     _assert_nothing_stored(stores)
 
 
@@ -338,6 +484,11 @@ class BgHarness:
         self.config = AsyncMock(return_value=ACTIVE_CONFIG)
         monkeypatch.setattr(feedback_ops, "get_program_and_leader", self.lookup)
         monkeypatch.setattr(feedback_ops, "get_active_feedback_config", self.config)
+        # delta lookups: nothing stored yet (tests/test_feedback_delta.py drives these)
+        self.state = AsyncMock(return_value={})
+        self.refs = AsyncMock(return_value=set())
+        monkeypatch.setattr(feedback_ops, "get_mitra_session_state", self.state)
+        monkeypatch.setattr(feedback_ops, "get_known_source_refs", self.refs)
         self.push = MagicMock()
         monkeypatch.setattr(uploads_service_module, "_push_rows_sync", self.push)
         self.dlq = MagicMock()
@@ -653,5 +804,39 @@ def test_real_db_lookups_by_name_and_tenant(monkeypatch):
                 await conn.execute("DELETE FROM leader_category WHERE tenant_code = 'other'")
                 await conn.execute("DELETE FROM tenant WHERE code = 'other'")
             await pool.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.skipif(DB_URL is None, reason="FEEDBACK_TEST_DATABASE_URL not set (scratch DB with schema.sql applied)")
+def test_real_db_active_config_with_null_bot_id_matches_google_forms_row(monkeypatch):
+    import asyncpg
+    from app.database.db import db
+    from app.database.seed_feedback import seed_feedback
+
+    async def run():
+        pool = await asyncpg.create_pool(DB_URL, min_size=1, max_size=2)
+        monkeypatch.setattr(db, "pool", pool, raising=False)
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute("INSERT INTO tenant(name, code) VALUES ('Mitra', 'mitra') ON CONFLICT DO NOTHING")
+                await seed_feedback(conn)
+
+            for persona, p in PERSONAS.items():
+                # NULL bot_id matches the NULL-bot (Google Forms) row of that program only
+                gforms = await feedback_ops.get_active_feedback_config(p["program_id"], None, "google_forms")
+                assert gforms["config_id"] == p["gforms_config_id"]
+                assert gforms["config"] == gforms_config_v1(persona)
+                # Mitra behaviour unchanged: its bot-specific row is found by bot_id, never by NULL
+                mitra = await feedback_ops.get_active_feedback_config(p["program_id"], p["bot_id"])
+                assert mitra["config_id"] == p["config_id"]
+                assert await feedback_ops.get_active_feedback_config(p["program_id"], None) is None
+                assert await feedback_ops.get_active_feedback_config(p["program_id"], p["bot_id"], "google_forms") is None
+            # another persona's program never leaks in
+            assert (await feedback_ops.get_active_feedback_config(
+                PERSONAS["Parent"]["program_id"], None, "google_forms"))["config_id"] == PERSONAS["Parent"]["gforms_config_id"]
+            assert await feedback_ops.get_active_feedback_config(str(uuid.uuid4()), None, "google_forms") is None
+        finally:
+            await pool.close()  # the seed rows stay (the opt-in tests run against an empty database per run)
 
     asyncio.run(run())

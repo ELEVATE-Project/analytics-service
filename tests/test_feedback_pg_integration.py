@@ -15,7 +15,7 @@ import pytest
 
 from app.database.db import SCHEMA_FILE
 from app.database.seed_feedback import seed_feedback
-from app.services.feedback_constants import PERSONAS, mitra_config_v1
+from app.services.feedback_constants import PERSONAS, gforms_config_v1, mitra_config_v1
 
 DSN = os.environ.get("FEEDBACK_TEST_DATABASE_URL")
 
@@ -92,19 +92,22 @@ async def _add_feedback_submission(conn, sid="S1", status="COMPLETED"):
         "VALUES ($1, 'mitra', 'mitra', $2)", sid, status)
 
 
-def test_schema_applies_twice_and_seed_counts_are_3():
+SEED_COUNTS = {"leader_category": 3, "programs": 3, "config": 6, "config_version": 6}
+
+
+def test_schema_applies_twice_and_seed_counts():
     async def body(conn):
-        for table in ("leader_category", "programs", "config", "config_version"):
-            assert await conn.fetchval(f"SELECT count(*) FROM {table}") == 3, table
+        for table, expected in SEED_COUNTS.items():
+            assert await conn.fetchval(f"SELECT count(*) FROM {table}") == expected, table
     run_db(body)
 
 
-def test_seed_twice_leaves_exactly_three_rows_per_table():
+def test_seed_twice_leaves_the_same_rows():
     async def body(conn):
         await seed_feedback(conn)
         await seed_feedback(conn)
-        for table in ("leader_category", "programs", "config", "config_version"):
-            assert await conn.fetchval(f"SELECT count(*) FROM {table}") == 3, table
+        for table, expected in SEED_COUNTS.items():
+            assert await conn.fetchval(f"SELECT count(*) FROM {table}") == expected, table
         assert await conn.fetchval("SELECT count(*) FROM tenant") == 1
     run_db(body)
 
@@ -131,6 +134,37 @@ def test_seeded_rows_match_the_contract():
             assert (ver["version"], ver["is_active"], ver["created_by"], ver["change_note"]) == (
                 1, True, "seed", "Initial format")
             assert json.loads(ver["config"]) == mitra_config_v1(persona)
+
+            gf = await conn.fetchrow(
+                "SELECT config_source, config_type, program_id::text AS program_id, leader_id, bot_id, bot_name, "
+                "tenant_code, name FROM config WHERE id = $1::uuid", p["gforms_config_id"])
+            assert dict(gf) == {
+                "config_source": "google_forms", "config_type": "feedback_upload", "program_id": p["program_id"],
+                "leader_id": None, "bot_id": None, "bot_name": None, "tenant_code": "mitra",
+                "name": f"{persona} form CSV validator"}
+            gver = await conn.fetchrow(
+                "SELECT version, is_active, config::text AS config, created_by, change_note "
+                "FROM config_version WHERE config_id = $1::uuid", p["gforms_config_id"])
+            assert (gver["version"], gver["is_active"], gver["created_by"], gver["change_note"]) == (
+                1, True, "seed", "Initial format")
+            assert json.loads(gver["config"]) == gforms_config_v1(persona)
+    run_db(body)
+
+
+def test_google_forms_and_mitra_configs_of_one_program_coexist():
+    async def body(conn):
+        for p in PERSONAS.values():
+            rows = await conn.fetch(
+                "SELECT config_source, bot_id FROM config WHERE program_id = $1::uuid ORDER BY config_source",
+                p["program_id"])
+            assert [(r["config_source"], r["bot_id"]) for r in rows] == [
+                ("google_forms", None), ("mitra", p["bot_id"])]
+        # the Google Forms row is the one a lookup by (source, type, program) finds, with its active version
+        row = await conn.fetchrow(
+            "SELECT c.id::text AS id, v.version FROM config c JOIN config_version v ON v.config_id = c.id AND v.is_active "
+            "WHERE c.config_source = 'google_forms' AND c.config_type = 'feedback_upload' AND c.program_id = $1::uuid "
+            "AND c.bot_id IS NULL", YOUTH["program_id"])
+        assert (row["id"], row["version"]) == (YOUTH["gforms_config_id"], 1)
     run_db(body)
 
 
@@ -152,6 +186,22 @@ def test_seed_does_not_overwrite_edits_or_resurrect_v1():
                                    YOUTH["config_id"]) == 2
         assert await conn.fetchval("SELECT count(*) FROM config_version WHERE config_id = $1::uuid",
                                    PARENT["config_id"]) == 1
+    run_db(body)
+
+
+def test_seed_does_not_overwrite_google_forms_edits():
+    async def body(conn):
+        # operator edited the Google Forms config row and superseded its v1 with an active v2
+        await conn.execute("UPDATE config SET name = 'edited gf' WHERE id = $1::uuid", YOUTH["gforms_config_id"])
+        await conn.execute("UPDATE config_version SET is_active = FALSE WHERE config_id = $1::uuid",
+                           YOUTH["gforms_config_id"])
+        await conn.execute("INSERT INTO config_version (config_id, version, config) VALUES ($1::uuid, 2, '{}'::jsonb)",
+                           YOUTH["gforms_config_id"])
+        await seed_feedback(conn)
+        assert await conn.fetchval("SELECT name FROM config WHERE id = $1::uuid", YOUTH["gforms_config_id"]) == "edited gf"
+        assert await conn.fetchval("SELECT count(*) FROM config_version WHERE config_id = $1::uuid",
+                                   YOUTH["gforms_config_id"]) == 2
+        assert await conn.fetchval("SELECT count(*) FROM config") == 6
     run_db(body)
 
 
@@ -234,9 +284,7 @@ def test_duplicate_config_rejected_including_null_bot_id_and_null_program():
             "INSERT INTO config (config_source, name, config_type, program_id, tenant_code, bot_id) "
             "VALUES ('mitra', 'dup', 'feedback_upload', $1::uuid, 'mitra', $2)", YOUTH["program_id"], YOUTH["bot_id"])
         # NULL bot_id twice for the same program: a plain UNIQUE would let this through
-        await conn.execute(
-            "INSERT INTO config (config_source, name, config_type, program_id, tenant_code, bot_id) "
-            "VALUES ('google_forms', 'gf', 'feedback_upload', $1::uuid, 'mitra', NULL)", YOUTH["program_id"])
+        # (the Google Forms row of the Youth program is seeded, so this is the second one)
         await _expect_violation(
             conn, asyncpg.UniqueViolationError,
             "INSERT INTO config (config_source, name, config_type, program_id, tenant_code, bot_id) "

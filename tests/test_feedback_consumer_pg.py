@@ -13,6 +13,7 @@ import uuid
 import asyncpg
 import pytest
 
+from app.database import operations
 from app.database.operations import (
     FeedbackUpdateNotSupportedError,
     delete_submission,
@@ -254,4 +255,264 @@ def test_session_id_reuse_by_another_submission_is_rejected():
         with pytest.raises(ValueError, match="already belongs to session"):
             await insert_or_update_submission(conn, _event(sid, f"sess-{uuid.uuid4().hex}", SIX))
         assert (await _snapshot(conn, sid2)) == (None, None, [])
+    _run(body)
+
+
+# ---------------------------------------------------------------- Google Forms (Phase 2, slice 2c)
+
+GF_MESSAGES = [
+    _msg(1, "How old are you?", key="AGE_IDENTIFICATION"),
+    _msg(2, "17", parent=1, key="AGE_IDENTIFICATION"),
+    _msg(3, "What would you change?", key="SCHOOL_EXPERIENCE"),
+    _msg(4, "More buses", parent=3, key="SCHOOL_EXPERIENCE"),
+    _msg(5, "What next?", key="FUTURE_GOAL"),
+    _msg(6, "Teacher", parent=5, key="FUTURE_GOAL"),
+]
+
+
+def _gf_ref():
+    return f"2026-10-02T10:09:20:{uuid.uuid4().hex}{uuid.uuid4().hex}"
+
+
+def _gf_event(source_ref, submission_id=None, messages=None):
+    sid = submission_id or str(uuid.uuid4())
+    event = _event(sid, sid, messages or GF_MESSAGES, source="google_forms")
+    event["data"].update(source="google_forms", sourceRef=source_ref)
+    return event
+
+
+async def _gf_count(conn, source_ref):
+    return await conn.fetchval(
+        "SELECT count(*) FROM feedback_submissions WHERE tenant_code = 'mitra' AND source_ref = $1", source_ref)
+
+
+def test_gforms_new_response_stored_with_source_ref():
+    async def body(conn, created):
+        ref = _gf_ref()
+        event = _gf_event(ref)
+        sid = event["submissionId"]
+        created.append(sid)
+        res = await insert_or_update_submission(conn, event)
+        assert res["changed"] is True and res["status"] == "pending" and res["submission_id"] == sid
+        assert res["messages_inserted"] == 6 and res["parents_set"] == 3
+        sub, fs, fbs = await _snapshot(conn, sid)
+        assert sub["session_id"] == sid and sub["submission_type"] == "feedback"
+        assert fs["source"] == "google_forms" and fs["source_ref"] == ref
+        assert fs["completion_status"] == "COMPLETED" and fs["language"] == "en"
+        by_seq = {r["sequence"]: r for r in fbs}
+        assert sorted(by_seq) == [1, 2, 3, 4, 5, 6]
+        assert [by_seq[s]["parent_id"] for s in (1, 3, 5)] == [None, None, None]
+        assert by_seq[2]["parent_id"] == by_seq[1]["id"]
+        assert by_seq[4]["parent_id"] == by_seq[3]["id"] and by_seq[6]["parent_id"] == by_seq[5]["id"]
+    _run(body)
+
+
+def test_gforms_same_event_again_is_unchanged():
+    async def body(conn, created):
+        ref = _gf_ref()
+        event = _gf_event(ref)
+        sid = event["submissionId"]
+        created.append(sid)
+        await insert_or_update_submission(conn, event)
+        await conn.execute("UPDATE submissions SET status = 'success' WHERE submission_id = $1", sid)
+        before = await _snapshot(conn, sid)
+        res = await insert_or_update_submission(conn, event)
+        assert res["changed"] is False and res["status"] == "success" and res["submission_id"] == sid
+        assert res["messages_inserted"] == 0 and res["parents_set"] == 0
+        assert await _snapshot(conn, sid) == before
+    _run(body)
+
+
+def test_gforms_different_uuid_same_source_ref_writes_nothing():
+    async def body(conn, created):
+        ref = _gf_ref()
+        first = _gf_event(ref)
+        created.append(first["submissionId"])
+        await insert_or_update_submission(conn, first)
+        await conn.execute("UPDATE submissions SET status = 'success' WHERE submission_id = $1", first["submissionId"])
+        before = await _snapshot(conn, first["submissionId"])
+
+        second = _gf_event(ref)  # fresh uuid, same natural key (a re-upload), even with a different body
+        second["data"]["messages"] = GF_MESSAGES[:2]
+        second_id = second["submissionId"]
+        created.append(second_id)
+        res = await insert_or_update_submission(conn, second)
+        assert res["changed"] is False and res["submission_id"] == first["submissionId"]
+        assert res["status"] == "success" and res["messages_inserted"] == 0
+        assert await _snapshot(conn, second_id) == (None, None, [])
+        assert await _snapshot(conn, first["submissionId"]) == before
+        assert await _gf_count(conn, ref) == 1
+        assert await conn.fetchval(
+            "SELECT count(*) FROM submissions WHERE submission_id = ANY($1::text[]) AND tenant_code = 'mitra'",
+            [first["submissionId"], second_id]) == 1
+    _run(body)
+
+
+def test_gforms_two_different_source_refs_make_two_submissions():
+    async def body(conn, created):
+        a, b = _gf_event(_gf_ref()), _gf_event(_gf_ref())
+        created.extend([a["submissionId"], b["submissionId"]])
+        ra = await insert_or_update_submission(conn, a)
+        rb = await insert_or_update_submission(conn, b)
+        assert ra["changed"] is True and rb["changed"] is True and ra["id"] != rb["id"]
+        assert await conn.fetchval(
+            "SELECT count(*) FROM submissions WHERE submission_id = ANY($1::text[]) AND tenant_code = 'mitra'",
+            [a["submissionId"], b["submissionId"]]) == 2
+        assert await conn.fetchval(
+            "SELECT count(*) FROM feedbacks WHERE submission_id = ANY($1::text[]) AND tenant_code = 'mitra'",
+            [a["submissionId"], b["submissionId"]]) == 12
+    _run(body)
+
+
+def test_gforms_response_already_stored_by_another_connection_is_a_clean_noop():
+    async def body(conn, created):
+        ref = _gf_ref()
+        stored_id = str(uuid.uuid4())
+        created.append(stored_id)
+        other = await asyncpg.connect(DSN)
+        try:
+            await other.execute(
+                "INSERT INTO submissions (session_id, submission_id, tenant_code, submission_type, status) "
+                "VALUES ($1, $1, 'mitra', 'feedback', 'success')", stored_id)
+            await other.execute(
+                "INSERT INTO feedback_submissions (submission_id, tenant_code, source, completion_status, source_ref) "
+                "VALUES ($1, 'mitra', 'google_forms', 'COMPLETED', $2)", stored_id, ref)
+        finally:
+            await other.close()
+        event = _gf_event(ref)
+        created.append(event["submissionId"])
+        res = await insert_or_update_submission(conn, event)
+        assert res["changed"] is False and res["submission_id"] == stored_id and res["status"] == "success"
+        assert await _snapshot(conn, event["submissionId"]) == (None, None, [])
+        assert await _gf_count(conn, ref) == 1
+    _run(body)
+
+
+def test_gforms_race_after_precheck_hits_unique_violation_and_is_a_clean_noop(monkeypatch):
+    """The pre-check misses (as if the other writer committed just after it); the real unique constraint fires."""
+    async def body(conn, created):
+        ref = _gf_ref()
+        stored_id = str(uuid.uuid4())
+        created.append(stored_id)
+        await conn.execute(
+            "INSERT INTO submissions (session_id, submission_id, tenant_code, submission_type, status) "
+            "VALUES ($1, $1, 'mitra', 'feedback', 'success')", stored_id)
+        await conn.execute(
+            "INSERT INTO feedback_submissions (submission_id, tenant_code, source, completion_status, source_ref) "
+            "VALUES ($1, 'mitra', 'google_forms', 'COMPLETED', $2)", stored_id, ref)
+        real_lookup = operations._find_stored_gforms_response
+        calls = []
+
+        async def lookup(c, tenant, source_ref):
+            calls.append(source_ref)
+            return None if len(calls) == 1 else await real_lookup(c, tenant, source_ref)
+
+        monkeypatch.setattr(operations, "_find_stored_gforms_response", lookup)
+        event = _gf_event(ref)
+        created.append(event["submissionId"])
+        res = await insert_or_update_submission(conn, event)
+        assert len(calls) == 2  # the violation path re-read the stored response
+        assert res["changed"] is False and res["submission_id"] == stored_id
+        # the losing event rolled back completely: no submission, payload or message rows
+        assert await _snapshot(conn, event["submissionId"]) == (None, None, [])
+        assert await _gf_count(conn, ref) == 1
+    _run(body)
+
+
+def test_gforms_true_concurrent_writers_store_the_response_once():
+    """Writer 1 holds an uncommitted insert; writer 2 passes its pre-check, blocks on the unique key, then no-ops."""
+    async def main():
+        ref = _gf_ref()
+        writer1_id = str(uuid.uuid4())
+        event2 = _gf_event(ref)
+        conn1 = await asyncpg.connect(DSN)
+        conn2 = await asyncpg.connect(DSN)
+        try:
+            await conn1.execute("INSERT INTO tenant (name, code) VALUES ('Mitra', 'mitra') ON CONFLICT (code) DO NOTHING")
+            await conn1.execute(
+                "INSERT INTO leader_category (id, name, tenant_code) VALUES ($1, 'Youth', 'mitra') ON CONFLICT (id) DO NOTHING",
+                LEADER_ID)
+            await conn1.execute(
+                "INSERT INTO programs (id, leaders_id, name, tenant_code) VALUES ($1, $2, '1M Voice', 'mitra') "
+                "ON CONFLICT (id) DO NOTHING", PROGRAM_ID, LEADER_ID)
+            tx = conn1.transaction()
+            await tx.start()
+            await conn1.execute(
+                "INSERT INTO submissions (session_id, submission_id, tenant_code, submission_type, status) "
+                "VALUES ($1, $1, 'mitra', 'feedback', 'success')", writer1_id)
+            await conn1.execute(
+                "INSERT INTO feedback_submissions (submission_id, tenant_code, source, completion_status, source_ref) "
+                "VALUES ($1, 'mitra', 'google_forms', 'COMPLETED', $2)", writer1_id, ref)
+            task = asyncio.ensure_future(insert_or_update_submission(conn2, event2))
+            await asyncio.sleep(1.0)
+            assert not task.done()  # blocked on the uncommitted unique key
+            await tx.commit()
+            res = await asyncio.wait_for(task, timeout=10)
+            assert res["changed"] is False and res["submission_id"] == writer1_id
+            assert await _gf_count(conn1, ref) == 1
+            assert await conn1.fetchval(
+                "SELECT count(*) FROM submissions WHERE submission_id = $1 AND tenant_code = 'mitra'",
+                event2["submissionId"]) == 0
+        finally:
+            for sid in (writer1_id, event2["submissionId"]):
+                await conn1.execute("DELETE FROM submissions WHERE submission_id = $1 AND tenant_code = 'mitra'", sid)
+            await conn1.close()
+            await conn2.close()
+    asyncio.run(main())
+
+
+def test_gforms_new_source_ref_with_an_existing_submission_id_is_rejected_unchanged():
+    async def body(conn, created):
+        first = _gf_event(_gf_ref())
+        created.append(first["submissionId"])
+        await insert_or_update_submission(conn, first)
+        before = await _snapshot(conn, first["submissionId"])
+        clash = _gf_event(_gf_ref(), submission_id=first["submissionId"], messages=GF_MESSAGES[:2])
+        with pytest.raises(ValueError, match="never updates an existing submission"):
+            await insert_or_update_submission(conn, clash)
+        assert await _snapshot(conn, first["submissionId"]) == before
+    _run(body)
+
+
+def test_gforms_event_never_modifies_a_stored_mitra_submission():
+    async def body(conn, created):
+        sid, sess = _ids()
+        created.append(sid)
+        await insert_or_update_submission(conn, _event(sid, sess, SIX))
+        before = await _snapshot(conn, sid)
+        clash = _gf_event(_gf_ref(), submission_id=sid)
+        clash["sessionId"] = sid
+        with pytest.raises(ValueError):
+            await insert_or_update_submission(conn, clash)
+        assert await _snapshot(conn, sid) == before
+    _run(body)
+
+
+def test_gforms_identity_is_checked_at_the_boundary():
+    async def body(conn, created):
+        event = _gf_event(_gf_ref())
+        created.append(event["submissionId"])
+        no_ref = _gf_event(_gf_ref())
+        del no_ref["data"]["sourceRef"]
+        with pytest.raises(ValueError, match="sourceRef"):
+            await insert_or_update_submission(conn, no_ref)
+        mitra_with_ref = _event(*_ids(), SIX)
+        mitra_with_ref["data"]["sourceRef"] = _gf_ref()
+        with pytest.raises(ValueError, match="sourceRef"):
+            await insert_or_update_submission(conn, mitra_with_ref)
+        assert await _snapshot(conn, no_ref["submissionId"]) == (None, None, [])
+        assert await _snapshot(conn, mitra_with_ref["submissionId"]) == (None, None, [])
+    _run(body)
+
+
+def test_mitra_events_still_store_null_source_ref():
+    async def body(conn, created):
+        sid, sess = _ids()
+        created.append(sid)
+        await insert_or_update_submission(conn, _event(sid, sess, SIX))
+        sid2, sess2 = _ids()
+        created.append(sid2)
+        await insert_or_update_submission(conn, _event(sid2, sess2, SIX))  # two mitra rows: NULLs never collide
+        for s in (sid, sid2):
+            assert (await _snapshot(conn, s))[1]["source_ref"] is None
     _run(body)

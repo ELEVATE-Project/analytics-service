@@ -139,9 +139,10 @@ def test_completion_status_rejected(event):
     assert _problems(event) == ["'data.completionStatus' must be one of COMPLETED, IN_PROGRESS, got 'DONE'"]
 
 
-@pytest.mark.parametrize("value", list(FEEDBACK_SOURCES))
-def test_source_allowed(event, value):
-    event["data"]["source"] = value
+def test_source_allowed(event):
+    # google_forms additionally needs sourceRef and UUID ids (Phase 2): covered by the gforms tests below
+    assert "mitra" in FEEDBACK_SOURCES and "google_forms" in FEEDBACK_SOURCES
+    event["data"]["source"] = "mitra"
     assert _problems(event) == []
 
 
@@ -379,3 +380,111 @@ def test_feedback_process_config_env_validated(monkeypatch):
     monkeypatch.setenv("PROCESS_CONFIG_FEEDBACK", '{"not": "a list"}')
     with pytest.raises(ValueError, match="PROCESS_CONFIG_FEEDBACK"):
         Settings()
+
+
+# ---------------------------------------------------------------- Google Forms (Phase 2, slice 2c)
+
+@pytest.fixture
+def gforms():
+    return _load("create", "create_feedback_gforms.json")
+
+
+def test_gforms_valid_fixture_passes(gforms):
+    assert _problems(gforms) == []
+    assert gforms["submissionId"] == gforms["sessionId"]
+    assert len(gforms["data"]["messages"]) == 6
+
+
+def test_gforms_kannada_language_and_null_translation_pass(gforms):
+    gforms["data"]["language"] = "kn"
+    for row in gforms["data"]["messages"]:
+        row["translatedMessage"] = None
+    assert _problems(gforms) == []
+
+
+def test_gforms_source_ref_missing(gforms):
+    del gforms["data"]["sourceRef"]
+    assert _problems(gforms) == ["'data.sourceRef' is missing"]
+
+
+def test_gforms_source_ref_null_and_empty(gforms):
+    gforms["data"]["sourceRef"] = None
+    assert _problems(gforms) == ["'data.sourceRef' is null"]
+    gforms["data"]["sourceRef"] = ""
+    assert _problems(gforms) == ["'data.sourceRef' is empty"]
+
+
+def test_gforms_source_ref_blank_and_wrong_type(gforms):
+    gforms["data"]["sourceRef"] = "   "
+    assert _problems(gforms) == ["'data.sourceRef' is blank"]
+    gforms["data"]["sourceRef"] = 12345
+    assert _problems(gforms) == ["'data.sourceRef' must be a string, got int"]
+
+
+@pytest.mark.parametrize("bad", ["184884", "not-a-uuid", 184884])
+def test_gforms_submission_id_must_be_a_uuid(gforms, bad):
+    gforms["submissionId"] = bad
+    problems = _problems(gforms)
+    assert any("'submissionId' must be a UUID" in p for p in problems)
+
+
+def test_gforms_session_id_must_be_a_uuid(gforms):
+    gforms["sessionId"] = "a" * 32 + "z"
+    assert any("'sessionId' must be a UUID" in p for p in _problems(gforms))
+
+
+def test_gforms_session_id_must_equal_submission_id(gforms):
+    gforms["sessionId"] = "0e9c8a77-1d2b-4c3d-8e4f-5a6b7c8d9e0f"
+    problems = _problems(gforms)
+    assert len(problems) == 1 and "'sessionId' must equal 'submissionId'" in problems[0]
+
+
+def test_gforms_completion_status_must_be_completed(gforms):
+    gforms["data"]["completionStatus"] = "IN_PROGRESS"
+    problems = _problems(gforms)
+    assert len(problems) == 1 and "must be COMPLETED for source google_forms" in problems[0]
+
+
+def test_gforms_invalid_completion_value_reported_once(gforms):
+    gforms["data"]["completionStatus"] = "DONE"
+    problems = _problems(gforms)
+    assert len(problems) == 1 and "must be one of COMPLETED, IN_PROGRESS" in problems[0]
+
+
+def test_gforms_all_problems_reported_together(gforms):
+    del gforms["data"]["sourceRef"]
+    gforms["data"]["completionStatus"] = "IN_PROGRESS"
+    gforms["sessionId"] = "0e9c8a77-1d2b-4c3d-8e4f-5a6b7c8d9e0f"
+    gforms["data"]["messages"][1]["parentSequence"] = 5
+    problems = _problems(gforms)
+    assert len(problems) == 4
+    assert any("sourceRef" in p for p in problems)
+    assert any("COMPLETED" in p for p in problems)
+    assert any("'sessionId' must equal" in p for p in problems)
+    assert any("parentSequence" in p for p in problems)
+
+
+def test_mitra_source_ref_absent_or_null_is_valid(event):
+    assert "sourceRef" not in event["data"]
+    assert _problems(event) == []
+    event["data"]["sourceRef"] = None
+    assert _problems(event) == []
+
+
+def test_mitra_source_ref_set_is_rejected(event):
+    event["data"]["sourceRef"] = "2026-10-02T10:09:20:" + "a" * 64
+    problems = _problems(event)
+    assert len(problems) == 1 and "'data.sourceRef' must be absent or null for source mitra" in problems[0]
+
+
+def test_mitra_ids_are_not_required_to_be_uuids(event):
+    assert event["submissionId"] == "900001" and event["sessionId"] != event["submissionId"]
+    assert _problems(event) == []
+
+
+def test_gforms_rules_skipped_when_source_is_invalid(gforms):
+    gforms["data"]["source"] = "csv"
+    gforms["sessionId"] = "0e9c8a77-1d2b-4c3d-8e4f-5a6b7c8d9e0f"
+    del gforms["data"]["sourceRef"]
+    problems = _problems(gforms)
+    assert len(problems) == 1 and "'data.source' must be one of" in problems[0]

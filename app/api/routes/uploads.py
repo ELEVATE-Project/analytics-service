@@ -61,8 +61,10 @@ async def upload_report(
     status='pending'. Processing (column validation, Kafka publishing)
     runs in the background.
 
-    report_type='feedback' (Mitra bot conversations) has its own, higher size cap and an
-    optional `source` field ('mitra' default); story/discussion ignore `source`.
+    report_type='feedback' has its own, higher size cap and an optional `source` field:
+    'mitra' (default; the raw bot conversation CSV, one file per persona) or 'google_forms'
+    (the original wide Google Forms CSV, reshaped by the service; only responses not already
+    stored are processed). story/discussion ignore `source`.
     """
     # Pure request-shape checks
     report_type = validate_report_type(report_type)

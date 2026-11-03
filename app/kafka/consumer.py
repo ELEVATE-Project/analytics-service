@@ -251,9 +251,17 @@ class IngestionConsumer:
 
                 res = await insert_or_update_submission(conn, event)
 
+                if is_feedback:
+                    # A Google Forms response that is already stored resolves to the STORED submission,
+                    # whose id differs from the (freshly generated) one in the event.
+                    stored_submission_id = res.get("submission_id")
+                    if isinstance(stored_submission_id, str):
+                        submission_id = stored_submission_id
+
                 if is_feedback and res.get("changed") is False and res.get("status") != "pending":
-                    # Identical re-delivery of an already-ingested session: nothing was written, so there
-                    # is nothing to (re)process. A still-'pending' row falls through and is processed.
+                    # Identical re-delivery of an already-ingested session (or an already-stored Google Forms
+                    # response): nothing was written, so there is nothing to (re)process. A still-'pending'
+                    # row falls through and is processed.
                     logger.info(f"Feedback submission {submission_id} under tenant {tenant_code} is unchanged. Nothing to process.")
                     return
                 

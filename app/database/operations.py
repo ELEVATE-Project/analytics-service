@@ -11,6 +11,7 @@ from app.services.feedback_constants import (
     COMPLETION_STATUSES,
     FEEDBACK_REPORT_TYPE,
     FEEDBACK_SOURCES,
+    SOURCE_GOOGLE_FORMS,
 )
 
 logger = logging.getLogger("analytics_service.operations")
@@ -278,6 +279,45 @@ def is_feedback_type(submission_type: Any) -> bool:
     return isinstance(submission_type, str) and FEEDBACK_REPORT_TYPE in submission_type.lower().strip()
 
 
+class _FeedbackAlreadyStored(Exception):
+    """Internal signal: a Google Forms response with this source_ref is already stored. Raised inside the
+    transaction so everything written so far rolls back, then handled as a no-op by the caller."""
+
+
+def _is_source_ref_violation(error: asyncpg.exceptions.UniqueViolationError) -> bool:
+    """True for a unique violation on feedback_submissions (tenant_code, source_ref)."""
+    return error.table_name == "feedback_submissions" and "source_ref" in (error.constraint_name or "")
+
+
+async def _find_stored_gforms_response(
+    conn: asyncpg.Connection, tenant_code: str, source_ref: str
+) -> Optional[Dict[str, Any]]:
+    """The stored submission of a Google Forms response, looked up by its natural key (None if new)."""
+    return await conn.fetchrow(
+        """
+        SELECT s.id, s.submission_id, s.tenant_code, s.status
+        FROM feedback_submissions fs
+        JOIN submissions s ON s.submission_id = fs.submission_id AND s.tenant_code = fs.tenant_code
+        WHERE fs.tenant_code = $1 AND fs.source_ref = $2
+        """,
+        tenant_code, source_ref,
+    )
+
+
+def _already_stored_result(stored: Dict[str, Any]) -> Dict[str, Any]:
+    """The unchanged result for a Google Forms response that is already stored (nothing was written)."""
+    return {
+        "id": stored["id"],
+        "submission_id": stored["submission_id"],
+        "tenant_code": stored["tenant_code"],
+        "status": stored["status"],
+        "changed": False,
+        "messages_inserted": 0,
+        "messages_updated": 0,
+        "parents_set": 0,
+    }
+
+
 def _parse_feedback_timestamp(value: Any, field: str) -> Optional[datetime]:
     if value is None:
         return None
@@ -358,6 +398,11 @@ async def _ingest_feedback_submission(
       4. parent_id pass from parentSequence (idempotent; null parentSequence leaves parent_id untouched)
     Both `create` (a first upload, or a re-upload of a grown session) and a repeated event take this path:
     a create on an existing session reconciles instead of being skipped.
+    Google Forms responses are immutable and identified by data.sourceRef (feedback_submissions.source_ref,
+    unique per tenant): a response whose sourceRef is already stored is a no-op that returns the stored
+    submission (whatever submissionId the event carries), and this also covers a concurrent writer that
+    stored it first (the unique violation rolls this event back and is treated as already stored).
+    A Google Forms event never updates an existing submission.
     Returns the usual dict plus `changed` (False when nothing was written) and per-table counts.
     """
     submission_id = str(event_payload["submissionId"])
@@ -385,6 +430,17 @@ async def _ingest_feedback_submission(
             f"data.completionStatus must be one of {COMPLETION_STATUSES}, got {completion_status!r}; rejecting {ident}."
         )
     language = _optional_text(data.get("language"), "data.language")
+    source_ref = data.get("sourceRef")
+    is_gforms = source == SOURCE_GOOGLE_FORMS
+    if is_gforms:
+        if not isinstance(source_ref, str) or len(source_ref.strip()) == 0:
+            raise ValueError(f"data.sourceRef must be a non-empty string for a google_forms event; rejecting {ident}.")
+        if submission_id != session_id:
+            raise ValueError(
+                f"a google_forms event must carry the same value as submissionId and sessionId; rejecting {ident}."
+            )
+    elif source_ref is not None:
+        raise ValueError(f"data.sourceRef must be absent or null unless data.source is google_forms; rejecting {ident}.")
     messages = _parse_feedback_messages(data.get("messages"))
 
     submission_date = _parse_feedback_timestamp(data.get("submissionDate"), "data.submissionDate")
@@ -392,6 +448,66 @@ async def _ingest_feedback_submission(
         submission_date = datetime.now(timezone.utc)
     state = tags.get("state")
     district = tags.get("district")
+
+    if is_gforms:
+        # Already stored (by natural key)? Then there is nothing to do, whatever submissionId this event carries.
+        stored = await _find_stored_gforms_response(conn, tenant_code, source_ref)
+        if stored is not None:
+            logger.info(
+                f"Google Forms response already stored as submission {stored['submission_id']} under tenant "
+                f"{tenant_code}; ignoring {ident}."
+            )
+            return _already_stored_result(stored)
+        # A new response must get a new submission: reusing an existing id would modify a stored one.
+        id_taken = await conn.fetchval(
+            "SELECT 1 FROM submissions WHERE submission_id = $1 AND tenant_code = $2", submission_id, tenant_code
+        )
+        if id_taken is not None:
+            raise ValueError(
+                f"submission {submission_id} already exists under tenant {tenant_code} with a different "
+                f"sourceRef; a google_forms event never updates an existing submission; rejecting {ident}."
+            )
+
+    try:
+        return await _write_feedback_submission(
+            conn, event_payload, ident, source, source_ref, language, completion_status, messages,
+            submission_date, state, district,
+        )
+    except _FeedbackAlreadyStored:
+        pass
+    except asyncpg.exceptions.UniqueViolationError as e:
+        if not (is_gforms and _is_source_ref_violation(e)):
+            raise
+    # Only reached when a concurrent writer stored the same response first (the transaction was rolled back).
+    stored = await _find_stored_gforms_response(conn, tenant_code, source_ref)
+    if stored is None:
+        raise ValueError(f"google_forms response {source_ref!r} conflicted but is not stored; rejecting {ident}.")
+    logger.info(
+        f"Google Forms response lost a write race: already stored as submission {stored['submission_id']} "
+        f"under tenant {tenant_code}; ignoring {ident}."
+    )
+    return _already_stored_result(stored)
+
+
+async def _write_feedback_submission(
+    conn: asyncpg.Connection,
+    event_payload: Dict[str, Any],
+    ident: str,
+    source: str,
+    source_ref: Optional[str],
+    language: Optional[str],
+    completion_status: str,
+    messages: List[Dict[str, Any]],
+    submission_date: datetime,
+    state: Any,
+    district: Any,
+) -> Dict[str, Any]:
+    """The transactional write of _ingest_feedback_submission (see there); one transaction, all or nothing."""
+    submission_id = str(event_payload["submissionId"])
+    tenant_code = event_payload["tenantCode"]
+    submission_type = event_payload["submissionType"]
+    session_id = event_payload.get("sessionId")
+    tags = event_payload.get("tags", {})
 
     async with conn.transaction():
         program_id, leader_id = await upsert_metadata(conn, tags, tenant_code)
@@ -451,8 +567,8 @@ async def _ingest_feedback_submission(
         # event) never downgrades it. source/language are refreshed; language is kept when the event has none.
         fs_row = await conn.fetchrow(
             """
-            INSERT INTO feedback_submissions (submission_id, tenant_code, source, language, completion_status)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO feedback_submissions (submission_id, tenant_code, source, language, completion_status, source_ref)
+            VALUES ($1, $2, $3, $4, $5, $7)
             ON CONFLICT (submission_id, tenant_code) DO UPDATE SET
                 source = EXCLUDED.source,
                 language = COALESCE(EXCLUDED.language, feedback_submissions.language),
@@ -466,8 +582,12 @@ async def _ingest_feedback_submission(
                    AND feedback_submissions.completion_status IS DISTINCT FROM EXCLUDED.completion_status)
             RETURNING completion_status, (xmax = 0) AS inserted
             """,
-            submission_id, tenant_code, source, language, completion_status, COMPLETION_COMPLETED,
+            submission_id, tenant_code, source, language, completion_status, COMPLETION_COMPLETED, source_ref,
         )
+        if source == SOURCE_GOOGLE_FORMS and (fs_row is None or not fs_row["inserted"]):
+            # Google Forms responses are immutable: a payload row that already existed (a concurrent writer
+            # stored this response between the pre-check and here) is never touched. Roll everything back.
+            raise _FeedbackAlreadyStored()
         payload_changed = fs_row is not None
 
         # 3. feedbacks: one batched upsert. The WHERE leaves unchanged rows untouched (ids and updated_at kept).
