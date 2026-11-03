@@ -1,0 +1,381 @@
+"""
+Boundary validation and settings for the `feedback` report type (Phase 1, slice 1c).
+See docs/feedback-upload-plan.md. Pure in-memory: no Postgres / Kafka / Temporal.
+"""
+import copy
+import json
+from pathlib import Path
+
+import pytest
+
+from app.config import Settings, settings
+from app.services.feedback_constants import COMPLETION_STATUSES, FEEDBACK_SOURCES
+from app.services.ingestion_validation import validate_ingestion_schema
+
+FIXTURE_ROOT = Path(__file__).resolve().parent / "kafka_events"
+
+
+def _load(*parts):
+    return json.loads(FIXTURE_ROOT.joinpath(*parts).read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def event():
+    return _load("create", "create_feedback.json")
+
+
+def _problems(ev, event_type="create"):
+    return validate_ingestion_schema(ev, "feedback", event_type)
+
+
+def _msg(ev, index):
+    return ev["data"]["messages"][index]
+
+
+# ---------------------------------------------------------------- valid events
+
+def test_valid_fixture_passes(event):
+    assert _problems(event) == []
+
+
+def test_in_progress_fixture_passes():
+    assert _problems(_load("create", "create_feedback_in_progress.json")) == []
+
+
+def test_delete_fixture_passes():
+    assert _problems(_load("delete", "delete_feedback.json"), "delete") == []
+
+
+def test_delete_missing_required_path_fails():
+    ev = _load("delete", "delete_feedback.json")
+    del ev["sessionId"]
+    assert _problems(ev, "delete") == ["'sessionId' is missing"]
+
+
+def test_state_and_district_are_optional(event):
+    event["tags"].pop("state")
+    event["tags"].pop("district")
+    assert _problems(event) == []
+
+
+def test_translated_message_and_message_at_optional(event):
+    for row in event["data"]["messages"]:
+        row["translatedMessage"] = None
+        row["messageAt"] = None
+    del _msg(event, 1)["translatedMessage"]
+    del _msg(event, 1)["messageAt"]
+    assert _problems(event) == []
+
+
+def test_messages_need_not_be_sorted(event):
+    event["data"]["messages"].reverse()
+    assert _problems(event) == []
+
+
+def test_is_follow_up_true_is_valid(event):
+    _msg(event, 2)["isFollowUp"] = True
+    assert _problems(event) == []
+
+
+def test_is_follow_up_absent_is_valid(event):
+    del _msg(event, 0)["isFollowUp"]
+    assert _problems(event) == []
+
+
+# ------------------------------------------------------------ envelope / paths
+
+@pytest.mark.parametrize("path", [
+    "submissionId", "sessionId", "tenantCode", "eventType", "eventPublishedAt",
+    "tags.programId", "tags.leaderCategoryId",
+    "data.source", "data.language", "data.completionStatus", "data.submissionDate", "data.messages",
+])
+def test_required_path_missing(event, path):
+    parent = event
+    *head, leaf = path.split(".")
+    for segment in head:
+        parent = parent[segment]
+    del parent[leaf]
+    assert f"'{path}' is missing" in _problems(event)
+
+
+def test_required_path_null_and_empty(event):
+    event["tags"]["programId"] = None
+    event["data"]["language"] = ""
+    problems = _problems(event)
+    assert "'tags.programId' is null" in problems
+    assert "'data.language' is empty" in problems
+
+
+def test_empty_messages_reported_once(event):
+    event["data"]["messages"] = []
+    assert _problems(event) == ["'data.messages' is empty"]
+
+
+def test_null_messages_reported_once(event):
+    event["data"]["messages"] = None
+    assert _problems(event) == ["'data.messages' is null"]
+
+
+def test_messages_not_a_list(event):
+    event["data"]["messages"] = "hello"
+    assert _problems(event) == ["'data.messages' must be a list, got str"]
+
+
+def test_submission_type_must_be_exactly_feedback(event):
+    event["submissionType"] = "Feedback"
+    assert _problems(event) == ["'submissionType' must be 'feedback', got 'Feedback'"]
+
+
+# ---------------------------------------------------------- source / completion
+
+@pytest.mark.parametrize("value", list(COMPLETION_STATUSES))
+def test_completion_status_allowed(event, value):
+    event["data"]["completionStatus"] = value
+    assert _problems(event) == []
+
+
+def test_completion_status_rejected(event):
+    event["data"]["completionStatus"] = "DONE"
+    assert _problems(event) == ["'data.completionStatus' must be one of COMPLETED, IN_PROGRESS, got 'DONE'"]
+
+
+@pytest.mark.parametrize("value", list(FEEDBACK_SOURCES))
+def test_source_allowed(event, value):
+    event["data"]["source"] = value
+    assert _problems(event) == []
+
+
+def test_source_rejected(event):
+    event["data"]["source"] = "whatsapp"
+    assert _problems(event) == ["'data.source' must be one of mitra, google_forms, got 'whatsapp'"]
+
+
+# --------------------------------------------------------------- message rows
+
+def test_message_row_not_a_dict(event):
+    event["data"]["messages"][3] = "oops"
+    assert "'data.messages[3]' must be an object, got str" in _problems(event)
+
+
+def test_sequence_missing(event):
+    del _msg(event, 0)["sequence"]
+    assert "'data.messages[0].sequence' is missing" in _problems(event)
+
+
+@pytest.mark.parametrize("bad", ["2", 2.0, True, None])
+def test_sequence_must_be_int(event, bad):
+    _msg(event, 5)["sequence"] = bad
+    assert f"'data.messages[5].sequence' must be an integer, got {bad!r}" in _problems(event)
+
+
+@pytest.mark.parametrize("bad", [0, -3])
+def test_sequence_must_be_at_least_one(event, bad):
+    _msg(event, 5)["sequence"] = bad
+    assert f"'data.messages[5].sequence' must be >= 1, got {bad!r}" in _problems(event)
+
+
+def test_duplicate_sequence(event):
+    _msg(event, 5)["sequence"] = 4
+    assert "'data.messages' has duplicate sequence 4 (2 rows)" in _problems(event)
+
+
+def test_message_missing_null_empty_and_non_string(event):
+    del _msg(event, 0)["message"]
+    _msg(event, 1)["message"] = None
+    _msg(event, 2)["message"] = ""
+    _msg(event, 3)["message"] = 42
+    problems = _problems(event)
+    assert "'data.messages[0].message' is missing" in problems
+    assert "'data.messages[1].message' is null" in problems
+    assert "'data.messages[2].message' is empty" in problems
+    assert "'data.messages[3].message' must be a string, got int" in problems
+
+
+def test_is_follow_up_must_be_bool(event):
+    _msg(event, 2)["isFollowUp"] = "false"
+    assert "'data.messages[2].isFollowUp' must be a boolean, got 'false'" in _problems(event)
+
+
+def test_parent_sequence_must_be_null_or_int(event):
+    _msg(event, 1)["parentSequence"] = "1"
+    assert "'data.messages[1].parentSequence' must be null or an integer, got '1'" in _problems(event)
+
+
+def test_parent_sequence_bool_rejected(event):
+    _msg(event, 1)["parentSequence"] = True
+    assert "'data.messages[1].parentSequence' must be null or an integer, got True" in _problems(event)
+
+
+def test_optional_text_fields_wrong_type(event):
+    _msg(event, 1)["translatedMessage"] = 5
+    _msg(event, 1)["messageAt"] = 123
+    problems = _problems(event)
+    assert "'data.messages[1].translatedMessage' must be null or a string, got int" in problems
+    assert "'data.messages[1].messageAt' must be null or a string, got int" in problems
+
+
+# ------------------------------------------------------------- parent linkage
+
+def test_parent_sequence_not_in_event(event):
+    _msg(event, 1)["parentSequence"] = 99
+    assert ("'data.messages[1].parentSequence' 99 does not match any message sequence in the event"
+            in _problems(event))
+
+
+def test_parent_sequence_must_be_lower(event):
+    _msg(event, 1)["parentSequence"] = 3
+    assert ("'data.messages[1].parentSequence' 3 must be lower than the row's own sequence 2"
+            in _problems(event))
+
+
+def test_parent_sequence_equal_to_own_is_rejected(event):
+    _msg(event, 1)["parentSequence"] = 2
+    assert ("'data.messages[1].parentSequence' 2 must be lower than the row's own sequence 2"
+            in _problems(event))
+
+
+def test_parent_check_independent_of_order(event):
+    # a valid event stays valid when the rows are shuffled
+    event["data"]["messages"] = [_msg(event, i) for i in (4, 1, 5, 0, 3, 2)]
+    assert _problems(event) == []
+
+
+def test_no_answer_in_event(event):
+    for row in event["data"]["messages"]:
+        row["parentSequence"] = None
+    assert _problems(event) == [
+        "'data.messages' has no message with a parentSequence (at least one answer is required)"
+    ]
+
+
+def test_tail_only_event_with_unknown_parent_is_rejected(event):
+    # a delta event must carry the parent question too (the consumer sets parent_id from this event)
+    event["data"]["messages"] = [_msg(event, 3)]
+    assert ("'data.messages[0].parentSequence' 3 does not match any message sequence in the event"
+            in _problems(event))
+
+
+def test_all_problems_reported_not_just_first(event):
+    event["data"]["completionStatus"] = "DONE"
+    event["data"]["source"] = "x"
+    _msg(event, 1)["message"] = ""
+    _msg(event, 4)["parentSequence"] = 99
+    del event["tags"]["programId"]
+    problems = _problems(event)
+    assert len(problems) == 5, problems
+
+
+# -------------------------------------------------------------- update / types
+
+def test_feedback_update_not_supported(event):
+    ev = copy.deepcopy(event)
+    ev["eventType"] = "update"
+    assert _problems(ev, "update") == ["feedback does not support update events in this release"]
+
+
+def test_unknown_type_message_unchanged():
+    assert validate_ingestion_schema({}, "survey", "create") == [
+        "Unrecognized submissionType 'survey'; no ingestion schema to validate against"
+    ]
+    assert validate_ingestion_schema({}, "survey", "update") == [
+        "Unrecognized submissionType 'survey'; no ingestion schema to validate against"
+    ]
+
+
+def test_non_string_type_is_unrecognized():
+    assert validate_ingestion_schema({}, None, "create") == [
+        "Unrecognized submissionType None; no ingestion schema to validate against"
+    ]
+
+
+@pytest.mark.parametrize("folder,name", [
+    ("create", "create_story.json"),
+    ("create", "create_discussion.json"),
+    ("delete", "delete_story.json"),
+    ("delete", "delete_discussion.json"),
+])
+def test_story_and_discussion_still_validate(folder, name):
+    ev = _load(folder, name)
+    assert validate_ingestion_schema(ev, ev["submissionType"], ev["eventType"]) == []
+
+
+def test_story_still_reports_missing_field():
+    ev = _load("create", "create_story.json")
+    del ev["tags"]["state"]
+    assert validate_ingestion_schema(ev, "story", "create") == ["'tags.state' is missing"]
+
+
+def test_story_event_is_not_subject_to_feedback_checks():
+    # feedback-only rules must not leak into story: no messages / completionStatus needed
+    ev = _load("create", "create_story.json")
+    assert "messages" not in ev["data"]
+    assert validate_ingestion_schema(ev, "story", "create") == []
+
+
+def test_story_update_still_supported():
+    ev = _load("update", "update_story.json")
+    assert validate_ingestion_schema(ev, "story", "update") == []
+
+
+# -------------------------------------------------------------------- settings
+
+def test_feedback_kafka_schema_required_fields():
+    schema = settings.get_kafka_ingestion_schema("feedback")
+    assert schema["create"]["required"] == [
+        "submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt",
+        "tags.programId", "tags.leaderCategoryId",
+        "data.source", "data.language", "data.completionStatus", "data.submissionDate", "data.messages",
+    ]
+    assert "tags.state" not in schema["create"]["required"]
+    assert "tags.district" not in schema["create"]["required"]
+    assert schema["delete"]["required"] == [
+        "submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt",
+    ]
+
+
+def test_story_and_discussion_schemas_unchanged():
+    assert "tags.state" in settings.get_kafka_ingestion_schema("story")["create"]["required"]
+    assert "data.participantsData" in settings.get_kafka_ingestion_schema("discussion")["create"]["required"]
+
+
+def test_unknown_schema_type_still_raises():
+    with pytest.raises(ValueError, match="No Kafka ingestion schema defined for submission type 'survey'"):
+        settings.get_kafka_ingestion_schema("survey")
+
+
+def test_feedback_process_config_is_empty_by_default():
+    assert settings.get_process_config("feedback") == []
+
+
+def test_unknown_process_config_still_empty_and_story_unchanged():
+    assert settings.get_process_config("survey") == []
+    assert settings.get_process_config("story") != []
+    assert settings.get_process_config("discussion") != []
+
+
+def test_feedback_process_config_env_override(monkeypatch):
+    monkeypatch.setattr(settings, "PROCESS_CONFIG_FEEDBACK", '[{"name": "thematic_classification"}]')
+    assert settings.get_process_config("feedback") == [{"name": "thematic_classification"}]
+
+
+def test_upload_cap_defaults_and_story_cap_untouched():
+    assert Settings.model_fields["FEEDBACK_MAX_CSV_UPLOAD_BYTES"].default == 104857600
+    assert Settings.model_fields["MAX_CSV_UPLOAD_BYTES"].default == 10485760
+    assert Settings.model_fields["FEEDBACK_MAX_CSV_UPLOAD_BYTES"].default > 43 * 1024 * 1024
+
+
+def test_upload_cap_env_override(monkeypatch):
+    monkeypatch.setenv("FEEDBACK_MAX_CSV_UPLOAD_BYTES", "209715200")
+    assert Settings().FEEDBACK_MAX_CSV_UPLOAD_BYTES == 209715200
+
+
+def test_feedback_schema_env_override_validated(monkeypatch):
+    monkeypatch.setenv("FEEDBACK_KAFKA_SCHEMA", '{"create": {}}')
+    with pytest.raises(ValueError, match="FEEDBACK_KAFKA_SCHEMA must be a JSON object"):
+        Settings()
+
+
+def test_feedback_process_config_env_validated(monkeypatch):
+    monkeypatch.setenv("PROCESS_CONFIG_FEEDBACK", '{"not": "a list"}')
+    with pytest.raises(ValueError, match="PROCESS_CONFIG_FEEDBACK"):
+        Settings()

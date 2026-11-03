@@ -83,7 +83,11 @@ class Settings(BaseSettings):
     AUTH_TOKEN: str = Field(description="Bearer token for API authentication. Must be set via environment variable.")
 
     # CSV Upload / Processing Configuration
-    MAX_CSV_UPLOAD_BYTES: int = Field(default=10485760)  # 10MB
+    MAX_CSV_UPLOAD_BYTES: int = Field(default=10485760)  # 10MB (story / discussion)
+    # Feedback (Mitra conversation export) has its own, higher cap: one persona file is uploaded
+    # whole and the Parent file alone is ~43MB. The value is still to be confirmed; it must stay
+    # above the Parent file with headroom for growth.
+    FEEDBACK_MAX_CSV_UPLOAD_BYTES: int = Field(default=104857600)  # 100MB
     CSV_BLOB_UPLOADS: str = Field(default="mitra_dashboard_api_output")
     # Expected CSV column headers per report type (JSON arrays of column names,
     # matched case-insensitively against the uploaded file's header row).
@@ -140,6 +144,8 @@ class Settings(BaseSettings):
     PROCESS_CONFIG_DISCUSSION: str = Field(
         default='[{"name": "pii_and_abusive_language_detection", "columns": ["challenges"]}, {"name": "thematic_classification", "columns": ["challenges"]}]'
     )
+    # Feedback has no processing steps in Phase 1 (empty list: the submission is marked success at ingestion).
+    PROCESS_CONFIG_FEEDBACK: str = Field(default="[]")
 
     # Kafka ingestion-time field validation schema (JSON strings loaded from env).
     # One entry per (create/update/delete) event type: "required" is a list of
@@ -151,6 +157,13 @@ class Settings(BaseSettings):
     )
     DISCUSSION_KAFKA_SCHEMA: str = Field(
         default='{"create": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt", "tags.state", "tags.district", "tags.organization", "tags.programId", "tags.programName", "tags.leaderCategoryId", "tags.leaderCategoryName", "data.title", "data.designation", "data.submissionDate", "data.discussionDate", "data.pdfUrls.original", "data.pdfUrls.masked", "data.transcriptLink", "data.challenges", "data.solutions", "data.participantsData", "data.pri_member_information", "data.school_representative_information"], "optional": ["data.author", "data.language", "data.imageUrls"]}, "update": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"], "newValuesNoEmpty": true}, "delete": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"]}}'
+    )
+
+    # Feedback: array elements of data.messages are validated separately in
+    # app/services/ingestion_validation.py; "update" is not supported for feedback in this release.
+    # tags.state / tags.district are optional (respondents skip them).
+    FEEDBACK_KAFKA_SCHEMA: str = Field(
+        default='{"create": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt", "tags.programId", "tags.leaderCategoryId", "data.source", "data.language", "data.completionStatus", "data.submissionDate", "data.messages"], "optional": ["tags.state", "tags.district", "tags.programName", "tags.leaderCategoryName", "tags.source"]}, "update": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"], "newValuesNoEmpty": true}, "delete": {"required": ["submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt"]}}'
     )
 
     # Thematic Classification Configuration
@@ -241,7 +254,7 @@ class Settings(BaseSettings):
             )
         return self
 
-    @field_validator("PROCESS_CONFIG_STORY", "PROCESS_CONFIG_DISCUSSION")
+    @field_validator("PROCESS_CONFIG_STORY", "PROCESS_CONFIG_DISCUSSION", "PROCESS_CONFIG_FEEDBACK")
     @classmethod
     def validate_process_config_json(cls, v: str, info) -> str:
         try:
@@ -341,7 +354,7 @@ class Settings(BaseSettings):
             raise ValueError(f"Invalid JSON configuration for DISCUSSION_PARTICIPANTS_MAP: {e}") from e
         return v
 
-    @field_validator("STORY_KAFKA_SCHEMA", "DISCUSSION_KAFKA_SCHEMA")
+    @field_validator("STORY_KAFKA_SCHEMA", "DISCUSSION_KAFKA_SCHEMA", "FEEDBACK_KAFKA_SCHEMA")
     @classmethod
     def validate_kafka_ingestion_schema_json(cls, v: str, info) -> str:
         try:
@@ -466,6 +479,8 @@ class Settings(BaseSettings):
             raw_config = self.PROCESS_CONFIG_STORY
         elif "discussion" in normalized_type:
             raw_config = self.PROCESS_CONFIG_DISCUSSION
+        elif "feedback" in normalized_type:
+            raw_config = self.PROCESS_CONFIG_FEEDBACK
         else:
             # Fallback/Default config for unknown submission type
             return []
@@ -486,13 +501,15 @@ class Settings(BaseSettings):
         """
         Dynamically returns the ingestion-time required-fields schema for the given
         submission type. Raises ValueError if JSON parsing fails, if the config is
-        not a dict, or if the submission type doesn't match 'story' or 'discussion'.
+        not a dict, or if the submission type doesn't match 'story', 'discussion' or 'feedback'.
         """
         normalized_type = submission_type.lower().strip() if isinstance(submission_type, str) else ""
         if "story" in normalized_type:
             raw_schema = self.STORY_KAFKA_SCHEMA
         elif "discussion" in normalized_type:
             raw_schema = self.DISCUSSION_KAFKA_SCHEMA
+        elif "feedback" in normalized_type:
+            raw_schema = self.FEEDBACK_KAFKA_SCHEMA
         else:
             raise ValueError(f"No Kafka ingestion schema defined for submission type {submission_type!r}")
 

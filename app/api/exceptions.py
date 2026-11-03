@@ -11,7 +11,7 @@ logger = logging.getLogger("analytics_service.api.exceptions")
 # ---------------------------------------------------------------------------
 
 class InvalidReportType(Exception):
-    """Raised when report type is not story or discussion."""
+    """Raised when report type is not story, discussion or feedback."""
     pass
 
 
@@ -45,6 +45,30 @@ class InvalidCsvColumns(Exception):
     def __init__(self, errors: List[str]):
         self.errors = errors
         super().__init__("CSV column mismatch — please correct the file and re-upload.")
+
+
+class InvalidFeedbackFile(InvalidCsvColumns):
+    """
+    Raised when a feedback CSV fails a file-level check (parse error, missing/extra columns per
+    the active config, mixed or missing bot_id, bot_id not configured for the persona). Like
+    InvalidCsvColumns it is raised before anything is stored; the file is rejected whole.
+    """
+    def __init__(self, errors: List[str]):
+        super().__init__(errors)
+        self.args = ("Feedback CSV rejected — please correct the file and re-upload.",)
+
+
+class InvalidFeedbackSource(Exception):
+    """Raised when the `source` form field is not an allowed feedback source."""
+    pass
+
+
+class FeedbackProgramNotFound(Exception):
+    """
+    Raised when program_name + leader_category do not match seeded rows for the tenant. Feedback
+    never fabricates program/leader ids (unlike story/discussion).
+    """
+    pass
 
 
 class RecordNotFound(Exception):
@@ -90,6 +114,18 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(InvalidCsvColumns)
     async def invalid_csv_columns_handler(request: Request, exc: InvalidCsvColumns):
+        return JSONResponse(status_code=400, content={"detail": str(exc), "errors": exc.errors})
+
+    @app.exception_handler(InvalidFeedbackSource)
+    async def invalid_feedback_source_handler(request: Request, exc: InvalidFeedbackSource):
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    @app.exception_handler(FeedbackProgramNotFound)
+    async def feedback_program_not_found_handler(request: Request, exc: FeedbackProgramNotFound):
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(InvalidFeedbackFile)
+    async def invalid_feedback_file_handler(request: Request, exc: InvalidFeedbackFile):
         return JSONResponse(status_code=400, content={"detail": str(exc), "errors": exc.errors})
 
     @app.exception_handler(RecordNotPending)

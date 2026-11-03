@@ -18,11 +18,17 @@ from app.api.validators.uploads import validate_columns
 from app.services.storage.factory import get_object_storage
 from app.services.storage.models import AccessMode
 from app.database import operations
+from app.database import feedback_operations
 from app.database.db import db
 from app.services.ingestion_validation import validate_ingestion_schema
+from app.services.feedback_constants import FEEDBACK_REPORT_TYPE, SOURCE_MITRA
+from app.api.services import feedback_uploads
 from app.api.exceptions import (
     DuplicateFile,
+    FeedbackProgramNotFound,
     InvalidCsvColumns,
+    InvalidFeedbackFile,
+    InvalidFeedbackSource,
     RecordNotFound,
     RecordAlreadyProcessing,
     RecordNotPending,
@@ -525,6 +531,10 @@ async def process_csv_inline(
     cloud_storage_path = record["cloud_storage_path"]
     report_type = record["report_type"]
 
+    if report_type == FEEDBACK_REPORT_TYPE:
+        await _process_feedback_inline(record_id, record, file_bytes, df)
+        return
+
     # --- 1. Fetch/Parse CSV (use pre-parsed df/file_bytes if available, else fetch from storage) ---
     try:
         if df is None:
@@ -732,6 +742,331 @@ async def process_csv_inline(
     await operations.update_status(record_id, "success", final_meta)
     logger.info("CSV record %s processed successfully: %d rows pushed to Kafka", record_id, len(payloads))
 
+# Feedback (Mitra conversations) — file-level and session-level processing
+FEEDBACK_MAX_REPORTED_ERRORS = 200
+
+
+def _record_meta(record: dict) -> dict:
+    """csv_uploads.meta_data as a dict (asyncpg may hand JSONB back as str)."""
+    record_meta = record.get("meta_data")
+    if isinstance(record_meta, str):
+        try:
+            record_meta = json.loads(record_meta)
+        except json.JSONDecodeError:
+            record_meta = None
+    if not isinstance(record_meta, dict):
+        return {}
+    return record_meta
+
+
+def _distinct_bot_ids(df: pd.DataFrame) -> List[str]:
+    """Distinct non-blank bot_id values of a feedback file (column matched case-insensitively)."""
+    bot_col = next((c for c in df.columns if str(c).strip().lower() == "bot_id"), None)
+    if bot_col is None:
+        raise InvalidFeedbackFile(["Missing columns: ['bot_id']"])
+    values = df[bot_col].astype(str).str.strip()
+    return sorted(set(values[values != ""]))
+
+
+async def _resolve_feedback_context(
+    df: pd.DataFrame,
+    program_name: str,
+    leader_category: str,
+    tenant_code: str,
+    source: str,
+    check_file: bool,
+) -> Dict[str, Any]:
+    """
+    Resolves everything a feedback file needs and runs the file-level checks:
+      program + persona (by name and tenant), the file's single bot_id, the active config for
+      (program, bot_id) and — when check_file — check_feedback_file against that config.
+    Never fabricates a program/leader. Raises FeedbackProgramNotFound / InvalidFeedbackFile.
+    """
+    resolved = await feedback_operations.get_program_and_leader(program_name, leader_category, tenant_code)
+    if resolved is None:
+        raise FeedbackProgramNotFound(
+            f"Program {program_name!r} with leader category {leader_category!r} does not exist for tenant {tenant_code!r}."
+        )
+
+    bot_ids = _distinct_bot_ids(df)
+    if not bot_ids:
+        raise InvalidFeedbackFile(["bot_id is blank on every row; a feedback file must contain exactly one bot_id"])
+    if len(bot_ids) > 1:
+        raise InvalidFeedbackFile([
+            f"File contains more than one bot_id: {bot_ids}. Upload one persona's bot per file."
+        ])
+    bot_id = bot_ids[0]
+
+    active = await feedback_operations.get_active_feedback_config(resolved["program"]["id"], bot_id, source)
+    if active is None:
+        raise InvalidFeedbackFile([f"bot_id {bot_id} is not configured for {resolved['leader']['name']}"])
+
+    if check_file:
+        file_errors = await asyncio.to_thread(feedback_uploads.check_feedback_file, df, active["config"], bot_id)
+        if file_errors:
+            raise InvalidFeedbackFile(list(file_errors))
+
+    return {
+        "program_info": resolved["program"],
+        "leader_info": resolved["leader"],
+        "bot_id": bot_id,
+        "config": active["config"],
+        "config_id": active["config_id"],
+        "config_version_id": active["config_version_id"],
+        "config_version": active["version"],
+    }
+
+
+def _push_dlq_sync(messages: List[Any]) -> None:
+    """
+    Runs in a worker thread. Publishes skipped feedback sessions to the DLQ topic using the same
+    delivery-callback tracking as _push_rows_sync. `messages` = [(value_json_str, headers_dict)].
+    Raises if any delivery fails or is not confirmed in time.
+    """
+    if not messages:
+        return
+
+    producer = _get_producer()
+    pending_count = len(messages)
+    delivery_error = None
+    done_event = threading.Event()
+    lock = threading.Lock()
+
+    def _on_delivery(err, _msg):
+        nonlocal pending_count, delivery_error
+        with lock:
+            if err is not None and delivery_error is None:
+                delivery_error = err
+            pending_count -= 1
+            if pending_count <= 0:
+                done_event.set()
+
+    for value, headers in messages:
+        producer.produce(
+            settings.KAFKA_TOPIC_INGESTION_DLQ,
+            value=value.encode("utf-8"),
+            headers=[(k, str(v).encode("utf-8")) for k, v in headers.items() if v is not None],
+            callback=_on_delivery,
+        )
+        producer.poll(0)
+        with lock:
+            if delivery_error is not None:
+                raise KafkaException(delivery_error)
+
+    timeout_seconds = 30.0
+    start_time = time.time()
+    while not done_event.is_set():
+        producer.poll(0.1)
+        with lock:
+            if delivery_error is not None:
+                raise KafkaException(delivery_error)
+        if time.time() - start_time > timeout_seconds:
+            break
+
+    with lock:
+        if delivery_error is not None:
+            raise KafkaException(delivery_error)
+        if pending_count > 0:
+            raise TimeoutError(
+                f"Timed out waiting for DLQ delivery ({pending_count} of {len(messages)} remaining)"
+            )
+
+
+def _build_dlq_messages(skipped: List[dict], record_id: int, tenant_code: str, source: str) -> List[Any]:
+    """
+    One DLQ message per skipped session. Identifiers go in headers (as the consumer's DLQ does);
+    the value is a small JSON envelope with the problems and NO conversation text (a session that
+    could not be built has no event, and answers may come from children). The original file is in
+    the bucket (csv_uploads.cloud_storage_path) for replay after the fix.
+    """
+    skipped_at = datetime.utcnow().isoformat() + "Z"
+    messages = []
+    for entry in skipped:
+        problems = entry["problems"]
+        value = {
+            "submissionType": FEEDBACK_REPORT_TYPE,
+            "eventType": "create",
+            "submissionId": entry.get("submissionId"),
+            "sessionId": entry.get("sessionId"),
+            "tenantCode": tenant_code,
+            "source": source,
+            "csvUploadId": record_id,
+            "problems": problems,
+            "skippedAt": skipped_at,
+        }
+        headers = {
+            "reason": f"Skipped feedback session: {'; '.join(problems)}"[:1000],
+            "submissionId": entry.get("submissionId"),
+            "tenantCode": tenant_code,
+            "sessionId": entry.get("sessionId"),
+        }
+        messages.append((json.dumps(value, default=str), headers))
+    return messages
+
+
+async def _process_feedback_inline(
+    record_id: int,
+    record: dict,
+    file_bytes: Optional[bytes] = None,
+    df: Optional[pd.DataFrame] = None,
+) -> None:
+    """
+    Session-level processing of a `feedback` csv_uploads record (called by process_csv_inline):
+    re-resolve program/leader/config, build one event per session, schema-validate each, publish the
+    valid ones to Kafka and send every skipped session to the DLQ. File-level problems were rejected
+    in handle_upload; a bad session is skipped (not fatal), so the record still ends 'success'.
+    Fetch / config-resolution / Kafka-publish failures end 'on_hold', exactly as story/discussion.
+    """
+    cloud_storage_path = record["cloud_storage_path"]
+    record_meta = _record_meta(record)
+    loaded_here = df is None
+
+    # --- 1. Fetch/Parse CSV (pre-parsed df from handle_upload if available, else fetch from storage) ---
+    try:
+        if df is None:
+            if file_bytes is None:
+                last_exc: Exception = RuntimeError("unreachable")
+                for attempt in range(3):
+                    try:
+                        file_bytes = await asyncio.to_thread(fetch_csv, cloud_storage_path)
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                        if attempt < 2:
+                            wait = 2 ** attempt  # 1s, 2s — then give up
+                            logger.warning(
+                                "GCS fetch attempt %d/3 failed for record %s (%s); retrying in %ds",
+                                attempt + 1, record_id, exc, wait,
+                            )
+                            await asyncio.sleep(wait)
+                else:
+                    raise last_exc
+            # dtype=str, keep_default_na=False: "NA" / "None" answers must survive
+            df = await asyncio.to_thread(feedback_uploads.parse_feedback_csv, file_bytes)
+    except Exception as exc:
+        logger.exception("Failed to fetch/load feedback CSV for record %s", record_id)
+        error_meta = {
+            "stage": "CSV Fetching",
+            "error": "Failed to fetch/load CSV",
+            "exception": str(exc),
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        }
+        await operations.update_status(record_id, "on_hold", error_meta)
+        return
+
+    await operations.update_status(record_id, "in_progress")
+
+    # --- 2. Re-resolve program / leader / active config (never fabricated) ---
+    tenant_code = record_meta.get("tenant_code")
+    source = record_meta.get("source", SOURCE_MITRA)
+    try:
+        if tenant_code is None:
+            raise InvalidFeedbackFile(["tenant_code is missing from the upload record"])
+        ctx = await _resolve_feedback_context(
+            df, record.get("program_name"), record.get("leader_category"), tenant_code, source,
+            check_file=loaded_here,  # handle_upload already checked a freshly uploaded file
+        )
+    except InvalidFeedbackFile as exc:
+        logger.warning("Feedback record %s failed config resolution/file checks: %s", record_id, exc.errors)
+        await operations.update_status(record_id, "on_hold", {
+            "stage": "Feedback Config Resolution",
+            "error": str(exc),
+            "validation_errors": exc.errors,
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        })
+        return
+    except Exception as exc:
+        logger.exception("Failed to resolve feedback program/leader/config for record %s", record_id)
+        await operations.update_status(record_id, "on_hold", {
+            "stage": "Feedback Config Resolution",
+            "error": str(exc),
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        })
+        return
+
+    # --- 3. Build one event per session and schema-validate each (in a thread, like story/discussion) ---
+    def _build_payloads_sync() -> tuple[list, list, int]:
+        events, builder_skipped = feedback_uploads.build_feedback_events(
+            df,
+            ctx["config"],
+            program_info=ctx["program_info"],
+            leader_info=ctx["leader_info"],
+            tenant_code=tenant_code,
+            source=source,
+        )
+        _skipped: list = [dict(entry) for entry in builder_skipped]
+        _payloads: list = []
+        for event in events:
+            problems = validate_ingestion_schema(event, FEEDBACK_REPORT_TYPE, "create")
+            if problems:
+                _skipped.append({
+                    "submissionId": event.get("submissionId"),
+                    "sessionId": event.get("sessionId"),
+                    "problems": problems,
+                })
+                continue
+            _payloads.append((json.dumps(event, default=str), f"{record_id}-{len(_payloads)}"))
+        return _payloads, _skipped, len(events) + len(builder_skipped)
+
+    try:
+        payloads, skipped, session_count = await asyncio.to_thread(_build_payloads_sync)
+    except Exception as exc:
+        logger.exception("Failed to build feedback events for record %s", record_id)
+        await operations.update_status(record_id, "on_hold", {
+            "stage": "Feedback Event Building",
+            "error": "Failed to build feedback events",
+            "exception": str(exc),
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+        })
+        return
+
+    if skipped:
+        logger.warning(
+            "record %s: %d of %d session(s) were skipped (sent to the DLQ): %s",
+            record_id, len(skipped), session_count, skipped[:20],
+        )
+
+    # --- 4. Publish valid sessions to Kafka ---
+    if payloads:
+        try:
+            await asyncio.to_thread(_push_rows_sync, payloads)
+        except Exception as exc:
+            logger.exception("Kafka push failed for feedback record %s", record_id)
+            # "on_hold", not "pending": same reasoning as the story/discussion branch (no blind replay).
+            await operations.update_status(record_id, "on_hold", {
+                "stage": "Kafka Publishing",
+                "error": "Failed to publish record",
+                "exception": str(exc),
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            })
+            return
+
+    # --- 5. Skipped sessions -> DLQ (a DLQ failure is recorded but never fails the upload) ---
+    final_meta: Dict[str, Any] = {
+        "rows_pushed": len(payloads),
+        "sessions_skipped": len(skipped),
+        "config_version_id": ctx["config_version_id"],
+        "processed_at": datetime.utcnow().isoformat() + "Z",
+    }
+    if skipped:
+        try:
+            dlq_messages = _build_dlq_messages(skipped, record_id, tenant_code, source)
+            await asyncio.to_thread(_push_dlq_sync, dlq_messages)
+            final_meta["sessions_dead_lettered"] = len(dlq_messages)
+        except Exception as exc:
+            logger.exception("DLQ publish failed for feedback record %s (%d skipped session(s))", record_id, len(skipped))
+            final_meta["dlq_publish_error"] = str(exc)
+        final_meta["schema_validation_errors"] = skipped[:FEEDBACK_MAX_REPORTED_ERRORS]
+        if len(skipped) > FEEDBACK_MAX_REPORTED_ERRORS:
+            final_meta["truncated"] = True
+
+    # --- 6. Success (bad sessions are skipped, not fatal) ---
+    await operations.update_status(record_id, "success", final_meta)
+    logger.info(
+        "Feedback record %s processed successfully: %d session(s) pushed to Kafka, %d skipped",
+        record_id, len(payloads), len(skipped),
+    )
+
 
 # Service Orchestration Logic
 async def handle_upload(
@@ -742,9 +1077,14 @@ async def handle_upload(
     file_name: str,
     file_bytes: bytes,
     background_tasks: BackgroundTasks,
+    source: str = SOURCE_MITRA,
 ) -> dict:
     normalized_type = report_type.lower().strip()
     file_size = len(file_bytes)
+
+    if normalized_type == FEEDBACK_REPORT_TYPE and source != SOURCE_MITRA:
+        # The Google Forms adapter (wide CSV -> question/answer rows) is Phase 2.
+        raise InvalidFeedbackSource(f"source {source!r} is not supported yet; only {SOURCE_MITRA!r} uploads are accepted.")
 
     # Duplicate check
     is_duplicate = await operations.check_duplicate_file(
@@ -765,25 +1105,45 @@ async def handle_upload(
         "tenant_code": tenant_code,
     }
 
-    # Validate CSV content and structure
-    parse_errors = []
-    df = None
-    try:
-        df = await asyncio.to_thread(pd.read_csv, io.BytesIO(file_bytes))
-    except Exception as exc:
-        parse_errors = [f"Failed to parse CSV: {exc}"]
+    if normalized_type == FEEDBACK_REPORT_TYPE:
+        # File-level checks (nothing is stored if any fails). The message-level CSV is parsed with
+        # dtype=str / keep_default_na=False so "NA" / "None" answers survive.
+        try:
+            df = await asyncio.to_thread(feedback_uploads.parse_feedback_csv, file_bytes)
+        except ValueError as exc:
+            raise InvalidFeedbackFile([f"Failed to parse CSV: {exc}"])
+        ctx = await _resolve_feedback_context(
+            df, program_name, leader_category, tenant_code, source, check_file=True,
+        )
+        meta_data.update({
+            "source": source,
+            "persona": ctx["leader_info"]["name"],
+            "bot_id": ctx["bot_id"],
+            "config_id": ctx["config_id"],
+            "config_version_id": ctx["config_version_id"],
+            "config_version": ctx["config_version"],
+        })
+    else:
+        # Validate CSV content and structure
+        parse_errors = []
+        df = None
+        try:
+            df = await asyncio.to_thread(pd.read_csv, io.BytesIO(file_bytes))
+        except Exception as exc:
+            parse_errors = [f"Failed to parse CSV: {exc}"]
 
-    validation_errors = []
-    if df is not None:
-        is_valid, errors = await asyncio.to_thread(validate_columns, df, normalized_type)
-        if not is_valid:
-            validation_errors = errors
+        validation_errors = []
+        if df is not None:
+            is_valid, errors = await asyncio.to_thread(validate_columns, df, normalized_type)
+            if not is_valid:
+                validation_errors = errors
 
-    all_errors = parse_errors or validation_errors
+        all_errors = parse_errors or validation_errors
 
-    if all_errors:
-        # Reject before touching GCS or the DB — no side effects for invalid uploads.
-        raise InvalidCsvColumns(all_errors)
+        if all_errors:
+            # Reject before touching GCS or the DB — no side effects for invalid uploads.
+            raise InvalidCsvColumns(all_errors)
+
 
     # Upload valid file to GCS
     try:

@@ -1,4 +1,9 @@
 from app.config import settings
+from app.services.feedback_constants import (
+    COMPLETION_STATUSES,
+    FEEDBACK_REPORT_TYPE,
+    FEEDBACK_SOURCES,
+)
 
 
 def _get_nested(obj: dict, dotted_path: str):
@@ -32,6 +37,106 @@ def _emptiness_label(value) -> str:
     return "null" if value is None else "empty"
 
 
+def _is_int(value) -> bool:
+    """True for a real int; bool is an int subclass in Python, so it is excluded explicitly."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _validate_feedback_messages(messages) -> list:
+    """Validates the data.messages array of a feedback create event element by element and
+    returns every problem found (not just the first). The presence / non-empty check of
+    data.messages itself is done by the schema's required paths, so an empty or null array is
+    not reported again here."""
+    if _is_empty(messages):
+        return []
+    if not isinstance(messages, list):
+        return [f"'data.messages' must be a list, got {type(messages).__name__}"]
+
+    problems = []
+    sequences = {}  # valid sequence -> number of rows carrying it
+    for index, row in enumerate(messages):
+        label = f"data.messages[{index}]"
+        if not isinstance(row, dict):
+            problems.append(f"'{label}' must be an object, got {type(row).__name__}")
+            continue
+
+        if "sequence" not in row:
+            problems.append(f"'{label}.sequence' is missing")
+        elif not _is_int(row["sequence"]):
+            problems.append(f"'{label}.sequence' must be an integer, got {row['sequence']!r}")
+        elif row["sequence"] < 1:
+            problems.append(f"'{label}.sequence' must be >= 1, got {row['sequence']!r}")
+        else:
+            sequences[row["sequence"]] = sequences.get(row["sequence"], 0) + 1
+
+        if "message" not in row:
+            problems.append(f"'{label}.message' is missing")
+        elif _is_empty(row["message"]):
+            problems.append(f"'{label}.message' is {_emptiness_label(row['message'])}")
+        elif not isinstance(row["message"], str):
+            problems.append(f"'{label}.message' must be a string, got {type(row['message']).__name__}")
+
+        if "isFollowUp" in row and not isinstance(row["isFollowUp"], bool):
+            problems.append(f"'{label}.isFollowUp' must be a boolean, got {row['isFollowUp']!r}")
+
+        if "parentSequence" in row and row["parentSequence"] is not None and not _is_int(row["parentSequence"]):
+            problems.append(f"'{label}.parentSequence' must be null or an integer, got {row['parentSequence']!r}")
+
+        # translatedMessage and messageAt are optional (null allowed); only a wrong type is a problem.
+        for optional_text in ("translatedMessage", "messageAt"):
+            if optional_text in row and row[optional_text] is not None and not isinstance(row[optional_text], str):
+                problems.append(
+                    f"'{label}.{optional_text}' must be null or a string, got {type(row[optional_text]).__name__}"
+                )
+
+    for sequence, count in sorted(sequences.items()):
+        if count > 1:
+            problems.append(f"'data.messages' has duplicate sequence {sequence} ({count} rows)")
+
+    # Parent links: the parent must exist in this event and come before the answer.
+    for index, row in enumerate(messages):
+        if not isinstance(row, dict) or not _is_int(row.get("parentSequence")):
+            continue
+        label = f"data.messages[{index}]"
+        parent = row["parentSequence"]
+        if parent not in sequences:
+            problems.append(f"'{label}.parentSequence' {parent} does not match any message sequence in the event")
+        elif _is_int(row.get("sequence")) and parent >= row["sequence"]:
+            problems.append(
+                f"'{label}.parentSequence' {parent} must be lower than the row's own sequence {row['sequence']}"
+            )
+
+    has_answer = any(isinstance(row, dict) and row.get("parentSequence") is not None for row in messages)
+    if not has_answer:
+        problems.append("'data.messages' has no message with a parentSequence (at least one answer is required)")
+
+    return problems
+
+
+def _validate_feedback_create(event: dict) -> list:
+    """Feedback-specific checks that the generic required-path mechanism cannot express."""
+    problems = []
+
+    if event.get("submissionType") != FEEDBACK_REPORT_TYPE:
+        problems.append(f"'submissionType' must be {FEEDBACK_REPORT_TYPE!r}, got {event.get('submissionType')!r}")
+
+    completion, found = _get_nested(event, "data.completionStatus")
+    if found and not _is_empty(completion) and completion not in COMPLETION_STATUSES:
+        problems.append(
+            f"'data.completionStatus' must be one of {', '.join(COMPLETION_STATUSES)}, got {completion!r}"
+        )
+
+    source, found = _get_nested(event, "data.source")
+    if found and not _is_empty(source) and source not in FEEDBACK_SOURCES:
+        problems.append(f"'data.source' must be one of {', '.join(FEEDBACK_SOURCES)}, got {source!r}")
+
+    messages, found = _get_nested(event, "data.messages")
+    if found:
+        problems.extend(_validate_feedback_messages(messages))
+
+    return problems
+
+
 def validate_ingestion_schema(event: dict, submission_type: str, event_type: str) -> list:
     """
     Validates a Kafka event against the configured required-fields schema for its
@@ -43,8 +148,12 @@ def validate_ingestion_schema(event: dict, submission_type: str, event_type: str
     event against the same schema before it's ever published to Kafka).
     """
     normalized_type = submission_type.lower().strip() if isinstance(submission_type, str) else ""
-    if event_type in ("create", "update") and "story" not in normalized_type and "discussion" not in normalized_type:
+    is_story_or_discussion = "story" in normalized_type or "discussion" in normalized_type
+    is_feedback = FEEDBACK_REPORT_TYPE in normalized_type and not is_story_or_discussion
+    if event_type in ("create", "update") and not is_story_or_discussion and not is_feedback:
         return [f"Unrecognized submissionType {submission_type!r}; no ingestion schema to validate against"]
+    if is_feedback and event_type == "update":
+        return ["feedback does not support update events in this release"]
 
     try:
         schema = settings.get_kafka_ingestion_schema(submission_type)
@@ -69,5 +178,8 @@ def validate_ingestion_schema(event: dict, submission_type: str, event_type: str
             for key, value in new_values.items():
                 if _is_empty(value):
                     problems.append(f"'newValues.{key}' is {_emptiness_label(value)}")
+
+    if is_feedback and event_type == "create":
+        problems.extend(_validate_feedback_create(event))
 
     return problems

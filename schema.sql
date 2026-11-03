@@ -529,3 +529,96 @@ CREATE INDEX IF NOT EXISTS idx_submissions_failed ON submissions (updated_at, su
 -- JOIN submissions s 
 --   ON ds.submission_id = s.submission_id 
 --  AND ds.tenant_code = s.tenant_code;
+
+
+-- =========================================================================
+-- 12. FEEDBACK (Mitra bot conversations now, Google Forms later)
+-- One submissions row per session; feedback_submissions is its 1:1 payload and
+-- feedbacks holds one row per question and one per answer.
+-- See docs/feedback-upload-plan.md.
+-- =========================================================================
+
+CREATE TABLE feedback_submissions (
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    submission_id     TEXT NOT NULL,
+    tenant_code       TEXT NOT NULL,
+    source            TEXT NOT NULL, -- 'mitra' | 'google_forms'
+    language          TEXT,
+    completion_status TEXT NOT NULL CHECK (completion_status IN ('COMPLETED', 'IN_PROGRESS')),
+    source_ref        TEXT, -- natural key of the response; set for google_forms, NULL for mitra
+    meta_data         JSONB,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    FOREIGN KEY (submission_id, tenant_code)
+        REFERENCES submissions(submission_id, tenant_code) ON DELETE CASCADE,
+    UNIQUE (submission_id, tenant_code),
+    UNIQUE (tenant_code, source_ref) -- NULLs are allowed; guarantees a Google Forms response is stored once
+);
+
+CREATE TABLE feedbacks (
+    id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    submission_id      TEXT NOT NULL,
+    tenant_code        TEXT NOT NULL,
+    session_id         TEXT NOT NULL,
+    program_id         UUID REFERENCES programs(id) ON DELETE SET NULL,
+    source             TEXT NOT NULL,
+    submission_type    TEXT NOT NULL DEFAULT 'feedback',
+    sequence           INT NOT NULL, -- Mitra: CSV sequence + 1 (1 = synthesised first question); Google Forms: 1..n
+    is_follow_up       BOOLEAN NOT NULL DEFAULT FALSE, -- bot probe / follow-up question
+    question_key       TEXT, -- canonical question id (Mitra stage), shared across sources
+    parent_id          UUID REFERENCES feedbacks(id) ON DELETE CASCADE, -- answer -> its question row; NULL for questions and the closing message
+    message            TEXT NOT NULL, -- as spoken in the conversation language
+    translated_message TEXT, -- English
+    language           TEXT,
+    message_at         TIMESTAMPTZ, -- when it was said (from the CSV)
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    FOREIGN KEY (submission_id, tenant_code)
+        REFERENCES submissions(submission_id, tenant_code) ON DELETE CASCADE,
+    UNIQUE (submission_id, tenant_code, sequence)
+);
+
+-- Per-program upload configuration (what to process and how to read it; not the LLM prompts,
+-- those stay in prompts/prompt_version). Versioned JSON settings live in config_version.
+CREATE TABLE config (
+    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    config_source TEXT NOT NULL CHECK (config_source IN ('mitra', 'google_forms')),
+    name          TEXT NOT NULL, -- e.g. 'Youth bot CSV validator'
+    config_type   TEXT NOT NULL, -- 'feedback_upload' for now (story/discussion keep env config)
+    program_id    UUID REFERENCES programs(id) ON DELETE CASCADE, -- NULL = default for the source and type
+    tenant_code   TEXT NOT NULL REFERENCES tenant(code),
+    leader_id     UUID REFERENCES leader_category(id) ON DELETE SET NULL, -- optional; NULL for the feedback bots
+    bot_id        TEXT, -- Mitra bot id the config applies to; NULL for Google Forms
+    bot_name      TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE config_version (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    config_id   UUID NOT NULL REFERENCES config(id) ON DELETE CASCADE,
+    version     INT NOT NULL DEFAULT 1,
+    is_active   BOOLEAN NOT NULL DEFAULT TRUE,
+    config      JSONB NOT NULL, -- columns, sender rule, message_map, questions catalog ...
+    created_by  TEXT,
+    change_note TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    UNIQUE (config_id, version)
+);
+
+-- Every index below spells out IF NOT EXISTS: db.py injects it only for plain index and table
+-- statements (not unique indexes), and this file runs on every startup.
+CREATE INDEX IF NOT EXISTS idx_feedbacks_program_question ON feedbacks (program_id, question_key);
+CREATE INDEX IF NOT EXISTS idx_feedbacks_parent ON feedbacks (parent_id);
+CREATE INDEX IF NOT EXISTS idx_feedbacks_source ON feedbacks (source);
+
+-- One config per (source, type, program, bot).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_config_source_type_program_bot
+    ON config (config_source, config_type, COALESCE(program_id, '00000000-0000-0000-0000-000000000000'), COALESCE(bot_id, ''));
+
+-- One active version per config.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_config_version_active ON config_version (config_id) WHERE is_active;

@@ -2,19 +2,37 @@ import json
 import logging
 from typing import List, Optional, Tuple
 import pandas as pd
-from app.api.exceptions import InvalidReportType, InvalidFileType, FileTooLarge, EmptyFile
+from app.api.exceptions import InvalidReportType, InvalidFileType, FileTooLarge, EmptyFile, InvalidFeedbackSource
 from app.config import settings
+from app.services.feedback_constants import FEEDBACK_REPORT_TYPE, FEEDBACK_SOURCES
 
 logger = logging.getLogger("analytics_service.api.validators.uploads")
 
 
 def validate_report_type(report_type: str) -> str:
     if not report_type:
-        raise InvalidReportType("Only 'story' or 'discussion' report types are accepted.")
+        raise InvalidReportType("Only 'story', 'discussion' or 'feedback' report types are accepted.")
     normalized_type = report_type.lower().strip()
-    if normalized_type not in ("story", "discussion"):
-        raise InvalidReportType("Only 'story' or 'discussion' report types are accepted.")
+    if normalized_type not in ("story", "discussion", FEEDBACK_REPORT_TYPE):
+        raise InvalidReportType("Only 'story', 'discussion' or 'feedback' report types are accepted.")
     return normalized_type
+
+
+def max_upload_bytes(report_type: Optional[str] = None) -> int:
+    """Size cap for a report type: feedback has its own, higher cap; story/discussion keep MAX_CSV_UPLOAD_BYTES."""
+    if report_type is not None and report_type.lower().strip() == FEEDBACK_REPORT_TYPE:
+        return settings.FEEDBACK_MAX_CSV_UPLOAD_BYTES
+    return settings.MAX_CSV_UPLOAD_BYTES
+
+
+def validate_source(source: str) -> str:
+    """Validate the optional `source` form field of a feedback upload; returns the normalized value."""
+    normalized_source = source.lower().strip() if source is not None else ""
+    if normalized_source not in FEEDBACK_SOURCES:
+        raise InvalidFeedbackSource(
+            f"Invalid source {source!r}: allowed values are {', '.join(repr(s) for s in FEEDBACK_SOURCES)}."
+        )
+    return normalized_source
 
 
 def validate_extension(filename: Optional[str]) -> None:
@@ -22,8 +40,8 @@ def validate_extension(filename: Optional[str]) -> None:
         raise InvalidFileType("Only .csv files are accepted")
 
 
-def validate_file_bytes(file_bytes: bytes) -> None:
-    if len(file_bytes) > settings.MAX_CSV_UPLOAD_BYTES:
+def validate_file_bytes(file_bytes: bytes, report_type: Optional[str] = None) -> None:
+    if len(file_bytes) > max_upload_bytes(report_type):
         raise FileTooLarge("Uploaded file is too large")
     if not file_bytes:
         raise EmptyFile("Uploaded file is empty")

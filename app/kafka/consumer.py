@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from datetime import datetime, timezone
 from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 from confluent_kafka.admin import AdminClient, NewTopic
 from temporalio.client import Client
@@ -11,7 +12,8 @@ from app.database.db import db
 from app.database.operations import (
     insert_or_update_submission,
     delete_submission,
-    update_submission_status
+    update_submission_status,
+    is_feedback_type,
 )
 from app.services.ingestion_validation import validate_ingestion_schema
 from app.temporal.workflows import ConfigDrivenProcessingWorkflow
@@ -76,6 +78,18 @@ class IngestionConsumer:
         """
         Starts a Temporal workflow execution in real-time.
         """
+        # A feedback submission whose type has no process steps is complete once ingested: mark it
+        # 'success' here (batch mode does the same through the workflow) instead of leaving it 'pending'
+        # forever. Story/discussion keep their existing behaviour (checked below, after the Temporal client).
+        if is_feedback_type(submission_type) and len(settings.get_process_config(submission_type)) == 0:
+            async with db.pool.acquire() as conn:
+                await update_submission_status(
+                    conn, submission_id, tenant_code, "success",
+                    {"status": "success", "steps": [], "timestamp": datetime.now(timezone.utc).isoformat()},
+                )
+            logger.info(f"No process steps defined for submission type '{submission_type}'. Marked submission {submission_id} as 'success' at ingestion.")
+            return
+
         if not self.temporal_client:
             try:
                 logger.info(f"Temporal client not connected. Attempting to reconnect to {settings.TEMPORAL_HOST}...")
@@ -221,9 +235,12 @@ class IngestionConsumer:
 
         async with db.pool.acquire() as conn:
             if event_type == "create":
-                # Check for duplicate entry
+                is_feedback = is_feedback_type(submission_type)
+                # Check for duplicate entry. Feedback never skips: a create on an existing session
+                # reconciles (new messages are added, completion status can advance) inside
+                # insert_or_update_submission, so a re-uploaded, grown session is not lost.
                 exists = None
-                if hasattr(conn, "fetchval"):
+                if hasattr(conn, "fetchval") and not is_feedback:
                     exists = await conn.fetchval(
                         "SELECT 1 FROM submissions WHERE submission_id = $1 AND tenant_code = $2",
                         submission_id, tenant_code
@@ -233,6 +250,12 @@ class IngestionConsumer:
                     return
 
                 res = await insert_or_update_submission(conn, event)
+
+                if is_feedback and res.get("changed") is False and res.get("status") != "pending":
+                    # Identical re-delivery of an already-ingested session: nothing was written, so there
+                    # is nothing to (re)process. A still-'pending' row falls through and is processed.
+                    logger.info(f"Feedback submission {submission_id} under tenant {tenant_code} is unchanged. Nothing to process.")
+                    return
                 
                 # Check orchestration mode
                 mode = settings.PROCESSING_MODE.lower().strip()
@@ -243,6 +266,13 @@ class IngestionConsumer:
                     logger.info(f"Batch mode enabled. Queued submission {submission_id} in 'pending' status.")
 
             elif event_type == "update":
+                if is_feedback_type(submission_type):
+                    # Not supported in this release: send to the DLQ with identifiers right away
+                    # (retrying a deterministic rejection would only delay it).
+                    reason = f"eventType 'update' is not supported for submissionType {submission_type!r} in this release (only create and delete)"
+                    logger.error(f"{reason}. Identifiers: {_format_identifiers(identifiers)}")
+                    await self._send_to_dlq(raw_payload, reason, identifiers)
+                    return
                 res = await insert_or_update_submission(conn, event)
                 
                 # Check orchestration mode

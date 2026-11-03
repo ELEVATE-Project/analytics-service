@@ -4,7 +4,14 @@ import re
 import urllib.parse
 from typing import Dict, Any, Optional, List
 import asyncpg
-from datetime import datetime
+from datetime import datetime, timezone
+
+from app.services.feedback_constants import (
+    COMPLETION_COMPLETED,
+    COMPLETION_STATUSES,
+    FEEDBACK_REPORT_TYPE,
+    FEEDBACK_SOURCES,
+)
 
 logger = logging.getLogger("analytics_service.operations")
 
@@ -262,6 +269,310 @@ async def delete_submission(conn: asyncpg.Connection, submission_id: str, tenant
         logger.warning(f"Submission {submission_id} not found under tenant {tenant_code} for deletion")
     return deleted
 
+class FeedbackUpdateNotSupportedError(ValueError):
+    """Raised for an `update` event on a feedback submission (not supported in this release)."""
+
+
+def is_feedback_type(submission_type: Any) -> bool:
+    """True when `submission_type` selects the feedback branch (same normalisation as the story/discussion checks)."""
+    return isinstance(submission_type, str) and FEEDBACK_REPORT_TYPE in submission_type.lower().strip()
+
+
+def _parse_feedback_timestamp(value: Any, field: str) -> Optional[datetime]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be an ISO-8601 string or null, got {type(value).__name__}")
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as e:
+        raise ValueError(f"{field} is not a valid ISO-8601 timestamp: {value!r}") from e
+
+
+def _optional_text(value: Any, field: str) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string or null, got {type(value).__name__}")
+    return value
+
+
+def _parse_feedback_messages(raw_messages: Any) -> List[Dict[str, Any]]:
+    """
+    Boundary re-check of data.messages for the feedback branch (the ingestion schema validator is
+    the primary gate; this keeps the DB writes safe if an event ever reaches them unvalidated).
+    Returns the messages ordered by sequence. Raises ValueError with the offending index on any problem.
+    """
+    if not isinstance(raw_messages, list) or len(raw_messages) == 0:
+        raise ValueError("data.messages must be a non-empty list")
+    parsed: List[Dict[str, Any]] = []
+    seen_sequences = set()
+    for idx, raw in enumerate(raw_messages):
+        where = f"data.messages[{idx}]"
+        if not isinstance(raw, dict):
+            raise ValueError(f"{where} must be an object, got {type(raw).__name__}")
+        sequence = raw.get("sequence")
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
+            raise ValueError(f"{where}.sequence must be an integer >= 1, got {sequence!r}")
+        if sequence in seen_sequences:
+            raise ValueError(f"{where}.sequence {sequence} appears more than once in the event")
+        seen_sequences.add(sequence)
+        message = raw.get("message")
+        if not isinstance(message, str) or len(message.strip()) == 0:
+            raise ValueError(f"{where}.message must be a non-empty string (sequence {sequence})")
+        is_follow_up = raw.get("isFollowUp", False)
+        if not isinstance(is_follow_up, bool):
+            raise ValueError(f"{where}.isFollowUp must be a boolean, got {is_follow_up!r}")
+        parent_sequence = raw.get("parentSequence")
+        if parent_sequence is not None:
+            if isinstance(parent_sequence, bool) or not isinstance(parent_sequence, int):
+                raise ValueError(f"{where}.parentSequence must be an integer or null, got {parent_sequence!r}")
+            if parent_sequence >= sequence:
+                raise ValueError(
+                    f"{where}.parentSequence {parent_sequence} must be lower than its own sequence {sequence}"
+                )
+        parsed.append({
+            "sequence": sequence,
+            "question_key": _optional_text(raw.get("questionKey"), f"{where}.questionKey"),
+            "is_follow_up": is_follow_up,
+            "message": message,
+            "translated_message": _optional_text(raw.get("translatedMessage"), f"{where}.translatedMessage"),
+            "message_at": _parse_feedback_timestamp(raw.get("messageAt"), f"{where}.messageAt"),
+            "parent_sequence": parent_sequence,
+        })
+    parsed.sort(key=lambda m: m["sequence"])
+    return parsed
+
+
+async def _ingest_feedback_submission(
+    conn: asyncpg.Connection,
+    event_payload: Dict[str, Any],
+    event_type: str,
+) -> Dict[str, Any]:
+    """
+    Feedback branch of insert_or_update_submission. One transaction:
+      1. submissions upsert (conditional: an identical re-delivery rewrites nothing)
+      2. feedback_submissions upsert (a COMPLETED session is never downgraded to IN_PROGRESS)
+      3. feedbacks upsert by (submission_id, tenant_code, sequence); existing rows are rewritten only when
+         a stored field actually changed, so ids are kept and updated_at moves only on real changes
+      4. parent_id pass from parentSequence (idempotent; null parentSequence leaves parent_id untouched)
+    Both `create` (a first upload, or a re-upload of a grown session) and a repeated event take this path:
+    a create on an existing session reconciles instead of being skipped.
+    Returns the usual dict plus `changed` (False when nothing was written) and per-table counts.
+    """
+    submission_id = str(event_payload["submissionId"])
+    tenant_code = event_payload["tenantCode"]
+    submission_type = event_payload["submissionType"]
+    session_id = event_payload.get("sessionId")
+    tags = event_payload.get("tags", {})
+    ident = f"submission {submission_id} (tenant {tenant_code}, session {session_id})"
+
+    if event_type != "create":
+        raise FeedbackUpdateNotSupportedError(
+            f"eventType {event_type!r} is not supported for feedback submissions in this release "
+            f"(only create and delete); rejecting {ident}."
+        )
+    if not isinstance(session_id, str) or len(session_id.strip()) == 0:
+        raise ValueError(f"feedback event requires a non-empty sessionId; rejecting {ident}.")
+
+    data = event_payload.get("data", {})
+    source = data.get("source")
+    if source not in FEEDBACK_SOURCES:
+        raise ValueError(f"data.source must be one of {FEEDBACK_SOURCES}, got {source!r}; rejecting {ident}.")
+    completion_status = data.get("completionStatus")
+    if completion_status not in COMPLETION_STATUSES:
+        raise ValueError(
+            f"data.completionStatus must be one of {COMPLETION_STATUSES}, got {completion_status!r}; rejecting {ident}."
+        )
+    language = _optional_text(data.get("language"), "data.language")
+    messages = _parse_feedback_messages(data.get("messages"))
+
+    submission_date = _parse_feedback_timestamp(data.get("submissionDate"), "data.submissionDate")
+    if submission_date is None:
+        submission_date = datetime.now(timezone.utc)
+    state = tags.get("state")
+    district = tags.get("district")
+
+    async with conn.transaction():
+        program_id, leader_id = await upsert_metadata(conn, tags, tenant_code)
+
+        # 1. submissions. Unlike story/discussion this must not reset status/updated_at on every conflict,
+        # so the update is conditional and keeps identity fields (session_id, submission_date) once set.
+        try:
+            sub_row = await conn.fetchrow(
+                """
+                INSERT INTO submissions (
+                    session_id, submission_id, tenant_code, submission_type,
+                    state, district, submission_date, program_id, leader_id, status
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending')
+                ON CONFLICT (submission_id, tenant_code) DO UPDATE SET
+                    session_id = COALESCE(submissions.session_id, EXCLUDED.session_id),
+                    state = COALESCE(EXCLUDED.state, submissions.state),
+                    district = COALESCE(EXCLUDED.district, submissions.district),
+                    submission_date = COALESCE(submissions.submission_date, EXCLUDED.submission_date),
+                    program_id = COALESCE(EXCLUDED.program_id, submissions.program_id),
+                    leader_id = COALESCE(EXCLUDED.leader_id, submissions.leader_id),
+                    updated_at = now()
+                WHERE submissions.session_id IS NULL
+                   OR (EXCLUDED.state IS NOT NULL AND EXCLUDED.state IS DISTINCT FROM submissions.state)
+                   OR (EXCLUDED.district IS NOT NULL AND EXCLUDED.district IS DISTINCT FROM submissions.district)
+                   OR submissions.submission_date IS NULL
+                   OR (EXCLUDED.program_id IS NOT NULL AND EXCLUDED.program_id IS DISTINCT FROM submissions.program_id)
+                   OR (EXCLUDED.leader_id IS NOT NULL AND EXCLUDED.leader_id IS DISTINCT FROM submissions.leader_id)
+                RETURNING id, status, session_id, (xmax = 0) AS inserted
+                """,
+                session_id, submission_id, tenant_code, submission_type,
+                state, district, submission_date, program_id, leader_id,
+            )
+        except asyncpg.exceptions.UniqueViolationError as e:
+            if e.constraint_name == "submissions_session_id_key":
+                raise ValueError(
+                    f"session_id {session_id!r} is already associated with a different submission; "
+                    f"rejecting {ident}."
+                ) from e
+            raise
+        submission_changed = sub_row is not None
+        if sub_row is None:
+            sub_row = await conn.fetchrow(
+                "SELECT id, status, session_id, FALSE AS inserted FROM submissions "
+                "WHERE submission_id = $1 AND tenant_code = $2",
+                submission_id, tenant_code,
+            )
+        if sub_row["session_id"] != session_id:
+            raise ValueError(
+                f"submission {submission_id} under tenant {tenant_code} already belongs to session "
+                f"{sub_row['session_id']!r}, not {session_id!r}; rejecting the event."
+            )
+        db_sub_uuid = sub_row["id"]
+        db_sub_status = sub_row["status"]
+
+        # 2. feedback_submissions. COMPLETED is terminal: an incoming IN_PROGRESS (a stale or out-of-order
+        # event) never downgrades it. source/language are refreshed; language is kept when the event has none.
+        fs_row = await conn.fetchrow(
+            """
+            INSERT INTO feedback_submissions (submission_id, tenant_code, source, language, completion_status)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (submission_id, tenant_code) DO UPDATE SET
+                source = EXCLUDED.source,
+                language = COALESCE(EXCLUDED.language, feedback_submissions.language),
+                completion_status = CASE
+                    WHEN feedback_submissions.completion_status = $6 THEN feedback_submissions.completion_status
+                    ELSE EXCLUDED.completion_status END,
+                updated_at = now()
+            WHERE feedback_submissions.source IS DISTINCT FROM EXCLUDED.source
+               OR COALESCE(EXCLUDED.language, feedback_submissions.language) IS DISTINCT FROM feedback_submissions.language
+               OR (feedback_submissions.completion_status <> $6
+                   AND feedback_submissions.completion_status IS DISTINCT FROM EXCLUDED.completion_status)
+            RETURNING completion_status, (xmax = 0) AS inserted
+            """,
+            submission_id, tenant_code, source, language, completion_status, COMPLETION_COMPLETED,
+        )
+        payload_changed = fs_row is not None
+
+        # 3. feedbacks: one batched upsert. The WHERE leaves unchanged rows untouched (ids and updated_at kept).
+        upserted = await conn.fetch(
+            """
+            INSERT INTO feedbacks (
+                submission_id, tenant_code, session_id, program_id, source, submission_type,
+                sequence, is_follow_up, question_key, message, translated_message, language, message_at
+            )
+            SELECT $1, $2, $3, $4::uuid, $5, $6,
+                   t.sequence, t.is_follow_up, t.question_key, t.message, t.translated_message, $7, t.message_at
+            FROM unnest(
+                $8::int[], $9::boolean[], $10::text[], $11::text[], $12::text[], $13::timestamptz[]
+            ) AS t(sequence, is_follow_up, question_key, message, translated_message, message_at)
+            ON CONFLICT (submission_id, tenant_code, sequence) DO UPDATE SET
+                is_follow_up = EXCLUDED.is_follow_up,
+                question_key = EXCLUDED.question_key,
+                message = EXCLUDED.message,
+                translated_message = EXCLUDED.translated_message,
+                language = EXCLUDED.language,
+                message_at = EXCLUDED.message_at,
+                updated_at = now()
+            WHERE feedbacks.is_follow_up IS DISTINCT FROM EXCLUDED.is_follow_up
+               OR feedbacks.question_key IS DISTINCT FROM EXCLUDED.question_key
+               OR feedbacks.message IS DISTINCT FROM EXCLUDED.message
+               OR feedbacks.translated_message IS DISTINCT FROM EXCLUDED.translated_message
+               OR feedbacks.language IS DISTINCT FROM EXCLUDED.language
+               OR feedbacks.message_at IS DISTINCT FROM EXCLUDED.message_at
+            RETURNING sequence, (xmax = 0) AS inserted
+            """,
+            submission_id, tenant_code, session_id, program_id, source, FEEDBACK_REPORT_TYPE, language,
+            [m["sequence"] for m in messages],
+            [m["is_follow_up"] for m in messages],
+            [m["question_key"] for m in messages],
+            [m["message"] for m in messages],
+            [m["translated_message"] for m in messages],
+            [m["message_at"] for m in messages],
+        )
+        messages_inserted = sum(1 for r in upserted if r["inserted"])
+        messages_updated = len(upserted) - messages_inserted
+
+        # 4. parent links. A parentSequence must resolve inside this session (parents may come from this
+        # event or from rows stored by an earlier upload); an unresolvable one rolls the whole event back.
+        with_parent = [m for m in messages if m["parent_sequence"] is not None]
+        parents_set = 0
+        if len(with_parent) > 0:
+            child_seqs = [m["sequence"] for m in with_parent]
+            parent_seqs = [m["parent_sequence"] for m in with_parent]
+            unresolved = await conn.fetch(
+                """
+                SELECT m.sequence, m.parent_sequence
+                FROM unnest($3::int[], $4::int[]) AS m(sequence, parent_sequence)
+                LEFT JOIN feedbacks p
+                       ON p.submission_id = $1 AND p.tenant_code = $2 AND p.sequence = m.parent_sequence
+                WHERE p.id IS NULL
+                """,
+                submission_id, tenant_code, child_seqs, parent_seqs,
+            )
+            if len(unresolved) > 0:
+                missing = ", ".join(f"{r['sequence']}->{r['parent_sequence']}" for r in unresolved)
+                raise ValueError(
+                    f"feedback messages reference a parentSequence that does not exist "
+                    f"(sequence->parentSequence: {missing}); rejecting {ident}."
+                )
+            parent_rows = await conn.fetch(
+                """
+                UPDATE feedbacks f SET parent_id = p.id, updated_at = now()
+                FROM unnest($3::int[], $4::int[]) AS m(sequence, parent_sequence)
+                JOIN feedbacks p
+                  ON p.submission_id = $1 AND p.tenant_code = $2 AND p.sequence = m.parent_sequence
+                WHERE f.submission_id = $1 AND f.tenant_code = $2 AND f.sequence = m.sequence
+                  AND f.parent_id IS DISTINCT FROM p.id
+                RETURNING f.id
+                """,
+                submission_id, tenant_code, child_seqs, parent_seqs,
+            )
+            parents_set = len(parent_rows)
+
+        changed = submission_changed or payload_changed or len(upserted) > 0 or parents_set > 0
+        if changed and db_sub_status != "pending":
+            # New content: send the submission back through processing (same effect as a story update).
+            await conn.execute(
+                "UPDATE submissions SET status = 'pending', updated_at = now() "
+                "WHERE submission_id = $1 AND tenant_code = $2",
+                submission_id, tenant_code,
+            )
+            db_sub_status = "pending"
+
+    logger.info(
+        f"Successfully ingested {submission_type} submission {submission_id} under tenant {tenant_code}: "
+        f"changed={changed}, messages_inserted={messages_inserted}, messages_updated={messages_updated}, "
+        f"parents_set={parents_set}"
+    )
+    return {
+        "id": db_sub_uuid,
+        "submission_id": submission_id,
+        "tenant_code": tenant_code,
+        "status": db_sub_status,
+        "changed": changed,
+        "messages_inserted": messages_inserted,
+        "messages_updated": messages_updated,
+        "parents_set": parents_set,
+    }
+
+
 async def insert_or_update_submission(
     conn: asyncpg.Connection,
     event_payload: Dict[str, Any]
@@ -276,6 +587,9 @@ async def insert_or_update_submission(
     session_id = event_payload.get("sessionId")
     event_type = event_payload.get("eventType", "create").lower().strip()
     tags = event_payload.get("tags", {})
+
+    if is_feedback_type(submission_type):
+        return await _ingest_feedback_submission(conn, event_payload, event_type)
 
     # Resolve the data payload based on event type.
     # For updates, newValues is delta-only — do NOT merge in oldValues. Downstream

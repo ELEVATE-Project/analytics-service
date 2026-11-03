@@ -5,6 +5,7 @@ from pathlib import Path
 import asyncpg
 
 from app.config import settings
+from app.database.seed_feedback import seed_feedback
 
 logger = logging.getLogger("analytics_service.db")
 
@@ -101,6 +102,9 @@ class Database:
                 # Always run the themes seed script to seed initial approved taxonomies
                 seed_themes_sql = SEED_THEMES_FILE.read_text(encoding="utf-8")
                 await conn.execute(seed_themes_sql)
+
+                # Feedback (Mitra) personas, programs and upload configs; never overwrites existing rows
+                await seed_feedback(conn)
 
                 logger.info("Database schema initialized successfully.")
             finally:

@@ -12,6 +12,8 @@ from app.api.validators.uploads import (
     validate_report_type,
     validate_extension,
     validate_file_bytes,
+    validate_source,
+    max_upload_bytes,
 )
 from app.api.models.uploads import UploadResponse
 from app.api.models.submissions import (
@@ -22,6 +24,7 @@ from app.api.models.submissions import (
 )
 from app.api.services import uploads as upload_service
 from app.config import settings
+from app.services.feedback_constants import FEEDBACK_REPORT_TYPE
 from app.database.db import db
 from app.database.operations import (
     fetch_failed_submission_for_retry,
@@ -47,6 +50,7 @@ async def upload_report(
     program_name: str = Form(...),
     leader_category: str = Form(...),
     tenant_code: str = Form(default="mitra"),
+    source: str = Form(default="mitra"),
     file: UploadFile = File(...),
     _token: HTTPAuthorizationCredentials = Depends(verify_auth_token),
 ):
@@ -56,13 +60,18 @@ async def upload_report(
     The file is stored in GCS and a tracking record is created with
     status='pending'. Processing (column validation, Kafka publishing)
     runs in the background.
+
+    report_type='feedback' (Mitra bot conversations) has its own, higher size cap and an
+    optional `source` field ('mitra' default); story/discussion ignore `source`.
     """
     # Pure request-shape checks
     report_type = validate_report_type(report_type)
     validate_extension(file.filename)
+    if report_type == FEEDBACK_REPORT_TYPE:
+        source = validate_source(source)
 
-    file_bytes = await file.read(settings.MAX_CSV_UPLOAD_BYTES + 1)
-    validate_file_bytes(file_bytes)
+    file_bytes = await file.read(max_upload_bytes(report_type) + 1)
+    validate_file_bytes(file_bytes, report_type)
 
     # Delegate to domain service
     return await upload_service.handle_upload(
@@ -70,6 +79,7 @@ async def upload_report(
         program_name=program_name,
         leader_category=leader_category,
         tenant_code=tenant_code,
+        source=source,
         file_name=file.filename,
         file_bytes=file_bytes,
         background_tasks=background_tasks,
