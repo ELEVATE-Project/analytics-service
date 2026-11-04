@@ -112,11 +112,11 @@ async def retry_step(
                 detail=f"Submission not found with submission_id='{body.submission_id}', session_id='{body.session_id}', and tenant_code='{body.tenant_code}'."
             )
 
-        # Status check
-        if row["status"] != "failed":
+        # Status check: Allow 'failed' and stuck 'processing' submissions to be retried
+        if row["status"] not in ("failed", "processing"):
             raise HTTPException(
                 status_code=400,
-                detail=f"Submission status is '{row['status']}'. Only failed submissions can be retried."
+                detail=f"Submission status is '{row['status']}'. Only failed or stuck processing submissions can be retried."
             )
 
         # Parse process_status

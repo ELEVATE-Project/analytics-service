@@ -1197,7 +1197,10 @@ async def fetch_retryable_failed_submissions(
         SELECT submission_id, session_id, tenant_code, submission_type, status,
                process_status, updated_at
         FROM submissions
-        WHERE status = 'failed'
+        WHERE (
+            status = 'failed'
+            OR status = 'processing'
+          )
           AND ($1::text IS NULL OR tenant_code = $1)
           AND ($3::timestamptz IS NULL OR updated_at < $3)
           AND (
@@ -1232,7 +1235,7 @@ async def fetch_failed_submission_for_retry(
     """
     row = await conn.fetchrow(
         """
-        SELECT submission_id, session_id, tenant_code, submission_type, status, process_status
+        SELECT submission_id, session_id, tenant_code, submission_type, status, process_status, updated_at
         FROM submissions
         WHERE submission_id = $1
           AND session_id    = $2
