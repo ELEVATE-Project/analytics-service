@@ -24,6 +24,9 @@ from app.services.llm import openrouter_chat_completion, split_llm_usage
 
 logger = logging.getLogger("analytics_service.temporal.activities")
 
+# LLM fallback theme limit for discussion challenge statements; everything else stays single-theme.
+MAX_MULTI_THEME_MATCHES = 3
+
 
 def _is_garbage_or_spam(text: str) -> bool:
     """
@@ -146,12 +149,18 @@ def _resolve_theme_id(theme_name: Optional[str], theme_id_to_info: dict) -> Opti
     return None
 
 
+def _is_discussion_challenge(submission_type: Optional[str], statement_type: Optional[str]) -> bool:
+    """True for statements from a discussion's challenges column."""
+    return "discussion" in str(submission_type or "").lower() and "challenge" in str(statement_type or "").lower()
+
+
 def _finalize_qualifying_themes(
-    resolved_items: List[Dict[str, Any]]
+    resolved_items: List[Dict[str, Any]],
+    max_themes: int = 1,
 ) -> List[Dict[str, Any]]:
     """
     Dedupes resolved LLM classification items by theme_id (keeping the highest-confidence
-    instance per theme) and caps to a single theme.
+    instance per theme) and keeps the top max_themes themes.
     """
     best_by_theme: Dict[str, Dict[str, Any]] = {}
     for item in resolved_items:
@@ -168,7 +177,7 @@ def _finalize_qualifying_themes(
             best_by_theme[tid] = item
 
     qualifying = sorted(best_by_theme.values(), key=lambda x: x["confidence_score"], reverse=True)
-    return qualifying[:1]
+    return qualifying[:max_themes]
 
 
 async def _run_local_classification(
@@ -471,7 +480,11 @@ async def _run_batched_llm_fallback(
                 best_item = max(resolved_items, key=lambda x: x["confidence_score"])
                 llm_confidence = best_item["confidence_score"]
                 llm_justification = best_item["justification"]
-                qualifying_llm = _finalize_qualifying_themes(resolved_items)
+                is_discussion_challenge = _is_discussion_challenge(pending.get("submission_type"), statement_type)
+                qualifying_llm = _finalize_qualifying_themes(
+                    resolved_items,
+                    max_themes=MAX_MULTI_THEME_MATCHES if is_discussion_challenge else 1,
+                )
 
             result["confidence_score"] = llm_confidence
             diagnostics["llm_fallback"]["confidence_score"] = llm_confidence
@@ -745,6 +758,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                         all_results.append(finished_result)
                     else:
                         pending_item["statement_id"] = statement_id
+                        pending_item["submission_type"] = stmt.get("submission_type")
                         pending_items.append(pending_item)
 
         # Step 2 — HF Multi-Theme model: batch inference on Discussion Challenge and Solution statements
@@ -860,6 +874,7 @@ async def thematic_classification_activity(params: Dict[str, Any]) -> Dict[str, 
                             all_results.append(finished_result)
                         else:
                             pending_item["statement_id"] = statement_id
+                            pending_item["submission_type"] = stmt.get("submission_type")
                             pending_items.append(pending_item)
                         continue
                     
