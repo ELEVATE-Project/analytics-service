@@ -33,8 +33,8 @@ POST /v1/retry-step           POST /v1/retry-step/all       Temporal Schedule (2
        │                                  ┌───────────────────────────┐
        │                                  │   Keyset Cursor Query     │
        │                                  │ (updated_at, submission)  │
-       │                                  │ WHERE status = 'failed'   │
-       │                                  │   AND retry_attempt < 5   │
+       │                                  │ WHERE status IN            │
+       │                                  │ ('failed','processing')   │
        │                                  └─────────────┬─────────────┘
        │                                                │
        │                                    Chunked in batches of 50
@@ -127,11 +127,11 @@ When a submission fails, `process_status` records the exact audit trail:
 To enable lightning-fast queries during bulk retries without scanning millions of successful rows, the database uses a **partial composite index**:
 
 ```sql
-CREATE INDEX IF NOT EXISTS idx_submissions_failed 
+CREATE INDEX IF NOT EXISTS idx_submissions_retryable 
 ON submissions (updated_at, submission_id) 
-WHERE status = 'failed';
+WHERE status IN ('failed', 'processing');
 ```
-* **Partial (`WHERE status = 'failed'`)**: Indexes only failed rows (typically 1–2% of the table), keeping index size in memory minimal.
+* **Partial (`WHERE status IN ('failed', 'processing')`)**: Indexes only failed and processing rows (typically 1–2% of the table), keeping index size in memory minimal.
 * **Composite `(updated_at, submission_id)`**: Enables keyset pagination where timestamps might be identical across batch inserts.
 
 ---
@@ -181,9 +181,12 @@ When retrying in bulk (via API or cron), traditional `OFFSET` pagination causes 
 Instead, the service uses **Keyset Cursor Pagination**:
 
 ```sql
-SELECT submission_id, session_id, tenant_code, submission_type, process_status, updated_at
+SELECT submission_id, session_id, tenant_code, submission_type, status, process_status, updated_at
 FROM submissions
-WHERE status = 'failed'
+WHERE (
+    status = 'failed'
+    OR (status = 'processing' AND updated_at < now() - make_interval(mins => $7::int))
+  )
   AND ($1::text IS NULL OR tenant_code = $1)
   AND updated_at < $3
   AND ($4::timestamptz IS NULL OR (updated_at, submission_id) > ($4, $5))
@@ -218,10 +221,12 @@ Triggers retry for one failed submission.
 
 #### Validations & Response:
 * **404 Not Found**: If no record matches `(submission_id, tenant_code)`.
-* **409 Conflict**: If `status != 'failed'` (e.g. record is already `'processing'` or `'success'`).
-* **409 Conflict**: If a retry workflow is already currently running (`WorkflowAlreadyStartedError`).
+* **400 Bad Request**: If `status` is `'pending'` or `'success'` ("Only failed or stuck processing submissions can be retried").
 * **400 Bad Request**: If no pipeline steps are configured for the `submission_type`.
-* **200 OK**:
+* **409 Conflict**: If `status == 'processing'` and any workflow (`realtime-*`, `batch-child-*`, or `step-retry-*`) is currently actively `RUNNING` in Temporal.
+* **409 Conflict**: If a retry workflow is already currently running (`WorkflowAlreadyStartedError`).
+* **200 OK (Reconciled)**: If `status == 'processing'` and Temporal reports the workflow is `COMPLETED` (e.g., due to an earlier post-start write delay); PostgreSQL is reconciled to `status = 'success'` without triggering a duplicate workflow.
+* **200 OK (Started)**:
   ```json
   {
     "workflow_id": "step-retry-3281-mitra",
@@ -230,6 +235,8 @@ Triggers retry for one failed submission.
     "message": "Retry workflow started."
   }
   ```
+  *Note on step resumption:* Failed rows resume from the first failed step (skipping previously successful steps). Stuck processing rows whose worker crashed before checkpointing progress will rerun from step 1.
+
 
 ---
 
@@ -320,8 +327,10 @@ The workflow ID is deterministic: `step-retry-{submission_id}-{tenant_code}`. Te
 | File | Responsibilities |
 | :--- | :--- |
 | [`app/temporal/workflows.py`](file:///home/rohan/workspace/shishalokam/newflows/analytics-service-1/app/temporal/workflows.py) | `ConfigDrivenProcessingWorkflow` (step skipping & retry attempt incrementing), `BulkStepRetryWorkflow` (keyset pagination & `continue_as_new`). |
-| [`app/temporal/activities.py`](file:///home/rohan/workspace/shishalokam/newflows/analytics-service-1/app/temporal/activities.py) | `fetch_failed_submissions_activity` (keyset cursor fetching, passing `process_status`), `update_status_activity`. |
+| [`app/temporal/liveness.py`](file:///home/rohan/workspace/shishalokam/newflows/analytics-service-1/app/temporal/liveness.py) | `check_submission_temporal_state`: inspects candidate prefixes (`realtime`, `batch-child`, `step-retry`) for active execution or prior completion. |
+| [`app/temporal/activities.py`](file:///home/rohan/workspace/shishalokam/newflows/analytics-service-1/app/temporal/activities.py) | `fetch_retryable_submissions_activity` (keyset cursor fetching, passing `process_status`), `update_status_activity`. |
 | [`app/temporal/worker.py`](file:///home/rohan/workspace/shishalokam/newflows/analytics-service-1/app/temporal/worker.py) | Registers workflows/activities, handles `daily-failed-submissions-retry` cron schedule with state preservation. |
 | [`app/api/routes/uploads.py`](file:///home/rohan/workspace/shishalokam/newflows/analytics-service-1/app/api/routes/uploads.py) | Endpoints: `POST /v1/retry-step` (single) and `POST /v1/retry-step/all` (bulk sweep). |
-| [`app/database/operations.py`](file:///home/rohan/workspace/shishalokam/newflows/analytics-service-1/app/database/operations.py) | `fetch_retryable_failed_submissions` (SQL with keyset cursor and `retry_attempt < 5` filter). |
-| [`schema.sql`](file:///home/rohan/workspace/shishalokam/newflows/analytics-service-1/schema.sql) | Table schema and partial index `idx_submissions_failed`. |
+| [`app/database/operations.py`](file:///home/rohan/workspace/shishalokam/newflows/analytics-service-1/app/database/operations.py) | `fetch_retryable_submissions` (SQL with keyset cursor, grace period, and `retry_attempt < 5` filter), `claim_submission_for_retry`, `reconcile_completed_submission`. |
+| [`schema.sql`](file:///home/rohan/workspace/shishalokam/newflows/analytics-service-1/schema.sql) | Table schema and partial index `idx_submissions_retryable`. |
+| [`migrations/001_idx_submissions_retryable.sql`](file:///home/rohan/workspace/shishalokam/newflows/analytics-service-1/migrations/001_idx_submissions_retryable.sql) | Non-blocking `CREATE INDEX CONCURRENTLY` migration for deployed databases. |

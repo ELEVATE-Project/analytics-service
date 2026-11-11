@@ -15,7 +15,7 @@ from app.temporal.workflows import (
 from app.temporal.activities import (
     update_status_activity,
     fetch_pending_submissions_activity,
-    fetch_failed_submissions_activity,
+    fetch_retryable_submissions_activity,
 )
 from app.temporal.deface_blur_activity import deface_blur_activity
 from app.temporal.pii_and_abusive_activity import pii_and_abusive_language_detection_activity
@@ -81,7 +81,7 @@ async def start_worker():
         statement_category_activity,
         update_status_activity,
         fetch_pending_submissions_activity,
-        fetch_failed_submissions_activity,
+        fetch_retryable_submissions_activity,
     ]
 
     worker = Worker(
