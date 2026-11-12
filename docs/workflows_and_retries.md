@@ -134,6 +134,12 @@ WHERE status IN ('failed', 'processing');
 * **Partial (`WHERE status IN ('failed', 'processing')`)**: Indexes only failed and processing rows (typically 1–2% of the table), keeping index size in memory minimal.
 * **Composite `(updated_at, submission_id)`**: Enables keyset pagination where timestamps might be identical across batch inserts.
 
+**Upgrade Note (Existing Databases):** Because deployed databases already have the older `idx_submissions_failed` index, run the following non-blocking statements manually during deployment:
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_submissions_retryable ON submissions (updated_at, submission_id) WHERE status IN ('failed', 'processing');
+DROP INDEX CONCURRENTLY IF EXISTS idx_submissions_failed;
+```
+
 ---
 
 ## 4. The Step-Skipping Execution Engine
@@ -333,4 +339,3 @@ The workflow ID is deterministic: `step-retry-{submission_id}-{tenant_code}`. Te
 | [`app/api/routes/uploads.py`](file:///home/rohan/workspace/shishalokam/newflows/analytics-service-1/app/api/routes/uploads.py) | Endpoints: `POST /v1/retry-step` (single) and `POST /v1/retry-step/all` (bulk sweep). |
 | [`app/database/operations.py`](file:///home/rohan/workspace/shishalokam/newflows/analytics-service-1/app/database/operations.py) | `fetch_retryable_submissions` (SQL with keyset cursor, grace period, and `retry_attempt < 5` filter), `claim_submission_for_retry`, `reconcile_completed_submission`. |
 | [`schema.sql`](file:///home/rohan/workspace/shishalokam/newflows/analytics-service-1/schema.sql) | Table schema and partial index `idx_submissions_retryable`. |
-| [`migrations/001_idx_submissions_retryable.sql`](file:///home/rohan/workspace/shishalokam/newflows/analytics-service-1/migrations/001_idx_submissions_retryable.sql) | Non-blocking `CREATE INDEX CONCURRENTLY` migration for deployed databases. |
