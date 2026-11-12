@@ -398,4 +398,25 @@ def test_reconcile_completed_submission():
     asyncio.run(_run())
 
 
+def test_trigger_bulk_retry_activity_calls_dispatch():
+    """trigger_bulk_retry_activity calls _dispatch_all_retry_workflows directly (no HTTP call)."""
+    async def _run():
+        from app.temporal.activities import trigger_bulk_retry_activity
+
+        with patch(
+            "app.api.routes.uploads._dispatch_all_retry_workflows",
+            new_callable=AsyncMock,
+        ) as mock_dispatch:
+            result = await trigger_bulk_retry_activity({"tenant_code": None})
+
+            mock_dispatch.assert_awaited_once()
+            args = mock_dispatch.await_args[0]
+            assert args[0] is None          # tenant_code
+            assert isinstance(args[1], str) # cutoff (ISO timestamp)
+            assert args[2].startswith("bulk-retry-sweep-all-")  # sweep_id
+            assert result["sweep_id"].startswith("bulk-retry-sweep-all-")
+
+    asyncio.run(_run())
+
+
 

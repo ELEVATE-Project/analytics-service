@@ -8,7 +8,8 @@ with workflow.unsafe.imports_passed_through():
     from app.temporal.activities import (
         update_status_activity,
         fetch_pending_submissions_activity,
-        fetch_retryable_submissions_activity
+        fetch_retryable_submissions_activity,
+        trigger_bulk_retry_activity,
     )
     from app.temporal.deface_blur_activity import deface_blur_activity
     from app.temporal.pii_and_abusive_activity import pii_and_abusive_language_detection_activity
@@ -469,6 +470,23 @@ class BulkStepRetryWorkflow:
             "failed_count": total_failed,
             "chunks": chunk_index,
         }
+
+
+@workflow.defn
+class TriggerBulkRetryWorkflow:
+    @workflow.run
+    async def run(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Lightweight scheduled workflow that triggers POST /v1/retry-step/all
+        via trigger_bulk_retry_activity.
+        """
+        params = params or {}
+        return await workflow.execute_activity(
+            trigger_bulk_retry_activity,
+            {"tenant_code": params.get("tenant_code")},
+            start_to_close_timeout=timedelta(minutes=2),
+            retry_policy=RetryPolicy(maximum_attempts=3),
+        )
 
 
 
