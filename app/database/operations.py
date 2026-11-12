@@ -334,7 +334,6 @@ async def insert_or_update_submission(
                     program_id = COALESCE(EXCLUDED.program_id, submissions.program_id),
                     leader_id = COALESCE(EXCLUDED.leader_id, submissions.leader_id),
                     status = EXCLUDED.status,
-                    process_status = NULL,
                     updated_at = now()
                 RETURNING id, status;
                 """,
