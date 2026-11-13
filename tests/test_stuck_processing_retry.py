@@ -11,7 +11,8 @@ from app.temporal.liveness import (
     TemporalLivenessStatus,
 )
 from app.api.models.submissions import StepRetryRequest
-from app.api.routes.uploads import retry_step, _dispatch_all_retry_workflows
+from app.api.routes.uploads import retry_step
+from app.services.retry import dispatch_all_retry_workflows
 from app.database.db import db
 
 
@@ -52,8 +53,8 @@ def test_liveness_detects_running_workflow():
     asyncio.run(_run())
 
 
-def test_liveness_detects_completed_workflow():
-    """If a workflow is COMPLETED and none is RUNNING, return COMPLETED."""
+def test_liveness_treats_completed_workflow_as_retryable():
+    """If a workflow was COMPLETED in the past and none is currently RUNNING, return RETRYABLE."""
     async def _run():
         client = MagicMock()
 
@@ -68,9 +69,9 @@ def test_liveness_detects_completed_workflow():
 
         client.get_workflow_handle.side_effect = get_handle
 
-        status, completed_id = await check_submission_temporal_state(client, "sub123", "mitra")
-        assert status == TemporalLivenessStatus.COMPLETED
-        assert completed_id == "realtime-sub123-mitra"
+        status, active_id = await check_submission_temporal_state(client, "sub123", "mitra")
+        assert status == TemporalLivenessStatus.RETRYABLE
+        assert active_id is None
 
     asyncio.run(_run())
 
@@ -166,47 +167,13 @@ def test_retry_step_returns_409_if_workflow_is_running():
             with patch("app.api.routes.uploads.fetch_retryable_submission_for_retry", new=AsyncMock(return_value=fake_row)):
                 with patch("app.api.routes.uploads.get_temporal_client", new=AsyncMock()):
                     with patch(
-                        "app.api.routes.uploads.check_submission_temporal_state",
+                        "app.services.retry.check_submission_temporal_state",
                         new=AsyncMock(return_value=(TemporalLivenessStatus.RUNNING, "realtime-100-mitra"))
                     ):
                         with pytest.raises(HTTPException) as exc_info:
                             await retry_step(body=req, _token=MagicMock())
                         assert exc_info.value.status_code == 409
                         assert "actively executing in Temporal" in exc_info.value.detail
-        finally:
-            db.pool = None
-
-    asyncio.run(_run())
-
-
-def test_retry_step_reconciles_if_temporal_is_completed():
-    """When status is 'processing' and Temporal is COMPLETED, reconcile DB and return 200 without retrying."""
-    async def _run():
-        fake_row = {
-            "submission_id": "100",
-            "session_id": "sess-100",
-            "tenant_code": "mitra",
-            "submission_type": "story",
-            "status": "processing",
-            "process_status": {},
-        }
-
-        req = StepRetryRequest(submission_id="100", session_id="sess-100", tenant_code="mitra")
-        mock_reconcile = AsyncMock()
-        mock_pool, _ = _mock_db_pool()
-        db.pool = mock_pool
-        try:
-            with patch("app.api.routes.uploads.fetch_retryable_submission_for_retry", new=AsyncMock(return_value=fake_row)):
-                with patch("app.api.routes.uploads.get_temporal_client", new=AsyncMock()):
-                    with patch(
-                        "app.api.routes.uploads.check_submission_temporal_state",
-                        new=AsyncMock(return_value=(TemporalLivenessStatus.COMPLETED, "realtime-100-mitra"))
-                    ):
-                        with patch("app.api.routes.uploads.reconcile_completed_submission", new=mock_reconcile):
-                            res = await retry_step(body=req, _token=MagicMock())
-                            assert res.submission_id == "100"
-                            assert "status reconciled to 'success'" in res.message
-                            mock_reconcile.assert_awaited_once()
         finally:
             db.pool = None
 
@@ -235,10 +202,10 @@ def test_retry_step_claims_and_starts_workflow_for_dead_processing_row():
             with patch("app.api.routes.uploads.fetch_retryable_submission_for_retry", new=AsyncMock(return_value=fake_row)):
                 with patch("app.api.routes.uploads.get_temporal_client", new=AsyncMock(return_value=mock_temporal_client)):
                     with patch(
-                        "app.api.routes.uploads.check_submission_temporal_state",
+                        "app.services.retry.check_submission_temporal_state",
                         new=AsyncMock(return_value=(TemporalLivenessStatus.RETRYABLE, None))
                     ):
-                        with patch("app.api.routes.uploads.claim_submission_for_retry", new=mock_claim):
+                        with patch("app.services.retry.claim_submission_for_retry", new=mock_claim):
                             res = await retry_step(body=req, _token=MagicMock())
                             assert res.workflow_id == "step-retry-100-mitra"
                             assert res.message == "Retry workflow started."
@@ -296,38 +263,29 @@ def test_bulk_sweep_skips_running_and_dispatches_retryable():
         async def mock_liveness(client, sub_id, t_code):
             if sub_id == "101":
                 return TemporalLivenessStatus.RUNNING, "realtime-101-mitra"
-            elif sub_id == "102":
-                return TemporalLivenessStatus.COMPLETED, "realtime-102-mitra"
             return TemporalLivenessStatus.RETRYABLE, None
 
         mock_claim = AsyncMock(return_value={"retry_attempt": 1, "process_status": {"retry_attempt": 1}})
-        mock_reconcile = AsyncMock()
         mock_pool, _ = _mock_db_pool()
         db.pool = mock_pool
 
         try:
-            with patch("app.api.routes.uploads.get_temporal_client", new=AsyncMock(return_value=mock_client)):
-                with patch("app.api.routes.uploads.fetch_retryable_submissions", new=AsyncMock(side_effect=[rows, []])):
-                    with patch("app.api.routes.uploads.check_submission_temporal_state", new=mock_liveness):
-                        with patch("app.api.routes.uploads.claim_submission_for_retry", new=mock_claim):
-                            with patch("app.api.routes.uploads.reconcile_completed_submission", new=mock_reconcile):
-                                await _dispatch_all_retry_workflows(
-                                    tenant_code="mitra",
-                                    cutoff=datetime.now(timezone.utc).isoformat(),
-                                    sweep_id="test-sweep"
-                                )
+            with patch("app.services.retry.get_temporal_client", new=AsyncMock(return_value=mock_client)):
+                with patch("app.services.retry.fetch_retryable_submissions", new=AsyncMock(side_effect=[rows, []])):
+                    with patch("app.services.retry.check_submission_temporal_state", new=mock_liveness):
+                        with patch("app.services.retry.claim_submission_for_retry", new=mock_claim):
+                            await dispatch_all_retry_workflows(
+                                tenant_code="mitra",
+                                cutoff=datetime.now(timezone.utc).isoformat(),
+                                sweep_id="test-sweep"
+                            )
 
-                                # 101 was skipped (RUNNING)
-                                # 102 was reconciled
-                                assert mock_reconcile.await_count == 1
-                                recon_args = mock_reconcile.await_args[0]
-                                assert recon_args[1] == "102"
-                                assert recon_args[2] == "mitra"
-
-                                # Only 103 was dispatched to start_workflow
-                                assert mock_client.start_workflow.await_count == 1
-                                call_args = mock_client.start_workflow.call_args[1]
-                                assert call_args["id"] == "step-retry-103-mitra"
+                            # 101 was skipped (RUNNING)
+                            # 102 and 103 were dispatched to start_workflow
+                            assert mock_client.start_workflow.await_count == 2
+                            dispatched_ids = [call[1]["id"] for call in mock_client.start_workflow.call_args_list]
+                            assert "step-retry-102-mitra" in dispatched_ids
+                            assert "step-retry-103-mitra" in dispatched_ids
         finally:
             db.pool = None
 
@@ -399,24 +357,93 @@ def test_reconcile_completed_submission():
 
 
 def test_trigger_bulk_retry_activity_calls_dispatch():
-    """trigger_bulk_retry_activity calls _dispatch_all_retry_workflows directly (no HTTP call)."""
+    """trigger_bulk_retry_activity calls dispatch_all_retry_workflows with activity.heartbeat."""
     async def _run():
         from app.temporal.activities import trigger_bulk_retry_activity
+        from temporalio import activity
 
+        fake_result = {"sweep_id": "bulk-retry-sweep-all-1234", "started": 1}
         with patch(
-            "app.api.routes.uploads._dispatch_all_retry_workflows",
+            "app.temporal.activities.dispatch_all_retry_workflows",
             new_callable=AsyncMock,
+            return_value=fake_result,
         ) as mock_dispatch:
             result = await trigger_bulk_retry_activity({"tenant_code": None})
 
-            mock_dispatch.assert_awaited_once()
-            args = mock_dispatch.await_args[0]
-            assert args[0] is None          # tenant_code
-            assert isinstance(args[1], str) # cutoff (ISO timestamp)
-            assert args[2].startswith("bulk-retry-sweep-all-")  # sweep_id
-            assert result["sweep_id"].startswith("bulk-retry-sweep-all-")
+            mock_dispatch.assert_awaited_once_with(None, on_page=activity.heartbeat)
+            assert result["sweep_id"] == "bulk-retry-sweep-all-1234"
 
     asyncio.run(_run())
+
+
+def test_trigger_bulk_retry_workflow_configuration():
+    """TriggerBulkRetryWorkflow must use 2h start_to_close, 5m heartbeat, and maximum_attempts=1."""
+    async def _run():
+        from app.temporal.workflows import TriggerBulkRetryWorkflow
+        from datetime import timedelta
+        from temporalio.common import RetryPolicy
+
+        wf = TriggerBulkRetryWorkflow()
+        with patch("temporalio.workflow.execute_activity", new_callable=AsyncMock) as mock_exec:
+            mock_exec.return_value = {"sweep_id": "bulk-123"}
+            await wf.run({"tenant_code": "mitra"})
+
+            mock_exec.assert_awaited_once()
+            _, kwargs = mock_exec.call_args
+            assert kwargs["start_to_close_timeout"] == timedelta(hours=2)
+            assert kwargs["heartbeat_timeout"] == timedelta(minutes=5)
+            assert isinstance(kwargs["retry_policy"], RetryPolicy)
+            assert kwargs["retry_policy"].maximum_attempts == 1
+
+    asyncio.run(_run())
+
+
+def test_dispatch_all_retry_workflows_invokes_on_page_heartbeat():
+    """dispatch_all_retry_workflows invokes on_page callback after each page."""
+    async def _run():
+        from app.services.retry import dispatch_all_retry_workflows
+
+        rows_page_1 = [
+            {
+                "submission_id": "1",
+                "session_id": "s1",
+                "tenant_code": "t1",
+                "submission_type": "story",
+                "status": "failed",
+                "process_status": {},
+                "updated_at": datetime.now(timezone.utc),
+            }
+        ]
+        mock_client = MagicMock()
+        mock_client.start_workflow = AsyncMock()
+        mock_pool, _ = _mock_db_pool()
+        db.pool = mock_pool
+        on_page_mock = MagicMock()
+
+        try:
+            with patch("app.services.retry.get_temporal_client", new=AsyncMock(return_value=mock_client)), \
+                 patch("app.services.retry.fetch_retryable_submissions", new=AsyncMock(side_effect=[rows_page_1, []])), \
+                 patch("app.services.retry.claim_submission_for_retry", new=AsyncMock(return_value={"retry_attempt": 1})), \
+                 patch("app.services.retry.settings") as mock_settings:
+                mock_settings.BATCH_SIZE = 1  # forces loop to fetch next page and trigger break
+                mock_settings.TEMPORAL_QUEUE = "queue"
+                mock_settings.STUCK_PROCESSING_MIN_AGE_MINUTES = 15
+                mock_settings.get_process_config.return_value = ["step1"]
+
+                res = await dispatch_all_retry_workflows(
+                    tenant_code="t1",
+                    on_page=on_page_mock,
+                )
+                assert res["started"] == 1
+                assert on_page_mock.call_count == 1
+                cb_arg = on_page_mock.call_args[0][0]
+                assert cb_arg["page"] == 1
+                assert cb_arg["started"] == 1
+        finally:
+            db.pool = None
+
+    asyncio.run(_run())
+
 
 
 

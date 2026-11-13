@@ -279,20 +279,24 @@ Triggers an asynchronous sweep across failed submissions.
 ### 6.3. Mode 3: Automated Nightly Cron
 Runs scheduled automated recovery during off-peak hours.
 
-* **Workflow**: `BulkStepRetryWorkflow`
+* **Workflow**: `TriggerBulkRetryWorkflow`
 * **Schedule ID**: `daily-failed-submissions-retry`
 * **Configuration**:
   - `ENABLE_RETRY_CRON`: `true` / `false` (default: `false`)
   - `RETRY_CRON_SCHEDULE`: Cron expression (default: `"0 2 * * *"`, every night at 2:00 AM)
 * **Worker Schedule Update**: In [`app/temporal/worker.py`](file:///home/rohan/workspace/shishalokam/newflows/analytics-service-1/app/temporal/worker.py), restarting the worker updates the cron spec while strictly **preserving operator paused/unpaused state**:
   ```python
-  def _apply(inp):
+  def _apply_retry(inp):
       sched = inp.description.schedule
       sched.action = retry_schedule.action
       sched.spec = retry_schedule.spec
       return ScheduleUpdate(schedule=sched)
-  await handle.update(_apply)
+  await handle.update(_apply_retry)
   ```
+* **Resilience & Timeouts**: `TriggerBulkRetryWorkflow` executes `trigger_bulk_retry_activity` with:
+  - `start_to_close_timeout`: `2 hours` (ensures large backlogs can be processed without timing out)
+  - `heartbeat_timeout`: `5 minutes` (heartbeats emitted after each page; allows cancellation if worker fails)
+  - `maximum_attempts`: `1` (prevents overlapping concurrent cron sweeps)
 
 ---
 
