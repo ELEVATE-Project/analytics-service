@@ -18,7 +18,6 @@ from app.database.db import db
 from app.database.operations import (
     claim_submission_for_retry,
     fetch_retryable_submissions,
-    reconcile_completed_submission,
 )
 from app.temporal.client import get_temporal_client
 from app.temporal.liveness import (
@@ -58,7 +57,7 @@ async def retry_single_submission(
     """
     Shared single-submission retry orchestration:
       1. Validate configured process steps for submission_type.
-      2. If status == 'processing', check Temporal liveness (skip if RUNNING, reconcile if COMPLETED).
+      2. If status == 'processing', check Temporal liveness (skip if RUNNING).
       3. Atomically claim retry_attempt in PostgreSQL.
       4. Start ConfigDrivenProcessingWorkflow with deterministic ID 'step-retry-{id}-{tenant}'.
     """
@@ -85,14 +84,6 @@ async def retry_single_submission(
 
         if liveness == TemporalLivenessStatus.RUNNING:
             return RetryOutcome(status="already_running", workflow_id=workflow_id, active_wf=active_wf)
-        if liveness == TemporalLivenessStatus.COMPLETED:
-            async with db.pool.acquire() as conn:
-                await reconcile_completed_submission(conn, sub_id, tenant_code)
-            return RetryOutcome(
-                status="reconciled",
-                workflow_id=active_wf or workflow_id,
-                active_wf=active_wf,
-            )
 
     async with db.pool.acquire() as conn:
         claim_info = await claim_submission_for_retry(conn, sub_id, tenant_code)
@@ -176,9 +167,6 @@ async def dispatch_all_retry_workflows(
             if outcome.status == "already_running":
                 logger.info(f"[{sweep_id}] Skipping submission '{sub_id}' — actively running in Temporal ({outcome.active_wf})")
                 return "skipped"
-            if outcome.status == "reconciled":
-                logger.info(f"[{sweep_id}] Reconciling submission '{sub_id}' — already COMPLETED in Temporal ({outcome.active_wf})")
-                return "reconciled"
             if outcome.status == "no_steps":
                 logger.warning(f"[{sweep_id}] Skipping submission '{sub_id}' — no steps configured for type '{row.get('submission_type')}'")
                 return "skipped"
