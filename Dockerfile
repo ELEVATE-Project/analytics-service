@@ -27,7 +27,7 @@ RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTr
 RUN python -c "import os, deface.centerface as c; assert os.path.exists(c.default_onnx_path)"
 
 COPY app/ app/
-COPY main.py schema.sql seed_prompts.sql seed_themes.sql run_all.sh ./
+COPY main.py schema.sql seed_prompts.sql seed_themes.sql seed_config.sql run_all.sh ./
 RUN chmod +x run_all.sh
 
 RUN mkdir -p logs downloads

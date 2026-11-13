@@ -16,7 +16,7 @@ Flow used by the upload service:
     # look up source_ref of `responses` in feedback_submissions -> known_refs
     events, delta = build_gforms_events(responses, known_refs=known_refs, ..., config=config)
 
-Config shape (`config_version.config` of a Google Forms config; see feedback_constants.gforms_config_v1):
+Config shape (`config_version.config` of a Google Forms config; the `feedback_upload google_forms` blocks of seed_config.sql):
     {"layout": "wide", "timestamp_column": "Timestamp",
      "datetime": {"formats": ["%m/%d/%Y %H:%M:%S"], "fallback_timezone": "Asia/Kolkata"},
      "default_completion": "COMPLETED",
@@ -297,7 +297,7 @@ def prepare_gforms_responses(
     Reshape the wide frame into one response per row.
 
     Returns (responses, skipped, stats):
-    - response = {"source_ref", "timestamp_iso", "submission_date", "language", "answers": [{"question_key",
+    - response = {"form_key", "source_ref", "timestamp_iso", "submission_date", "language", "answers": [{"question_key",
       "text", "answer"}]}; answers follow the form's question order and blank cells are omitted;
     - skipped = [{"submissionId": None, "sessionId": None, "problems": [...], "row": <1-based data row>}]
       for a response with a blank or unparsable Timestamp or with no non-blank answer at all;
@@ -377,6 +377,7 @@ def prepare_gforms_responses(
                 break
 
         responses.append({
+            "form_key": form_key,
             "source_ref": source_ref,
             "timestamp_iso": timestamp_iso,
             "submission_date": _format_utc(parsed),
@@ -413,8 +414,8 @@ def build_gforms_events(
     default language, else None (translation comes later). The question row carries the English text
     in both message and translatedMessage.
 
-    `config` (optional, keyword) supplies default_completion, language.default and the optional
-    `location` block (state / district via aliases, same semantics as the Mitra builder). Without it
+    `config` (optional, keyword) supplies session_type, the forms' questionnaire_version, default_completion,
+    language.default and the optional `location` block (state / district via aliases, same semantics as the Mitra builder). Without it
     the completion is COMPLETED, the default language 'en' and state / district None.
     """
     cfg: Dict[str, Any] = config if config is not None else {}
@@ -422,6 +423,8 @@ def build_gforms_events(
     published = published_at if published_at is not None else _format_utc(datetime.now(timezone.utc))
     completion = cfg.get("default_completion", COMPLETION_COMPLETED)
     default_language = _default_language(cfg)
+    session_type = cfg.get("session_type")
+    forms = cfg.get("forms", {})
 
     events: List[Dict[str, Any]] = []
     already_stored = 0
@@ -434,6 +437,8 @@ def build_gforms_events(
         language = response["language"]
         submitted = response["submission_date"]
         is_default_language = language == default_language
+        # the questionnaire version is a property of the form the response came from
+        questionnaire_version = forms.get(response.get("form_key"), {}).get("questionnaire_version")
 
         messages: List[Dict[str, Any]] = []
         for n, answer in enumerate(response["answers"]):
@@ -477,6 +482,8 @@ def build_gforms_events(
             },
             "data": {
                 "source": SOURCE_GOOGLE_FORMS,
+                "sessionType": session_type,
+                "questionnaireVersion": questionnaire_version,
                 "language": language,
                 "completionStatus": completion,
                 "submissionDate": submitted,

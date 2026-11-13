@@ -8,6 +8,7 @@ from confluent_kafka.admin import AdminClient, NewTopic
 from temporalio.client import Client
 
 from app.config import settings
+from app.database import feedback_operations
 from app.database.db import db
 from app.database.operations import (
     insert_or_update_submission,
@@ -15,10 +16,24 @@ from app.database.operations import (
     update_submission_status,
     is_feedback_type,
 )
-from app.services.ingestion_validation import validate_ingestion_schema
+from app.services.feedback_config_cache import FeedbackConfigCache
+from app.services.feedback_config_validation import validate_ingestion_schema_config, validate_process_steps
+from app.services.feedback_constants import CONFIG_KEY_INGESTION_SCHEMA, CONFIG_KEY_PROCESS_STEPS
+from app.services.ingestion_validation import is_uuid, validate_ingestion_schema
 from app.temporal.workflows import ConfigDrivenProcessingWorkflow
 
 logger = logging.getLogger("analytics_service.kafka.consumer")
+
+# Appended to the DLQ reason when a feedback event cannot be validated because its persona's upload config is missing
+# or invalid: that is an operator error (not a producer bug), the event itself may be fine.
+FEEDBACK_CONFIG_REPLAY_HINT = (
+    "operator error, not a bad event: fix the persona's feedback_upload config (for a config that predates the "
+    "per-bot settings run `python tools/feedback_config.py migrate`), then replay this message from the DLQ"
+)
+
+# How long the consumer trusts a persona's feedback settings (ingestion schema, process steps) before it reads the
+# config again; a new config version is picked up within this time and replaces the cached one.
+FEEDBACK_CONFIG_CACHE_TTL_SECONDS = 60.0
 
 
 def _payload_fingerprint(raw_payload: str) -> str:
@@ -38,6 +53,18 @@ def _extract_identifiers(event: dict) -> dict:
         "tenantCode": event.get("tenantCode"),
         "sessionId": event.get("sessionId"),
     }
+
+
+def _event_text(event: dict, *path: str):
+    """A non-blank string at the nested path of an event, else None."""
+    current = event
+    for segment in path:
+        if not isinstance(current, dict) or segment not in current:
+            return None
+        current = current[segment]
+    if isinstance(current, str) and len(current.strip()) > 0:
+        return current.strip()
+    return None
 
 
 def _format_identifiers(identifiers: dict) -> str:
@@ -61,6 +88,76 @@ class IngestionConsumer:
         self.dlq_producer = None
         self.temporal_client = None
         self.running = False
+        # The persona's ingestion schema / process steps live in its upload config (config tables, not .env):
+        # cached per (tenant, program, session_type, source) so a burst of events does not query per event.
+        self.feedback_config_cache = FeedbackConfigCache(
+            self._load_feedback_runtime_config, ttl_seconds=FEEDBACK_CONFIG_CACHE_TTL_SECONDS
+        )
+
+    async def _load_feedback_runtime_config(self, tenant_code: str, program_id: str, session_type: str, source: str):
+        """Loader of the cache: the active config's validated ingestion_schema + process_steps, or None when the
+        persona has no active config. Raises ValueError for a config that lacks / has invalid settings."""
+        active = await feedback_operations.get_active_feedback_config(
+            program_id, source, tenant_code=tenant_code, session_type=session_type
+        )
+        if active is None:
+            return None
+        config = active["config"]
+        for key in (CONFIG_KEY_INGESTION_SCHEMA, CONFIG_KEY_PROCESS_STEPS):
+            if key not in config:
+                raise ValueError(
+                    f"Feedback config of session_type {session_type!r} ({source}) is missing '{key}' "
+                    "(add it with: python tools/feedback_config.py migrate)"
+                )
+        return {
+            "config_version_id": active["config_version_id"],
+            "ingestion_schema": validate_ingestion_schema_config(config[CONFIG_KEY_INGESTION_SCHEMA]),
+            "process_steps": validate_process_steps(config[CONFIG_KEY_PROCESS_STEPS]),
+        }
+
+    async def _feedback_schema_for_event(self, event: dict, event_type: str):
+        """
+        (schema, problems) for a feedback event: the ingestion schema of the persona the event names
+        (tenantCode, tags.programId, data.sessionType, data.source), from the cached upload config. A create that
+        cannot be tied to an active, valid config is a problem (the caller sends it to the DLQ with identifiers). A
+        delete event carries no persona, so when its config cannot be resolved it falls back to the envelope check
+        (schema None) instead of being dead-lettered.
+        """
+        lookup = {
+            "tenantCode": _event_text(event, "tenantCode"),
+            "tags.programId": _event_text(event, "tags", "programId"),
+            "data.sessionType": _event_text(event, "data", "sessionType"),
+            "data.source": _event_text(event, "data", "source"),
+        }
+        missing = [name for name, value in lookup.items() if value is None]
+        if len(missing) > 0:
+            if event_type == "delete":
+                return None, []
+            return None, [
+                "Cannot select the feedback ingestion schema (it is the persona's upload config): "
+                + ", ".join(f"'{name}' is missing or not a non-empty string" for name in missing)
+            ]
+        if not is_uuid(lookup["tags.programId"]):
+            if event_type == "delete":
+                return None, []
+            return None, [f"'tags.programId' must be a UUID, got {lookup['tags.programId']!r}"]
+        try:
+            runtime = await self.feedback_config_cache.get(
+                lookup["tenantCode"], lookup["tags.programId"], lookup["data.sessionType"], lookup["data.source"]
+            )
+        except ValueError as exc:
+            if event_type == "delete":
+                return None, []
+            return None, [f"Feedback upload config is invalid: {exc} ({FEEDBACK_CONFIG_REPLAY_HINT})"]
+        if runtime is None:
+            if event_type == "delete":
+                return None, []
+            return None, [
+                f"No active {lookup['data.source']} feedback_upload config for session_type "
+                f"{lookup['data.sessionType']!r}, program {lookup['tags.programId']!r}, tenant {lookup['tenantCode']!r} "
+                f"({FEEDBACK_CONFIG_REPLAY_HINT})"
+            ]
+        return runtime["ingestion_schema"], []
 
     async def initialize(self):
         """
@@ -77,11 +174,32 @@ class IngestionConsumer:
     async def _trigger_realtime_workflow(self, submission_id: str, tenant_code: str, submission_type: str):
         """
         Starts a Temporal workflow execution in real-time.
+
+        A feedback submission's steps come from its persona's upload config. When that config is missing or invalid
+        (get_feedback_process_steps raises ValueError, an operator error) the row is already stored, so this logs
+        the problem with the identifiers and marks the submission 'failed' with the reason in its process_status
+        (the bulk retry picks it up once the config is fixed) and returns normally: the message is NOT retried or
+        dead-lettered (retrying cannot succeed and would only produce an identifier-less DLQ entry for a stored
+        row). A database error is never caught here: it propagates, so process_message is retried as before.
         """
         # A feedback submission whose type has no process steps is complete once ingested: mark it
         # 'success' here (batch mode does the same through the workflow) instead of leaving it 'pending'
         # forever. Story/discussion keep their existing behaviour (checked below, after the Temporal client).
-        if is_feedback_type(submission_type) and len(settings.get_process_config(submission_type)) == 0:
+        # The feedback steps come from the persona's upload config (config tables), story/discussion from settings.
+        is_feedback = is_feedback_type(submission_type)
+        feedback_steps = None
+        if is_feedback:
+            async with db.pool.acquire() as conn:
+                try:
+                    feedback_steps = await feedback_operations.get_feedback_process_steps(conn, submission_id, tenant_code)
+                except ValueError as exc:
+                    logger.error(
+                        f"Cannot resolve the process steps of feedback submission {submission_id} (tenant: {tenant_code}); "
+                        f"marking it 'failed' (fix the persona config, then retry it): {exc}"
+                    )
+                    await feedback_operations.mark_submission_config_failed(conn, submission_id, tenant_code, str(exc))
+                    return
+        if is_feedback and len(feedback_steps) == 0:
             async with db.pool.acquire() as conn:
                 await update_submission_status(
                     conn, submission_id, tenant_code, "success",
@@ -98,8 +216,8 @@ class IngestionConsumer:
                 logger.error(f"Failed to connect to Temporal: {e}. Leaving submission {submission_id} as 'pending'.")
                 return
 
-        process_steps = settings.get_process_config(submission_type)
-        if not process_steps:
+        process_steps = feedback_steps if is_feedback else settings.get_process_config(submission_type)
+        if len(process_steps) == 0:
             logger.warning(f"No process steps defined for submission type '{submission_type}'. Skipping orchestration.")
             return
 
@@ -217,7 +335,14 @@ class IngestionConsumer:
         event_type = event_type_raw.lower().strip()
         submission_type = event.get("submissionType")
 
-        problems = validate_ingestion_schema(event, submission_type, event_type)
+        feedback_schema = None
+        schema_problems = []
+        if is_feedback_type(submission_type) and event_type in ("create", "delete"):
+            feedback_schema, schema_problems = await self._feedback_schema_for_event(event, event_type)
+        if len(schema_problems) > 0:
+            problems = schema_problems
+        else:
+            problems = validate_ingestion_schema(event, submission_type, event_type, feedback_schema=feedback_schema)
         if problems:
             reason = f"Failed ingestion validation for submissionType {submission_type!r}, eventType {event_type!r}: {'; '.join(problems)}"
             logger.error(f"{reason}. Identifiers: {_format_identifiers(identifiers)}")

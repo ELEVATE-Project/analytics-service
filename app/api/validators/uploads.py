@@ -19,9 +19,13 @@ def validate_report_type(report_type: str) -> str:
 
 
 def max_upload_bytes(report_type: Optional[str] = None) -> int:
-    """Size cap for a report type: feedback has its own, higher cap; story/discussion keep MAX_CSV_UPLOAD_BYTES."""
+    """Size cap of story/discussion uploads (MAX_CSV_UPLOAD_BYTES). A feedback cap is not a setting: it is the
+    `max_csv_upload_bytes` of the persona's upload config, known once the config is resolved, and is passed to
+    validate_file_bytes as `max_bytes`."""
     if report_type is not None and report_type.lower().strip() == FEEDBACK_REPORT_TYPE:
-        return settings.FEEDBACK_MAX_CSV_UPLOAD_BYTES
+        raise ValueError(
+            "The feedback upload size cap is the 'max_csv_upload_bytes' of the persona's upload config, not a setting"
+        )
     return settings.MAX_CSV_UPLOAD_BYTES
 
 
@@ -40,8 +44,11 @@ def validate_extension(filename: Optional[str]) -> None:
         raise InvalidFileType("Only .csv files are accepted")
 
 
-def validate_file_bytes(file_bytes: bytes, report_type: Optional[str] = None) -> None:
-    if len(file_bytes) > max_upload_bytes(report_type):
+def validate_file_bytes(file_bytes: bytes, report_type: Optional[str] = None, max_bytes: Optional[int] = None) -> None:
+    """413 when the file is over the cap, 400 when empty. `max_bytes` is the resolved cap (required for feedback,
+    where it comes from the persona's config); without it the story/discussion cap applies."""
+    cap = max_bytes if max_bytes is not None else max_upload_bytes(report_type)
+    if len(file_bytes) > cap:
         raise FileTooLarge("Uploaded file is too large")
     if not file_bytes:
         raise EmptyFile("Uploaded file is empty")

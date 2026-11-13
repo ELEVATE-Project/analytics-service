@@ -5,7 +5,8 @@ from pathlib import Path
 import asyncpg
 
 from app.config import settings
-from app.database.seed_feedback import seed_feedback
+from app.database.feedback_config_health import run_startup_checks as check_feedback_config_health
+from app.services.feedback_constants import FEEDBACK_TENANT_CODE
 
 logger = logging.getLogger("analytics_service.db")
 
@@ -13,6 +14,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 SCHEMA_FILE = BASE_DIR / "schema.sql"
 SEED_PROMPTS_FILE = BASE_DIR / "seed_prompts.sql"
 SEED_THEMES_FILE = BASE_DIR / "seed_themes.sql"
+SEED_CONFIG_FILE = BASE_DIR / "seed_config.sql"
 
 class Database:
     def __init__(self):
@@ -103,8 +105,18 @@ class Database:
                 seed_themes_sql = SEED_THEMES_FILE.read_text(encoding="utf-8")
                 await conn.execute(seed_themes_sql)
 
-                # Feedback (Mitra) personas, programs and upload configs; never overwrites existing rows
-                await seed_feedback(conn)
+                # Versioned configs (feedback personas, programs, upload and extraction configs) from
+                # seed_config.sql: idempotent, never overwrites existing rows, a no-op without tenant 'mitra'
+                if await conn.fetchval("SELECT 1 FROM tenant WHERE code = $1", FEEDBACK_TENANT_CODE) is None:
+                    # The tenant is an environment-level row; the seed never creates it.
+                    logger.warning(
+                        f"Config seed skipped: tenant {FEEDBACK_TENANT_CODE!r} does not exist in this database."
+                    )
+                seed_config_sql = SEED_CONFIG_FILE.read_text(encoding="utf-8")
+                await conn.execute(seed_config_sql)
+
+                # Log an ERROR per feedback config that lacks / has invalid settings (never raises)
+                await check_feedback_config_health(conn)
 
                 logger.info("Database schema initialized successfully.")
             finally:

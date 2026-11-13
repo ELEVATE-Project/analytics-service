@@ -21,8 +21,11 @@ from app.database import operations
 from app.database import feedback_operations
 from app.database.db import db
 from app.services.ingestion_validation import validate_ingestion_schema
+from app.services.feedback_config_validation import validate_feedback_config_keys
 from app.services.feedback_constants import (
     COMPLETION_COMPLETED,
+    CONFIG_KEY_INGESTION_SCHEMA,
+    CONFIG_KEY_MAX_CSV_UPLOAD_BYTES,
     FEEDBACK_REPORT_TYPE,
     SOURCE_GOOGLE_FORMS,
     SOURCE_MITRA,
@@ -764,10 +767,11 @@ def _record_meta(record: dict) -> dict:
 
 
 def _distinct_bot_ids(df: pd.DataFrame) -> List[str]:
-    """Distinct non-blank bot_id values of a feedback file (column matched case-insensitively)."""
+    """Distinct non-blank bot_id values of a feedback file (column matched case-insensitively). Informational
+    only: they are recorded on the upload, never matched. A file without the column gives []."""
     bot_col = next((c for c in df.columns if str(c).strip().lower() == "bot_id"), None)
     if bot_col is None:
-        raise InvalidFeedbackFile(["Missing columns: ['bot_id']"])
+        return []
     values = df[bot_col].astype(str).str.strip()
     return sorted(set(values[values != ""]))
 
@@ -779,6 +783,39 @@ def _parse_feedback_file(file_bytes: bytes, source: str) -> pd.DataFrame:
     return feedback_uploads.parse_feedback_csv(file_bytes)
 
 
+async def load_feedback_target(
+    program_name: str,
+    leader_category: str,
+    tenant_code: str,
+    source: str,
+) -> Dict[str, Any]:
+    """
+    Resolves what a feedback upload targets, ONCE per upload: the program + persona (by name and tenant) and the
+    persona's ACTIVE upload config for `source`, whose per-bot settings are validated here (max_csv_upload_bytes,
+    ingestion_schema, process_steps, optional expect_stages: a config that lacks one or has a wrong type is
+    rejected with a clear message, never replaced by a default). Never fabricates a program/leader.
+    Returns {"resolved", "active", "max_csv_upload_bytes"}; raises FeedbackProgramNotFound / InvalidFeedbackFile.
+    """
+    resolved = await feedback_operations.get_program_and_leader(program_name, leader_category, tenant_code)
+    if resolved is None:
+        raise FeedbackProgramNotFound(
+            f"Program {program_name!r} with leader category {leader_category!r} does not exist for tenant {tenant_code!r}."
+        )
+    active = await feedback_operations.get_active_feedback_config(resolved["program"]["id"], source)
+    if active is None:
+        label = "Google Forms" if source == SOURCE_GOOGLE_FORMS else "Mitra"
+        raise InvalidFeedbackFile([f"No {label} upload config is set up for {resolved['leader']['name']}"])
+    try:
+        validate_feedback_config_keys(active["config"])
+    except ValueError as exc:
+        raise InvalidFeedbackFile([f"The {source} upload config of {resolved['leader']['name']} is invalid: {exc}"])
+    return {
+        "resolved": resolved,
+        "active": active,
+        "max_csv_upload_bytes": active["config"][CONFIG_KEY_MAX_CSV_UPLOAD_BYTES],
+    }
+
+
 async def _resolve_feedback_context(
     df: pd.DataFrame,
     program_name: str,
@@ -786,58 +823,47 @@ async def _resolve_feedback_context(
     tenant_code: str,
     source: str,
     check_file: bool,
+    target: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Resolves everything a feedback file needs and runs the file-level checks:
-      program + persona (by name and tenant), the active config and — when check_file — the
-      file check against that config.
-      Mitra: the file's single bot_id picks the config row (program, bot_id) and the file is checked
-        by check_feedback_file.
-      Google Forms: the config row is the persona program's (bot_id NULL) and the file is checked by
+      program + persona (by name and tenant), the active config (load_feedback_target, or the `target` the
+      route already loaded) and — when check_file — the file check against that config.
+      Mitra: the persona's program picks the config row (its session_type) and the file is checked by
+        check_feedback_file: every row must carry that session_type. The bot ids in the file are recorded,
+        never matched (a persona runs several bots over time; one file may hold V1 and V2 sessions).
+      Google Forms: the config row is the persona program's Google Forms config and the file is checked by
         check_gforms_file (the form must match the persona's config).
     Never fabricates a program/leader. Raises FeedbackProgramNotFound / InvalidFeedbackFile.
     """
-    resolved = await feedback_operations.get_program_and_leader(program_name, leader_category, tenant_code)
-    if resolved is None:
-        raise FeedbackProgramNotFound(
-            f"Program {program_name!r} with leader category {leader_category!r} does not exist for tenant {tenant_code!r}."
-        )
+    if target is None:
+        target = await load_feedback_target(program_name, leader_category, tenant_code, source)
+    resolved = target["resolved"]
+    active = target["active"]
 
-    bot_id: Optional[str] = None
+    bot_ids: List[str] = []
     if source == SOURCE_GOOGLE_FORMS:
-        active = await feedback_operations.get_active_feedback_config(resolved["program"]["id"], None, source)
-        if active is None:
-            raise InvalidFeedbackFile([
-                f"No Google Forms upload config is set up for {resolved['leader']['name']}"
-            ])
         if check_file:
             file_errors = await asyncio.to_thread(feedback_gforms.check_gforms_file, df, active["config"])
             if file_errors:
                 raise InvalidFeedbackFile(list(file_errors))
     else:
         bot_ids = _distinct_bot_ids(df)
-        if not bot_ids:
-            raise InvalidFeedbackFile(["bot_id is blank on every row; a feedback file must contain exactly one bot_id"])
-        if len(bot_ids) > 1:
-            raise InvalidFeedbackFile([
-                f"File contains more than one bot_id: {bot_ids}. Upload one persona's bot per file."
-            ])
-        bot_id = bot_ids[0]
-
-        active = await feedback_operations.get_active_feedback_config(resolved["program"]["id"], bot_id, source)
-        if active is None:
-            raise InvalidFeedbackFile([f"bot_id {bot_id} is not configured for {resolved['leader']['name']}"])
 
         if check_file:
-            file_errors = await asyncio.to_thread(feedback_uploads.check_feedback_file, df, active["config"], bot_id)
+            file_errors = await asyncio.to_thread(
+                feedback_uploads.check_feedback_file, df, active["config"], active["session_type"]
+            )
             if file_errors:
                 raise InvalidFeedbackFile(list(file_errors))
 
     return {
         "program_info": resolved["program"],
         "leader_info": resolved["leader"],
-        "bot_id": bot_id,
+        "session_type": active["session_type"],
+        "bot_ids": bot_ids,
         "config": active["config"],
+        "ingestion_schema": active["config"][CONFIG_KEY_INGESTION_SCHEMA],
         "config_id": active["config_id"],
         "config_version_id": active["config_version_id"],
         "config_version": active["version"],
@@ -1002,9 +1028,11 @@ def _classify_mitra_events(
 def _validate_for_publish(
     candidates: List[Tuple[dict, str]],
     record_id: int,
+    ingestion_schema: Dict[str, Any],
 ) -> Tuple[List[Any], List[dict], List[str]]:
     """
-    Schema-validates each (event, kind) with validate_ingestion_schema. Returns (payloads, skipped,
+    Schema-validates each (event, kind) with validate_ingestion_schema against `ingestion_schema`, the persona
+    config's schema loaded once for the upload. Returns (payloads, skipped,
     kinds_published): the Kafka payloads of the valid events, an entry per event that failed (with
     submissionId / sessionId, plus the response's sourceRef for Google Forms) and the kind of each
     published event.
@@ -1013,7 +1041,7 @@ def _validate_for_publish(
     skipped: List[dict] = []
     kinds: List[str] = []
     for event, kind in candidates:
-        problems = validate_ingestion_schema(event, FEEDBACK_REPORT_TYPE, "create")
+        problems = validate_ingestion_schema(event, FEEDBACK_REPORT_TYPE, "create", feedback_schema=ingestion_schema)
         if problems:
             entry = {
                 "submissionId": event.get("submissionId"),
@@ -1071,7 +1099,7 @@ async def _prepare_mitra_payloads(
 
     def _classify_and_validate_sync() -> tuple:
         to_publish, unchanged, conflicts = _classify_mitra_events(events, state)
-        payloads, schema_skipped, kinds = _validate_for_publish(to_publish, record_id)
+        payloads, schema_skipped, kinds = _validate_for_publish(to_publish, record_id, ctx["ingestion_schema"])
         return payloads, conflicts + schema_skipped, kinds, unchanged
 
     try:
@@ -1126,7 +1154,7 @@ async def _prepare_gforms_payloads(
             tenant_code=tenant_code,
             config=ctx["config"],
         )
-        payloads, schema_skipped, kinds = _validate_for_publish([(event, "new") for event in events], record_id)
+        payloads, schema_skipped, kinds = _validate_for_publish([(event, "new") for event in events], record_id, ctx["ingestion_schema"])
         return payloads, schema_skipped, kinds, build_stats
 
     try:
@@ -1303,8 +1331,15 @@ async def handle_upload(
     file_bytes: bytes,
     background_tasks: BackgroundTasks,
     source: str = SOURCE_MITRA,
+    feedback_target: Optional[Dict[str, Any]] = None,
 ) -> dict:
+    """
+    Orchestrates one upload. For feedback, `feedback_target` is what the route already loaded with
+    load_feedback_target (program, persona and config are then resolved once per upload, and the size cap has
+    been applied before this point); without it the target is loaded here.
+    """
     normalized_type = report_type.lower().strip()
+    stage_report: Optional[Dict[str, Any]] = None
     file_size = len(file_bytes)
 
     # Duplicate check
@@ -1335,8 +1370,14 @@ async def handle_upload(
         except ValueError as exc:
             raise InvalidFeedbackFile([f"Failed to parse CSV: {exc}"])
         ctx = await _resolve_feedback_context(
-            df, program_name, leader_category, tenant_code, source, check_file=True,
+            df, program_name, leader_category, tenant_code, source, check_file=True, target=feedback_target,
         )
+        # Optional expect_stages (Mitra): report the stages that are neither expected nor closing keys. Report
+        # only: it never skips or rejects a session (stage names legitimately change between versions).
+        if source == SOURCE_MITRA:
+            stage_report = await asyncio.to_thread(feedback_uploads.report_unexpected_stages, df, ctx["config"])
+            if stage_report is not None:
+                meta_data["stage_report"] = stage_report
         meta_data.update({
             "source": source,
             "persona": ctx["leader_info"]["name"],
@@ -1344,8 +1385,9 @@ async def handle_upload(
             "config_version_id": ctx["config_version_id"],
             "config_version": ctx["config_version"],
         })
-        if ctx["bot_id"] is not None:
-            meta_data["bot_id"] = ctx["bot_id"]
+        meta_data["session_type"] = ctx["session_type"]
+        if len(ctx["bot_ids"]) > 0:
+            meta_data["bot_ids"] = ctx["bot_ids"]
     else:
         # Validate CSV content and structure
         parse_errors = []
@@ -1410,11 +1452,14 @@ async def handle_upload(
         background_tasks.add_task(process_csv_inline, record_id, file_bytes, df)
         logger.info("Scheduled inline CSV processing for upload ID %s", record_id)
 
-    return {
+    response = {
         "message": "Successfully uploaded to cloud",
         "id": record_id,
         "status": "in_progress" if claim_status == "success" else "pending",
     }
+    if stage_report is not None:
+        response["stage_report"] = stage_report
+    return response
 
 
 async def handle_push(record_id: int, background_tasks: BackgroundTasks) -> dict:

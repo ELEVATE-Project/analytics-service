@@ -9,7 +9,12 @@ from pathlib import Path
 import pytest
 
 from app.config import Settings, settings
-from app.services.feedback_constants import COMPLETION_STATUSES, FEEDBACK_SOURCES
+from app.services.feedback_constants import (
+    COMPLETION_STATUSES,
+    DEFAULT_INGESTION_SCHEMA,
+    FEEDBACK_SOURCES,
+)
+from seed_support import mitra_config_v1
 from app.services.ingestion_validation import validate_ingestion_schema
 
 FIXTURE_ROOT = Path(__file__).resolve().parent / "kafka_events"
@@ -24,8 +29,12 @@ def event():
     return _load("create", "create_feedback.json")
 
 
+# The feedback schema is the persona config's `ingestion_schema` (passed in by the caller, no DB read here).
+SCHEMA = mitra_config_v1("Youth")["ingestion_schema"]
+
+
 def _problems(ev, event_type="create"):
-    return validate_ingestion_schema(ev, "feedback", event_type)
+    return validate_ingestion_schema(ev, "feedback", event_type, feedback_schema=SCHEMA)
 
 
 def _msg(ev, index):
@@ -87,7 +96,8 @@ def test_is_follow_up_absent_is_valid(event):
 @pytest.mark.parametrize("path", [
     "submissionId", "sessionId", "tenantCode", "eventType", "eventPublishedAt",
     "tags.programId", "tags.leaderCategoryId",
-    "data.source", "data.language", "data.completionStatus", "data.submissionDate", "data.messages",
+    "data.source", "data.sessionType", "data.questionnaireVersion",
+    "data.language", "data.completionStatus", "data.submissionDate", "data.messages",
 ])
 def test_required_path_missing(event, path):
     parent = event
@@ -266,6 +276,106 @@ def test_all_problems_reported_not_just_first(event):
     assert len(problems) == 5, problems
 
 
+# ------------------------------------------- session type / questionnaire version / bot
+
+SESSION_FIELDS = ["sessionType", "questionnaireVersion"]
+
+
+def test_fixtures_carry_session_type_and_version(event):
+    assert event["data"]["sessionType"] == "Youth_Voice"
+    assert event["data"]["questionnaireVersion"] == "V2"
+    in_progress = _load("create", "create_feedback_in_progress.json")
+    assert in_progress["data"]["sessionType"] == "Parent_Voice"
+    assert in_progress["data"]["questionnaireVersion"] == "V1"
+
+
+@pytest.mark.parametrize("field", SESSION_FIELDS)
+def test_session_fields_missing(event, field):
+    del event["data"][field]
+    assert _problems(event) == [f"'data.{field}' is missing"]
+
+
+@pytest.mark.parametrize("field", SESSION_FIELDS)
+def test_session_fields_null(event, field):
+    event["data"][field] = None
+    assert _problems(event) == [f"'data.{field}' is null"]
+
+
+@pytest.mark.parametrize("field", SESSION_FIELDS)
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_session_fields_empty_or_blank(event, field, blank):
+    event["data"][field] = blank
+    assert _problems(event) == [f"'data.{field}' is empty"]
+
+
+@pytest.mark.parametrize("field", SESSION_FIELDS)
+@pytest.mark.parametrize("bad, type_name", [(2, "int"), (1.5, "float"), (True, "bool"), (["V1"], "list"),
+                                            ({"k": "V1"}, "dict")])
+def test_session_fields_wrong_type(event, field, bad, type_name):
+    event["data"][field] = bad
+    assert _problems(event) == [f"'data.{field}' must be a string, got {type_name}"]
+
+
+def test_both_session_fields_missing_reported_together(event):
+    del event["data"]["sessionType"]
+    del event["data"]["questionnaireVersion"]
+    assert _problems(event) == ["'data.sessionType' is missing", "'data.questionnaireVersion' is missing"]
+
+
+@pytest.mark.parametrize("session_type, version", [
+    ("Youth_Voice", "V1"), ("Parent_Voice", "V2"), ("General_Public_Voice", "V1"), ("Educator_Voice", "V1"),
+])
+def test_any_non_empty_strings_are_accepted(event, session_type, version):
+    # the schema only checks shape; which values are legitimate is the upload config's business
+    event["data"]["sessionType"] = session_type
+    event["data"]["questionnaireVersion"] = version
+    assert _problems(event) == []
+
+
+@pytest.mark.parametrize("field", ["botId", "botName"])
+def test_bot_fields_are_optional(event, field):
+    del event["data"][field]
+    assert _problems(event) == []
+
+
+def test_bot_fields_absent_together(event):
+    del event["data"]["botId"]
+    del event["data"]["botName"]
+    assert _problems(event) == []
+
+
+@pytest.mark.parametrize("field", ["botId", "botName"])
+@pytest.mark.parametrize("ok", [None, "101", "Mitra Youth Test Bot", ""])
+def test_bot_fields_accept_string_or_null(event, field, ok):
+    event["data"][field] = ok
+    assert _problems(event) == []
+
+
+@pytest.mark.parametrize("field", ["botId", "botName"])
+@pytest.mark.parametrize("bad, type_name", [(101, "int"), (True, "bool"), (["a"], "list"), ({}, "dict")])
+def test_bot_fields_wrong_type(event, field, bad, type_name):
+    event["data"][field] = bad
+    assert _problems(event) == [f"'data.{field}' must be a string or null, got {type_name}"]
+
+
+def test_in_progress_fixture_has_null_bot_name_and_passes():
+    ev = _load("create", "create_feedback_in_progress.json")
+    assert ev["data"]["botName"] is None and ev["data"]["botId"] == "102"
+    assert _problems(ev) == []
+
+
+def test_session_fields_checked_for_both_sources(event, gforms):
+    for ev in (event, gforms):
+        ev["data"]["questionnaireVersion"] = 7
+        assert _problems(ev) == ["'data.questionnaireVersion' must be a string, got int"]
+
+
+def test_delete_event_needs_no_session_fields():
+    ev = _load("delete", "delete_feedback.json")
+    assert "data" not in ev
+    assert _problems(ev, "delete") == []
+
+
 # -------------------------------------------------------------- update / types
 
 def test_feedback_update_not_supported(event):
@@ -320,18 +430,33 @@ def test_story_update_still_supported():
 
 # -------------------------------------------------------------------- settings
 
-def test_feedback_kafka_schema_required_fields():
-    schema = settings.get_kafka_ingestion_schema("feedback")
+def test_seeded_ingestion_schema_required_fields():
+    schema = mitra_config_v1("Youth")["ingestion_schema"]
+    assert schema == DEFAULT_INGESTION_SCHEMA
     assert schema["create"]["required"] == [
         "submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt",
         "tags.programId", "tags.leaderCategoryId",
-        "data.source", "data.language", "data.completionStatus", "data.submissionDate", "data.messages",
+        "data.source", "data.sessionType", "data.questionnaireVersion",
+        "data.language", "data.completionStatus", "data.submissionDate", "data.messages",
     ]
+    assert schema["create"]["optional"] == [
+        "tags.state", "tags.district", "tags.programName", "tags.leaderCategoryName", "tags.source",
+        "data.botId", "data.botName",
+    ]
+    assert "data.botId" not in schema["create"]["required"]
+    assert "data.botName" not in schema["create"]["required"]
     assert "tags.state" not in schema["create"]["required"]
     assert "tags.district" not in schema["create"]["required"]
     assert schema["delete"]["required"] == [
         "submissionId", "submissionType", "sessionId", "tenantCode", "eventType", "eventPublishedAt",
     ]
+
+
+def test_seeded_schema_is_a_copy_per_config():
+    first, second = mitra_config_v1("Youth"), mitra_config_v1("Parent")
+    first["ingestion_schema"]["create"]["required"].append("data.extra")
+    assert "data.extra" not in second["ingestion_schema"]["create"]["required"]
+    assert "data.extra" not in DEFAULT_INGESTION_SCHEMA["create"]["required"]
 
 
 def test_story_and_discussion_schemas_unchanged():
@@ -344,8 +469,20 @@ def test_unknown_schema_type_still_raises():
         settings.get_kafka_ingestion_schema("survey")
 
 
-def test_feedback_process_config_is_empty_by_default():
-    assert settings.get_process_config("feedback") == []
+def test_feedback_settings_are_not_in_env_settings():
+    """The three feedback settings moved to the config tables: no Settings field, no env override."""
+    for field in ("FEEDBACK_MAX_CSV_UPLOAD_BYTES", "FEEDBACK_KAFKA_SCHEMA", "PROCESS_CONFIG_FEEDBACK"):
+        assert field not in Settings.model_fields
+    assert Settings.model_fields["MAX_CSV_UPLOAD_BYTES"].default == 10485760  # story / discussion cap untouched
+
+
+@pytest.mark.parametrize("call", [
+    lambda: settings.get_kafka_ingestion_schema("feedback"),
+    lambda: settings.get_process_config("feedback"),
+])
+def test_feedback_settings_lookup_raises_pointing_at_the_config_tables(call):
+    with pytest.raises(ValueError, match="live in the config tables"):
+        call()
 
 
 def test_unknown_process_config_still_empty_and_story_unchanged():
@@ -354,32 +491,26 @@ def test_unknown_process_config_still_empty_and_story_unchanged():
     assert settings.get_process_config("discussion") != []
 
 
-def test_feedback_process_config_env_override(monkeypatch):
-    monkeypatch.setattr(settings, "PROCESS_CONFIG_FEEDBACK", '[{"name": "thematic_classification"}]')
-    assert settings.get_process_config("feedback") == [{"name": "thematic_classification"}]
+def test_feedback_create_without_a_schema_is_a_problem_never_a_default(event):
+    problems = validate_ingestion_schema(event, "feedback", "create")
+    assert len(problems) == 1 and "No feedback ingestion schema was supplied" in problems[0]
 
 
-def test_upload_cap_defaults_and_story_cap_untouched():
-    assert Settings.model_fields["FEEDBACK_MAX_CSV_UPLOAD_BYTES"].default == 104857600
-    assert Settings.model_fields["MAX_CSV_UPLOAD_BYTES"].default == 10485760
-    assert Settings.model_fields["FEEDBACK_MAX_CSV_UPLOAD_BYTES"].default > 43 * 1024 * 1024
+def test_feedback_delete_without_a_schema_checks_the_envelope_only():
+    ev = _load("delete", "delete_feedback.json")
+    assert validate_ingestion_schema(ev, "feedback", "delete") == []
+    del ev["tenantCode"]
+    assert validate_ingestion_schema(ev, "feedback", "delete") == ["'tenantCode' is missing"]
 
 
-def test_upload_cap_env_override(monkeypatch):
-    monkeypatch.setenv("FEEDBACK_MAX_CSV_UPLOAD_BYTES", "209715200")
-    assert Settings().FEEDBACK_MAX_CSV_UPLOAD_BYTES == 209715200
-
-
-def test_feedback_schema_env_override_validated(monkeypatch):
-    monkeypatch.setenv("FEEDBACK_KAFKA_SCHEMA", '{"create": {}}')
-    with pytest.raises(ValueError, match="FEEDBACK_KAFKA_SCHEMA must be a JSON object"):
-        Settings()
-
-
-def test_feedback_process_config_env_validated(monkeypatch):
-    monkeypatch.setenv("PROCESS_CONFIG_FEEDBACK", '{"not": "a list"}')
-    with pytest.raises(ValueError, match="PROCESS_CONFIG_FEEDBACK"):
-        Settings()
+def test_the_validator_uses_the_schema_it_is_given(event):
+    """A persona may require more (or other) paths: the passed schema decides, not a global one."""
+    stricter = copy.deepcopy(SCHEMA)
+    stricter["create"]["required"].append("data.botId")
+    assert validate_ingestion_schema(event, "feedback", "create", feedback_schema=stricter) == []
+    event["data"]["botId"] = None
+    assert validate_ingestion_schema(event, "feedback", "create", feedback_schema=stricter) == ["'data.botId' is null"]
+    assert _problems(event) == []
 
 
 # ---------------------------------------------------------------- Google Forms (Phase 2, slice 2c)
@@ -415,8 +546,9 @@ def test_gforms_source_ref_null_and_empty(gforms):
 
 
 def test_gforms_source_ref_blank_and_wrong_type(gforms):
+    # a whitespace-only string counts as empty since the shared _is_empty treats it so
     gforms["data"]["sourceRef"] = "   "
-    assert _problems(gforms) == ["'data.sourceRef' is blank"]
+    assert _problems(gforms) == ["'data.sourceRef' is empty"]
     gforms["data"]["sourceRef"] = 12345
     assert _problems(gforms) == ["'data.sourceRef' must be a string, got int"]
 
@@ -462,6 +594,30 @@ def test_gforms_all_problems_reported_together(gforms):
     assert any("COMPLETED" in p for p in problems)
     assert any("'sessionId' must equal" in p for p in problems)
     assert any("parentSequence" in p for p in problems)
+
+
+def test_gforms_fixture_carries_session_type_and_form_version(gforms):
+    assert gforms["data"]["sessionType"] == "Youth_Voice"
+    assert gforms["data"]["questionnaireVersion"] == "V1"
+    assert "botId" not in gforms["data"] and "botName" not in gforms["data"]
+
+
+@pytest.mark.parametrize("field", SESSION_FIELDS)
+def test_gforms_session_fields_are_required(gforms, field):
+    del gforms["data"][field]
+    assert _problems(gforms) == [f"'data.{field}' is missing"]
+    gforms["data"][field] = None
+    assert _problems(gforms) == [f"'data.{field}' is null"]
+    gforms["data"][field] = ""
+    assert _problems(gforms) == [f"'data.{field}' is empty"]
+
+
+def test_gforms_bot_fields_are_optional_but_typed(gforms):
+    gforms["data"]["botId"] = None
+    gforms["data"]["botName"] = "x"
+    assert _problems(gforms) == []
+    gforms["data"]["botId"] = 5
+    assert _problems(gforms) == ["'data.botId' must be a string or null, got int"]
 
 
 def test_mitra_source_ref_absent_or_null_is_valid(event):

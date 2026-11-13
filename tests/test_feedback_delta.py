@@ -10,7 +10,7 @@ Tests for the delta check of `feedback` uploads (slice 2d): only what is not sto
 
 In-memory fakes (the same BgHarness as tests/test_feedback_upload_api.py) except the last section: the
 opt-in real-Postgres tests for get_known_source_refs / get_mitra_session_state, which need
-FEEDBACK_TEST_DATABASE_URL pointing at an EMPTY scratch database with schema.sql applied.
+FEEDBACK_TEST_DATABASE_URL pointing at an EMPTY scratch database (the test applies schema.sql itself).
 """
 import asyncio
 import json
@@ -24,7 +24,7 @@ import pytest
 import app.api.services.uploads as uploads_service_module
 import app.database.feedback_operations as feedback_ops
 from app.api.services import feedback_gforms
-from app.services.feedback_constants import PERSONAS
+from seed_support import PERSONAS
 from tests.test_feedback_upload_api import (
     GFORMS_ACTIVE_CONFIG,
     BgHarness,
@@ -34,10 +34,13 @@ from tests.test_feedback_upload_api import (
     _record,
     _row,
     _session,
+    _session_new_shape,
+    ensure_schema,
 )
 
 SESS_A, SESS_B = "a" * 32, "b" * 32
 # _session(): synthesised first question + 4 CSV rows -> 5 stored messages, stored sequences 1..5
+# _session_new_shape(): the opening row (sequence 1) + 4 real rows -> also 5 stored messages, sequences 1..5
 FULL_COUNT, FULL_MAX_SEQ = 5, 5
 
 
@@ -196,7 +199,8 @@ def test_mitra_schema_failed_new_session_is_skipped_not_counted_as_new(monkeypat
     real = uploads_service_module.validate_ingestion_schema
     monkeypatch.setattr(
         uploads_service_module, "validate_ingestion_schema",
-        lambda event, rt, et: ["bad event"] if event["submissionId"] == "1002" else real(event, rt, et))
+        lambda event, rt, et, feedback_schema: (
+            ["bad event"] if event["submissionId"] == "1002" else real(event, rt, et, feedback_schema=feedback_schema)))
     h.run(file_bytes=_csv(_session(SESS_A, "1001") + _session(SESS_B, "1002")))
     _, meta = h.final
     assert meta["rows_pushed"] == 1 and meta["sessions_skipped"] == 1
@@ -211,6 +215,124 @@ def test_mitra_all_sessions_unchanged_after_dlq_failure_still_success(monkeypatc
     h.state.return_value = _stored("1001", SESS_A)
     h.run(file_bytes=_csv(_session(SESS_A, "1001")))
     assert h.final[0] == "success"
+
+
+# --- new-shape sessions (opening row at sequence 1 with blank sender_id / stage / created_at) -----------
+def test_new_shape_event_stats_count_the_opening_row_and_use_csv_sequences(monkeypatch):
+    h = BgHarness(monkeypatch)
+    h.run(file_bytes=_csv(_session_new_shape(SESS_A, "1001") + _session_new_shape(SESS_B, "1002", extra_rows=2)))
+    status, meta = h.final
+    assert status == "success" and (meta["sessions_new"], meta["rows_pushed"]) == (2, 2)
+    plain, longer = _published(h)
+    assert uploads_service_module._session_stats(plain) == (FULL_COUNT, FULL_MAX_SEQ, "COMPLETED")
+    # 5 + 2 pairs: 9 messages, the highest CSV sequence is 9 (no +1 shift, nothing synthesised)
+    assert uploads_service_module._session_stats(longer) == (9, 9, "COMPLETED")
+    assert plain["data"]["messages"][0]["messageAt"] is None  # the opening row is message 1 of the count
+
+
+def test_new_shape_nothing_stored_is_new(monkeypatch):
+    h = BgHarness(monkeypatch)
+    h.run(file_bytes=_csv(_session_new_shape(SESS_A, "1001") + _session_new_shape(SESS_B, "1002")))
+    status, meta = h.final
+    assert status == "success"
+    assert (meta["sessions_new"], meta["sessions_updated"], meta["sessions_unchanged"]) == (2, 0, 0)
+    assert meta["rows_read"] == 10  # 2 sessions x (opening row + 4 rows)
+    h.state.assert_awaited_once_with("mitra", ["1001", "1002"])
+
+
+def test_new_shape_reupload_of_an_unchanged_session_is_unchanged(monkeypatch):
+    h = BgHarness(monkeypatch)
+    # stored as the consumer wrote it from the first upload: opening row counted, max sequence 5
+    h.state.return_value = {**_stored("1001", SESS_A), **_stored("1002", SESS_B)}
+    h.run(file_bytes=_csv(_session_new_shape(SESS_A, "1001") + _session_new_shape(SESS_B, "1002")))
+    status, meta = h.final
+    assert status == "success"
+    assert meta["rows_pushed"] == 0 and meta["sessions_skipped"] == 0
+    assert (meta["sessions_new"], meta["sessions_updated"], meta["sessions_unchanged"]) == (0, 0, 2)
+    h.push.assert_not_called()
+    h.dlq.assert_not_called()
+
+
+def test_new_shape_one_unchanged_one_new_session(monkeypatch):
+    h = BgHarness(monkeypatch)
+    h.state.return_value = _stored("1001", SESS_A)
+    h.run(file_bytes=_csv(_session_new_shape(SESS_A, "1001") + _session_new_shape(SESS_B, "1002")))
+    _, meta = h.final
+    assert (meta["sessions_new"], meta["sessions_updated"], meta["sessions_unchanged"]) == (1, 0, 1)
+    assert [e["submissionId"] for e in _published(h)] == ["1002"]
+
+
+def test_new_shape_session_that_gained_messages_is_updated_and_published_in_full(monkeypatch):
+    h = BgHarness(monkeypatch)
+    # stored while the chat was running: the opening row + 2 real messages (3 messages, max sequence 3)
+    h.state.return_value = _stored("1001", SESS_A, count=3, max_seq=3, status="IN_PROGRESS")
+    h.run(file_bytes=_csv(_session_new_shape(SESS_A, "1001")))
+    status, meta = h.final
+    assert status == "success"
+    assert (meta["sessions_new"], meta["sessions_updated"], meta["sessions_unchanged"]) == (0, 1, 0)
+    (event,) = _published(h)
+    messages = event["data"]["messages"]
+    assert [m["sequence"] for m in messages] == [1, 2, 3, 4, 5]  # the opening row and everything after it
+    assert messages[0]["messageAt"] is None and messages[0]["parentSequence"] is None
+    sequences = {m["sequence"] for m in messages}
+    assert all(m["parentSequence"] in sequences for m in messages if m["parentSequence"] is not None)
+    assert event["data"]["completionStatus"] == "COMPLETED"
+
+
+def test_new_shape_session_that_grew_after_it_was_complete_is_updated(monkeypatch):
+    h = BgHarness(monkeypatch)
+    h.state.return_value = _stored("1001", SESS_A)  # 5 messages stored
+    h.run(file_bytes=_csv(_session_new_shape(SESS_A, "1001", extra_rows=1)))  # the file has 7
+    _, meta = h.final
+    assert (meta["sessions_new"], meta["sessions_updated"], meta["sessions_unchanged"]) == (0, 1, 0)
+    (event,) = _published(h)
+    assert len(event["data"]["messages"]) == 7
+
+
+def test_new_shape_status_flip_publishes_and_stale_shorter_file_is_unchanged(monkeypatch):
+    h = BgHarness(monkeypatch)
+    h.state.return_value = _stored("1001", SESS_A, status="IN_PROGRESS")
+    h.run(file_bytes=_csv(_session_new_shape(SESS_A, "1001", status="COMPLETED")))
+    assert h.final[1]["sessions_updated"] == 1 and len(_published(h)) == 1
+
+    # an older, shorter export of a session whose longer state is stored: nothing to add
+    h2 = BgHarness(monkeypatch)
+    h2.state.return_value = _stored("1001", SESS_A, count=7, max_seq=7, status="COMPLETED")
+    h2.run(file_bytes=_csv(_session_new_shape(SESS_A, "1001", status="IN_PROGRESS")))
+    _, meta = h2.final
+    assert (meta["sessions_new"], meta["sessions_updated"], meta["sessions_unchanged"]) == (0, 0, 1)
+    h2.push.assert_not_called()
+
+
+def test_new_shape_session_id_conflict_is_a_session_error(monkeypatch):
+    h = BgHarness(monkeypatch)
+    h.state.return_value = _stored("1001", "f" * 32)
+    h.run(file_bytes=_csv(_session_new_shape(SESS_A, "1001") + _session_new_shape(SESS_B, "1002")))
+    _, meta = h.final
+    assert meta["rows_pushed"] == 1 and meta["sessions_skipped"] == 1
+    (entry,) = meta["schema_validation_errors"]
+    assert entry["submissionId"] == "1001" and "different session_id" in entry["problems"][0]
+
+
+def test_new_shape_session_of_only_the_opening_row_is_skipped_and_not_looked_up(monkeypatch):
+    h = BgHarness(monkeypatch)
+    only_opening = _session_new_shape("c" * 32, "1003")[:1]
+    h.run(file_bytes=_csv(_session_new_shape(SESS_A, "1001") + only_opening))
+    status, meta = h.final
+    assert status == "success"
+    h.state.assert_awaited_once_with("mitra", ["1001"])  # the opening-row-only session never reaches the lookup
+    assert meta["rows_pushed"] == 1 and meta["sessions_skipped"] == 1 and meta["sessions_new"] == 1
+    (entry,) = meta["schema_validation_errors"]
+    assert entry["problems"] == ["the session has only the opening row (no real message)"]
+
+
+def test_old_and_new_shape_sessions_of_one_upload_are_classified_side_by_side(monkeypatch):
+    h = BgHarness(monkeypatch)
+    h.state.return_value = {**_stored("1001", SESS_A), **_stored("1002", SESS_B, count=3, max_seq=3)}
+    h.run(file_bytes=_csv(_session(SESS_A, "1001") + _session_new_shape(SESS_B, "1002")))
+    _, meta = h.final
+    assert (meta["sessions_new"], meta["sessions_updated"], meta["sessions_unchanged"]) == (0, 1, 1)
+    assert [e["submissionId"] for e in _published(h)] == ["1002"]
 
 
 def test_classify_mitra_events_pure_function():
@@ -260,7 +382,7 @@ def test_gforms_all_new_responses_published_with_report(monkeypatch):
     assert meta["config_version_id"] == GFORMS_ACTIVE_CONFIG["config_version_id"]
     assert "sessions_new" not in meta  # the Mitra report keys are not used for Google Forms
 
-    h.config.assert_awaited_once_with(PERSONAS["Youth"]["program_id"], None, "google_forms")
+    h.config.assert_awaited_once_with(PERSONAS["Youth"]["program_id"], "google_forms")
     h.state.assert_not_called()
     (call,) = h.refs.await_args_list
     assert call.args[0] == "mitra" and sorted(call.args[1]) == sorted(_refs_of(file_bytes))
@@ -273,6 +395,7 @@ def test_gforms_all_new_responses_published_with_report(monkeypatch):
         assert event["submissionId"] == event["sessionId"]
         uuid.UUID(event["submissionId"])
         refs.add(event["data"]["sourceRef"])
+        assert event["data"]["sessionType"] == "Youth_Voice" and event["data"]["questionnaireVersion"] == "V1"
     assert refs == set(_refs_of(file_bytes))
     assert len({e["submissionId"] for e in events}) == 3  # a fresh id per response
     h.dlq.assert_not_called()
@@ -360,9 +483,10 @@ def test_gforms_schema_failed_event_is_skipped_dead_lettered_with_source_ref(mon
     refs = _refs_of(file_bytes)
     real = uploads_service_module.validate_ingestion_schema
 
-    def fail_first(event, report_type, event_type):
+    def fail_first(event, report_type, event_type, feedback_schema):
         assert (report_type, event_type) == ("feedback", "create")
-        return ["bad event"] if event["data"]["sourceRef"] == refs[0] else real(event, report_type, event_type)
+        return (["bad event"] if event["data"]["sourceRef"] == refs[0]
+                else real(event, report_type, event_type, feedback_schema=feedback_schema))
 
     monkeypatch.setattr(uploads_service_module, "validate_ingestion_schema", fail_first)
     h.run(file_bytes=file_bytes)
@@ -492,8 +616,9 @@ def test_real_db_known_source_refs_and_mitra_session_state(monkeypatch):
             "INSERT INTO submissions (session_id, submission_id, tenant_code, submission_type, status) "
             "VALUES ($1, $2, $3, 'feedback', 'success')", sess, sub, tenant)
         await conn.execute(
-            "INSERT INTO feedback_submissions (submission_id, tenant_code, source, completion_status, source_ref) "
-            "VALUES ($1, $2, $3, $4, $5)", sub, tenant, source, status, source_ref)
+            "INSERT INTO feedback_submissions (submission_id, tenant_code, source, session_type, questionnaire_version, "
+            "completion_status, source_ref) VALUES ($1, $2, $3, 'Youth_Voice', 'V1', $4, $5)",
+            sub, tenant, source, status, source_ref)
         for seq in sequences:
             await conn.execute(
                 "INSERT INTO feedbacks (submission_id, tenant_code, session_id, source, sequence, message) "
@@ -505,6 +630,7 @@ def test_real_db_known_source_refs_and_mitra_session_state(monkeypatch):
         created = []
         try:
             async with pool.acquire() as conn:
+                await ensure_schema(conn)
                 await conn.execute(
                     "INSERT INTO tenant(name, code) VALUES ('Mitra', 'mitra'), ('Other', 'other') ON CONFLICT DO NOTHING")
                 # Mitra sessions: 7001 complete with 5 rows, 7002 in progress with 3 rows, 7003 stored without rows

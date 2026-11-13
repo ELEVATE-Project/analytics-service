@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import uuid
 import logging
@@ -26,9 +27,11 @@ from app.api.services import uploads as upload_service
 from app.config import settings
 from app.services.feedback_constants import FEEDBACK_REPORT_TYPE
 from app.database.db import db
+from app.database.feedback_operations import get_process_steps
 from app.database.operations import (
     fetch_failed_submission_for_retry,
     fetch_retryable_failed_submissions,
+    is_feedback_type,
 )
 from app.temporal.client import get_temporal_client
 from app.temporal.workflows import ConfigDrivenProcessingWorkflow
@@ -43,7 +46,7 @@ uploads_router = APIRouter(prefix="/v1")
 # CSV Pipeline Endpoints
 # ==========================================
 
-@uploads_router.post("/upload/", response_model=UploadResponse, tags=["CSV Pipeline"])
+@uploads_router.post("/upload/", response_model=UploadResponse, response_model_exclude_none=True, tags=["CSV Pipeline"])
 async def upload_report(
     background_tasks: BackgroundTasks,
     report_type: str = Form(...),
@@ -61,19 +64,26 @@ async def upload_report(
     status='pending'. Processing (column validation, Kafka publishing)
     runs in the background.
 
-    report_type='feedback' has its own, higher size cap and an optional `source` field:
-    'mitra' (default; the raw bot conversation CSV, one file per persona) or 'google_forms'
-    (the original wide Google Forms CSV, reshaped by the service; only responses not already
+    report_type='feedback' takes its size cap from the persona's upload config (`max_csv_upload_bytes`) and
+    has an optional `source` field: 'mitra' (default; the raw bot conversation CSV, one file per persona) or
+    'google_forms' (the original wide Google Forms CSV, reshaped by the service; only responses not already
     stored are processed). story/discussion ignore `source`.
     """
     # Pure request-shape checks
     report_type = validate_report_type(report_type)
     validate_extension(file.filename)
+    feedback_target = None
     if report_type == FEEDBACK_REPORT_TYPE:
         source = validate_source(source)
+        # The cap is part of the persona's config: resolve it first (once; handle_upload reuses it), so the
+        # size check happens before the file is stored and the read stays bounded.
+        feedback_target = await upload_service.load_feedback_target(program_name, leader_category, tenant_code, source)
+        cap = feedback_target["max_csv_upload_bytes"]
+    else:
+        cap = max_upload_bytes(report_type)
 
-    file_bytes = await file.read(max_upload_bytes(report_type) + 1)
-    validate_file_bytes(file_bytes, report_type)
+    file_bytes = await file.read(cap + 1)
+    validate_file_bytes(file_bytes, report_type, cap)
 
     # Delegate to domain service
     return await upload_service.handle_upload(
@@ -85,6 +95,7 @@ async def upload_report(
         file_name=file.filename,
         file_bytes=file_bytes,
         background_tasks=background_tasks,
+        feedback_target=feedback_target,
     )
 
 
@@ -140,7 +151,15 @@ async def retry_step(
                 process_status = {}
 
         sub_type = row["submission_type"]
-        process_steps = settings.get_process_config(sub_type)
+        try:
+            # feedback: the steps of its persona's upload config (config tables); story/discussion: settings
+            process_steps = await get_process_steps(conn, sub_type, row["submission_id"], body.tenant_code)
+        except ValueError as exc:
+            # A server-side configuration problem (the persona's upload config), not a malformed request: 409.
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot resolve the process steps of submission '{body.submission_id}': {exc}",
+            )
         existing_steps = (process_status or {}).get("steps", [])
 
         submission_id = row["submission_id"]
@@ -148,7 +167,7 @@ async def retry_step(
 
     # DB connection released — now build payload and dispatch to Temporal
 
-    if not process_steps:
+    if len(process_steps) == 0:
         raise HTTPException(
             status_code=400,
             detail=f"No process steps configured for submission type '{sub_type}'. Cannot retry."
@@ -208,6 +227,7 @@ async def _dispatch_all_retry_workflows(
     page = 0
     cursor_updated_at = None
     cursor_submission_id = None
+    persona_memo: dict = {}  # persona lookup of feedback rows, remembered for the whole sweep
 
     while True:
         async with db.pool.acquire() as conn:
@@ -229,38 +249,49 @@ async def _dispatch_all_retry_workflows(
 
         page += 1
         tasks = []
-        for row in rows:
-            process_status = row.get("process_status") or {}
-            if isinstance(process_status, str):
+        steps_conn = None  # one connection per page, acquired only when a feedback row needs the config tables
+        async with contextlib.AsyncExitStack() as page_resources:
+            for row in rows:
+                process_status = row.get("process_status") or {}
+                if isinstance(process_status, str):
+                    try:
+                        process_status = json.loads(process_status)
+                    except Exception:
+                        process_status = {}
+
+                sub_type = row["submission_type"]
                 try:
-                    process_status = json.loads(process_status)
-                except Exception:
-                    process_status = {}
+                    if is_feedback_type(sub_type) and steps_conn is None:
+                        steps_conn = await page_resources.enter_async_context(db.pool.acquire())
+                    process_steps = await get_process_steps(
+                        steps_conn, sub_type, row["submission_id"], row["tenant_code"], persona_memo
+                    )
+                except ValueError as exc:
+                    logger.warning(f"[{sweep_id}] Skipping submission '{row['submission_id']}' — cannot resolve its process steps: {exc}")
+                    continue
 
-            sub_type = row["submission_type"]
-            process_steps = settings.get_process_config(sub_type)
+                if len(process_steps) == 0:
+                    logger.warning(f"[{sweep_id}] Skipping submission '{row['submission_id']}' — no steps configured for type '{sub_type}'")
+                    continue
 
-            if not process_steps:
-                logger.warning(f"[{sweep_id}] Skipping submission '{row['submission_id']}' — no steps configured for type '{sub_type}'")
-                continue
-
-            tasks.append(
-                client.start_workflow(
-                    ConfigDrivenProcessingWorkflow.run,
-                    {
-                        "submission_id": row["submission_id"],
-                        "session_id": row.get("session_id"),
-                        "tenant_code": row["tenant_code"],
-                        "submission_type": sub_type,
-                        "process_steps": process_steps,
-                        "existing_steps": (process_status or {}).get("steps", []),
-                        "process_status": process_status,
-                    },
-                    # Stable ID: prevents duplicate retries if called twice
-                    id=f"step-retry-{row['submission_id']}-{row['tenant_code']}",
-                    task_queue=settings.TEMPORAL_QUEUE,
+                tasks.append(
+                    client.start_workflow(
+                        ConfigDrivenProcessingWorkflow.run,
+                        {
+                            "submission_id": row["submission_id"],
+                            "session_id": row.get("session_id"),
+                            "tenant_code": row["tenant_code"],
+                            "submission_type": sub_type,
+                            "process_steps": process_steps,
+                            "existing_steps": (process_status or {}).get("steps", []),
+                            "process_status": process_status,
+                        },
+                        # Stable ID: prevents duplicate retries if called twice
+                        id=f"step-retry-{row['submission_id']}-{row['tenant_code']}",
+                        task_queue=settings.TEMPORAL_QUEUE,
+                    )
                 )
-            )
+
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
         page_success = sum(1 for r in results if not isinstance(r, Exception))

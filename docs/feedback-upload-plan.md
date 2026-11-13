@@ -1,5 +1,7 @@
 # Feedback uploads (Mitra + Google Forms): plan
 
+> **Update 2026-11-13:** `FEEDBACK_KAFKA_SCHEMA`, `PROCESS_CONFIG_FEEDBACK` and `FEEDBACK_MAX_CSV_UPLOAD_BYTES` named below no longer exist in `.env`; they are the keys `ingestion_schema`, `process_steps` and `max_csv_upload_bytes` of each persona's `feedback_upload` config version (see `tools/feedback_config.py`).
+
 Status: **proposed, not implemented.** Decisions below were agreed in discussion; open items are listed at the end.
 
 ## Context
