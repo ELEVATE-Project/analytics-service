@@ -8,7 +8,8 @@ with workflow.unsafe.imports_passed_through():
     from app.temporal.activities import (
         update_status_activity,
         fetch_pending_submissions_activity,
-        fetch_failed_submissions_activity
+        fetch_retryable_submissions_activity,
+        trigger_bulk_retry_activity,
     )
     from app.temporal.deface_blur_activity import deface_blur_activity
     from app.temporal.pii_and_abusive_activity import pii_and_abusive_language_detection_activity
@@ -234,9 +235,9 @@ class ConfigDrivenProcessingWorkflow:
             # Find the name of the first failed step for diagnostic tracking
             failed_step_name = next((s["name"] for s in steps_execution if s.get("status") == "failed"), None)
 
-            # Carry forward the retry_attempt counter from the existing process_status
+            # Carry forward the retry_attempt counter from process_status (already claimed upon dispatch)
             prior_process_status = payload.get("process_status") or {}
-            retry_attempt = (prior_process_status.get("retry_attempt") or 0) + 1
+            retry_attempt = prior_process_status.get("retry_attempt") or 1
 
             # Update status to 'failed' with error details
             await workflow.execute_activity(
@@ -397,7 +398,7 @@ class BulkStepRetryWorkflow:
 
         while True:
             failed_list: List[Dict[str, Any]] = await workflow.execute_activity(
-                fetch_failed_submissions_activity,
+                fetch_retryable_submissions_activity,
                 {
                     "tenant_code": tenant_code,
                     "limit": batch_size,
@@ -469,6 +470,24 @@ class BulkStepRetryWorkflow:
             "failed_count": total_failed,
             "chunks": chunk_index,
         }
+
+
+@workflow.defn
+class TriggerBulkRetryWorkflow:
+    @workflow.run
+    async def run(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """
+        Lightweight scheduled workflow that runs the bulk retry sweep
+        via trigger_bulk_retry_activity.
+        """
+        params = params or {}
+        return await workflow.execute_activity(
+            trigger_bulk_retry_activity,
+            {"tenant_code": params.get("tenant_code")},
+            start_to_close_timeout=timedelta(hours=2),
+            heartbeat_timeout=timedelta(minutes=5),
+            retry_policy=RetryPolicy(maximum_attempts=1),
+        )
 
 
 
