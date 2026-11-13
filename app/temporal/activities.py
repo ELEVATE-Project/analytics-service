@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -7,6 +8,7 @@ from temporalio import activity
 from app.config import settings
 from app.database.db import db
 from app.database.operations import insert_llm_log, get_submission_type_and_payload
+from app.services.retry import dispatch_all_retry_workflows
 
 logger = logging.getLogger("analytics_service.temporal.activities")
 
@@ -67,9 +69,9 @@ async def fetch_pending_submissions_activity(params: Optional[Dict[str, Any]] = 
 
 
 @activity.defn
-async def fetch_failed_submissions_activity(params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+async def fetch_retryable_submissions_activity(params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """
-    Retrieves failed submissions for bulk retry.
+    Retrieves retryable submissions (failed or stuck processing) for bulk retry.
     """
     params = params or {}
     tenant_code = params.get("tenant_code")  # None = all tenants
@@ -80,8 +82,8 @@ async def fetch_failed_submissions_activity(params: Optional[Dict[str, Any]] = N
     max_retry_attempts = params.get("max_retry_attempts", 5)
 
     async with db.pool.acquire() as conn:
-        from app.database.operations import fetch_retryable_failed_submissions
-        rows = await fetch_retryable_failed_submissions(
+        from app.database.operations import fetch_retryable_submissions
+        rows = await fetch_retryable_submissions(
             conn,
             tenant_code,
             limit,
@@ -89,6 +91,7 @@ async def fetch_failed_submissions_activity(params: Optional[Dict[str, Any]] = N
             cursor_updated_at=cursor_updated_at,
             cursor_submission_id=cursor_submission_id,
             max_retry_attempts=max_retry_attempts,
+            stuck_processing_min_age_minutes=settings.STUCK_PROCESSING_MIN_AGE_MINUTES,
         )
 
         results = []
@@ -115,6 +118,22 @@ async def fetch_failed_submissions_activity(params: Optional[Dict[str, Any]] = N
                 "updated_at": row["updated_at"].isoformat() if row.get("updated_at") else None,
             })
         return results
+
+
+@activity.defn
+async def trigger_bulk_retry_activity(params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Called by the Temporal cron schedule (TriggerBulkRetryWorkflow) to run the same
+    bulk retry sweep as POST /v1/retry-step/all — liveness check, reconciliation,
+    claim, and client.start_workflow — all inside this activity (no HTTP call needed).
+    """
+    params = params or {}
+    tenant_code = params.get("tenant_code")
+    result = await dispatch_all_retry_workflows(tenant_code, on_page=activity.heartbeat)
+    logger.info("Cron bulk retry sweep complete: sweep_id=%s", result.get("sweep_id"))
+    return result
+
+
 
 
 
