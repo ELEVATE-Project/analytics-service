@@ -1198,6 +1198,7 @@ async def fetch_retryable_submissions(
         stuck_processing_min_age_minutes = settings.STUCK_PROCESSING_MIN_AGE_MINUTES
 
     cutoff_dt = datetime.fromisoformat(failed_before) if isinstance(failed_before, str) else failed_before
+    cursor_dt = datetime.fromisoformat(cursor_updated_at) if isinstance(cursor_updated_at, str) else cursor_updated_at
     rows = await conn.fetch(
         """
         SELECT submission_id, session_id, tenant_code, submission_type, status,
@@ -1220,7 +1221,7 @@ async def fetch_retryable_submissions(
         tenant_code,
         limit,
         cutoff_dt,
-        cursor_updated_at,
+        cursor_dt,
         cursor_submission_id,
         max_retry_attempts,
         stuck_processing_min_age_minutes,

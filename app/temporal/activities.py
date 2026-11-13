@@ -8,6 +8,7 @@ from temporalio import activity
 from app.config import settings
 from app.database.db import db
 from app.database.operations import insert_llm_log, get_submission_type_and_payload
+from app.services.retry import dispatch_all_retry_workflows
 
 logger = logging.getLogger("analytics_service.temporal.activities")
 
@@ -126,20 +127,11 @@ async def trigger_bulk_retry_activity(params: Optional[Dict[str, Any]] = None) -
     bulk retry sweep as POST /v1/retry-step/all — liveness check, reconciliation,
     claim, and client.start_workflow — all inside this activity (no HTTP call needed).
     """
-    import uuid
-    from datetime import datetime, timezone
-    # Lazy import breaks circular: workflows → activities → uploads → workflows
-    from app.api.routes.uploads import _dispatch_all_retry_workflows
-
     params = params or {}
     tenant_code = params.get("tenant_code")
-    cutoff = datetime.now(timezone.utc).isoformat()
-    tenant_label = tenant_code if tenant_code is not None else "all"
-    sweep_id = f"bulk-retry-sweep-{tenant_label}-{uuid.uuid4().hex[:8]}"
-
-    await _dispatch_all_retry_workflows(tenant_code, cutoff, sweep_id)
-    logger.info("Cron bulk retry sweep complete: sweep_id=%s", sweep_id)
-    return {"sweep_id": sweep_id}
+    result = await dispatch_all_retry_workflows(tenant_code, on_page=activity.heartbeat)
+    logger.info("Cron bulk retry sweep complete: sweep_id=%s", result.get("sweep_id"))
+    return result
 
 
 

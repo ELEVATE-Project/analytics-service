@@ -477,15 +477,16 @@ class TriggerBulkRetryWorkflow:
     @workflow.run
     async def run(self, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        Lightweight scheduled workflow that triggers POST /v1/retry-step/all
+        Lightweight scheduled workflow that runs the bulk retry sweep
         via trigger_bulk_retry_activity.
         """
         params = params or {}
         return await workflow.execute_activity(
             trigger_bulk_retry_activity,
             {"tenant_code": params.get("tenant_code")},
-            start_to_close_timeout=timedelta(minutes=2),
-            retry_policy=RetryPolicy(maximum_attempts=3),
+            start_to_close_timeout=timedelta(hours=2),
+            heartbeat_timeout=timedelta(minutes=5),
+            retry_policy=RetryPolicy(maximum_attempts=1),
         )
 
 
