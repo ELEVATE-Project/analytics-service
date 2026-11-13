@@ -1,9 +1,11 @@
 import uuid
+from typing import Optional
 
 from app.config import settings
 from app.services.feedback_constants import (
     COMPLETION_COMPLETED,
     COMPLETION_STATUSES,
+    DEFAULT_INGESTION_SCHEMA,
     FEEDBACK_REPORT_TYPE,
     FEEDBACK_SOURCES,
     SOURCE_GOOGLE_FORMS,
@@ -118,7 +120,7 @@ def _validate_feedback_messages(messages) -> list:
     return problems
 
 
-def _is_uuid(value) -> bool:
+def is_uuid(value) -> bool:
     """True for a string that parses as a UUID."""
     if not isinstance(value, str):
         return False
@@ -143,16 +145,14 @@ def _validate_feedback_source_rules(event: dict, source, completion) -> list:
             problems.append(f"'data.sourceRef' is {_emptiness_label(source_ref)}")
         elif not isinstance(source_ref, str):
             problems.append(f"'data.sourceRef' must be a string, got {type(source_ref).__name__}")
-        elif len(source_ref.strip()) == 0:
-            problems.append("'data.sourceRef' is blank")
 
         submission_id = event.get("submissionId")
         session_id = event.get("sessionId")
-        if "submissionId" in event and not _is_empty(submission_id) and not _is_uuid(submission_id):
+        if "submissionId" in event and not _is_empty(submission_id) and not is_uuid(submission_id):
             problems.append(f"'submissionId' must be a UUID for source {SOURCE_GOOGLE_FORMS}, got {submission_id!r}")
-        if "sessionId" in event and not _is_empty(session_id) and not _is_uuid(session_id):
+        if "sessionId" in event and not _is_empty(session_id) and not is_uuid(session_id):
             problems.append(f"'sessionId' must be a UUID for source {SOURCE_GOOGLE_FORMS}, got {session_id!r}")
-        if (_is_uuid(submission_id) and _is_uuid(session_id)) and submission_id != session_id:
+        if (is_uuid(submission_id) and is_uuid(session_id)) and submission_id != session_id:
             problems.append(
                 f"'sessionId' must equal 'submissionId' for source {SOURCE_GOOGLE_FORMS}, "
                 f"got {session_id!r} and {submission_id!r}"
@@ -186,6 +186,24 @@ def _validate_feedback_create(event: dict) -> list:
     elif found and source in FEEDBACK_SOURCES:
         problems.extend(_validate_feedback_source_rules(event, source, completion))
 
+    # tags.programId selects the persona's config (a uuid column): a non-UUID must be rejected here, with
+    # identifiers, instead of failing as a database error on every retry.
+    program_id, found = _get_nested(event, "tags.programId")
+    if found and not _is_empty(program_id) and not is_uuid(program_id):
+        problems.append(f"'tags.programId' must be a UUID, got {program_id!r}")
+
+    # sessionType (the persona key) and questionnaireVersion are required (presence and emptiness come from the
+    # configured schema); here only their type, which the generic mechanism cannot express.
+    for path in ("data.sessionType", "data.questionnaireVersion"):
+        value, found = _get_nested(event, path)
+        if found and not _is_empty(value) and not isinstance(value, str):
+            problems.append(f"'{path}' must be a string, got {type(value).__name__}")
+    # the bot is informational (Mitra only): a string or null
+    for path in ("data.botId", "data.botName"):
+        value, found = _get_nested(event, path)
+        if found and value is not None and not isinstance(value, str):
+            problems.append(f"'{path}' must be a string or null, got {type(value).__name__}")
+
     messages, found = _get_nested(event, "data.messages")
     if found:
         problems.extend(_validate_feedback_messages(messages))
@@ -193,11 +211,22 @@ def _validate_feedback_create(event: dict) -> list:
     return problems
 
 
-def validate_ingestion_schema(event: dict, submission_type: str, event_type: str) -> list:
+def validate_ingestion_schema(
+    event: dict,
+    submission_type: str,
+    event_type: str,
+    feedback_schema: Optional[dict] = None,
+) -> list:
     """
     Validates a Kafka event against the configured required-fields schema for its
     (submissionType, eventType) combination. Returns a list of problem descriptions;
     an empty list means the event is valid.
+
+    Story / discussion schemas come from settings. A feedback schema is NOT in settings: it is the
+    `ingestion_schema` of the persona's upload config and the caller passes it in as `feedback_schema`
+    (the upload service loads it once per upload, the consumer caches it); no database is read here. A
+    feedback create without a schema is a problem, never a silent default. A feedback delete event carries
+    no persona, so without a schema it is checked against the fixed envelope fields only.
 
     Shared between app/kafka/consumer.py (validates events arriving off the Kafka
     topic) and app/api/services/uploads.py (validates each CSV-derived
@@ -211,10 +240,22 @@ def validate_ingestion_schema(event: dict, submission_type: str, event_type: str
     if is_feedback and event_type == "update":
         return ["feedback does not support update events in this release"]
 
-    try:
-        schema = settings.get_kafka_ingestion_schema(submission_type)
-    except ValueError as e:
-        return [str(e)]
+    if is_feedback:
+        if feedback_schema is not None:
+            schema = feedback_schema
+        elif event_type == "delete":
+            schema = {"delete": {"required": DEFAULT_INGESTION_SCHEMA["delete"]["required"]}}
+        elif event_type == "create":
+            return ["No feedback ingestion schema was supplied: it comes from the 'ingestion_schema' of the "
+                    "persona's feedback_upload config"]
+        else:
+            # any other eventType: the persona's schema is not needed to tell it has no section
+            schema = {}
+    else:
+        try:
+            schema = settings.get_kafka_ingestion_schema(submission_type)
+        except ValueError as e:
+            return [str(e)]
 
     event_schema = schema.get(event_type)
     if event_schema is None:

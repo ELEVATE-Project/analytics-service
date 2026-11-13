@@ -543,10 +543,13 @@ CREATE TABLE feedback_submissions (
     submission_id     TEXT NOT NULL,
     tenant_code       TEXT NOT NULL,
     source            TEXT NOT NULL, -- 'mitra' | 'google_forms'
+    session_type      TEXT NOT NULL, -- persona key of the export (Youth_Voice, ...); the filter for queries, never the bot id
+    questionnaire_version TEXT NOT NULL, -- 'V1' | 'V2' ...: stamped at ingest from the config's dated windows
     language          TEXT,
     completion_status TEXT NOT NULL CHECK (completion_status IN ('COMPLETED', 'IN_PROGRESS')),
     source_ref        TEXT, -- natural key of the response; set for google_forms, NULL for mitra
-    meta_data         JSONB,
+    meta_data         JSONB, -- Mitra: {"bot_id": ..., "bot_name": ...}, informational only; the metadata extraction adds an "extraction" object
+    pii_detected      BOOLEAN, -- whole-conversation PII flag from the feedback_metadata_extraction step: NULL = not checked yet, TRUE / FALSE = checked
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
 
@@ -584,13 +587,14 @@ CREATE TABLE feedbacks (
 -- those stay in prompts/prompt_version). Versioned JSON settings live in config_version.
 CREATE TABLE config (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    config_source TEXT NOT NULL CHECK (config_source IN ('mitra', 'google_forms')),
+    config_source TEXT NOT NULL CHECK (config_source IN ('mitra', 'google_forms', 'any')), -- 'any': applies to stored sessions of every source (feedback_extraction)
     name          TEXT NOT NULL, -- e.g. 'Youth bot CSV validator'
-    config_type   TEXT NOT NULL, -- 'feedback_upload' for now (story/discussion keep env config)
+    config_type   TEXT NOT NULL, -- 'feedback_upload' (how to read a CSV), 'feedback_extraction' (what the LLM extracts); story/discussion keep env config
     program_id    UUID REFERENCES programs(id) ON DELETE CASCADE, -- NULL = default for the source and type
     tenant_code   TEXT NOT NULL REFERENCES tenant(code),
     leader_id     UUID REFERENCES leader_category(id) ON DELETE SET NULL, -- optional; NULL for the feedback bots
-    bot_id        TEXT, -- Mitra bot id the config applies to; NULL for Google Forms
+    session_type  TEXT NOT NULL, -- persona key (Youth_Voice, ...): what the config applies to; a bot is edited many times
+    bot_id        TEXT, -- informational only (the bot the first version was written for); never matched
     bot_name      TEXT,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -616,9 +620,71 @@ CREATE INDEX IF NOT EXISTS idx_feedbacks_program_question ON feedbacks (program_
 CREATE INDEX IF NOT EXISTS idx_feedbacks_parent ON feedbacks (parent_id);
 CREATE INDEX IF NOT EXISTS idx_feedbacks_source ON feedbacks (source);
 
--- One config per (source, type, program, bot).
-CREATE UNIQUE INDEX IF NOT EXISTS uq_config_source_type_program_bot
-    ON config (config_source, config_type, COALESCE(program_id, '00000000-0000-0000-0000-000000000000'), COALESCE(bot_id, ''));
+-- Databases created before session_type existed: add the columns (nullable there; a backfill is a one-off).
+ALTER TABLE config ADD COLUMN IF NOT EXISTS session_type TEXT;
+ALTER TABLE feedback_submissions ADD COLUMN IF NOT EXISTS session_type TEXT;
+ALTER TABLE feedback_submissions ADD COLUMN IF NOT EXISTS questionnaire_version TEXT;
+
+-- One config per (source, type, program, session_type). The bot id no longer takes part.
+DROP INDEX IF EXISTS uq_config_source_type_program_bot;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_config_source_type_program_session_type
+    ON config (config_source, config_type, COALESCE(program_id, '00000000-0000-0000-0000-000000000000'), COALESCE(session_type, ''));
+
+CREATE INDEX IF NOT EXISTS idx_feedback_submissions_session_type ON feedback_submissions (session_type, questionnaire_version);
 
 -- One active version per config.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_config_version_active ON config_version (config_id) WHERE is_active;
+
+-- ---------------------------------------------------------------------------------------------------------------
+-- Feedback metadata extraction (one LLM call per stored session; docs/feedback-extraction-and-dots-queries.md).
+-- Databases created before this existed: the column and the wider CHECK are applied here at every startup.
+-- ---------------------------------------------------------------------------------------------------------------
+ALTER TABLE feedback_submissions ADD COLUMN IF NOT EXISTS pii_detected BOOLEAN;
+
+-- config.config_source accepts 'any' (the extraction config applies to Mitra and Google Forms sessions alike).
+-- The inline CHECK of an older database only allows the two sources: replace it, once, whatever it is called.
+DO $$
+DECLARE
+    old_check RECORD;
+    replaced BOOLEAN := FALSE;
+BEGIN
+    FOR old_check IN
+        SELECT conname FROM pg_constraint
+        WHERE conrelid = 'config'::regclass AND contype = 'c'
+          AND pg_get_constraintdef(oid) LIKE '%config_source%'
+          AND pg_get_constraintdef(oid) NOT LIKE '%''any''%'
+    LOOP
+        EXECUTE format('ALTER TABLE config DROP CONSTRAINT %I', old_check.conname);
+        replaced := TRUE;
+    END LOOP;
+    IF replaced THEN
+        ALTER TABLE config ADD CONSTRAINT config_config_source_check
+            CHECK (config_source IN ('mitra', 'google_forms', 'any'));
+    END IF;
+END $$;
+
+-- Long form: one row per session per extracted field, so a new field needs no schema change.
+CREATE TABLE feedback_extracted_data (
+    id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    submission_id         TEXT NOT NULL,
+    tenant_code           TEXT NOT NULL,
+    field_name            TEXT NOT NULL, -- state | district | gender | school_type ... (the extraction config's field names)
+    value                 TEXT, -- the band / canonical value; NULL when not provided or unmapped
+    raw_value             TEXT, -- the respondent's words as the model returned them; kept for unmapped values
+    status                TEXT NOT NULL CHECK (status IN ('extracted', 'not_provided', 'unmapped')),
+    confidence            NUMERIC CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1)), -- only if the model gave one
+    config_version_id     UUID REFERENCES config_version(id) ON DELETE SET NULL, -- the extraction config version used
+    prompt_version_id     UUID REFERENCES prompt_version(id) ON DELETE SET NULL,
+    extracted_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    FOREIGN KEY (submission_id, tenant_code)
+        REFERENCES submissions(submission_id, tenant_code) ON DELETE CASCADE,
+    UNIQUE (submission_id, tenant_code, field_name)
+);
+
+-- session_type and questionnaire_version are NOT copied here (a copy would go stale when
+-- tools/questionnaire_versions.py relabels sessions): join feedback_submissions for them.
+CREATE INDEX IF NOT EXISTS idx_feedback_extracted_field_value
+    ON feedback_extracted_data (field_name, value);

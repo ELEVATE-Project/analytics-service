@@ -17,6 +17,7 @@ with workflow.unsafe.imports_passed_through():
     from app.temporal.story_rating_activity import story_rating_activity
     from app.temporal.statement_category_activity import statement_category_activity
     from app.temporal.migration_activity import run_migration_activity
+    from app.temporal.feedback_extraction_activity import feedback_metadata_extraction_activity
     from app.config import settings
 
 @workflow.defn
@@ -189,6 +190,24 @@ class ConfigDrivenProcessingWorkflow:
                     steps_execution[idx]["status"] = status_val
                     steps_execution[idx]["completed_timestamp"] = workflow.now().isoformat()
                     completed_steps.append("statement_category")
+                    workflow.logger.info(f"Completed workflow step: '{step_name}' with status: {status_val}")
+
+                elif step_name == "feedback_metadata_extraction":
+                    res = await workflow.execute_activity(
+                        feedback_metadata_extraction_activity,
+                        {
+                            "submission_id": submission_id,
+                            "tenant_code": tenant_code,
+                            "analysis_type": step_name,
+                            **llm_overrides,
+                        },
+                        start_to_close_timeout=timedelta(minutes=5),
+                        retry_policy=retry_policy
+                    )
+                    status_val = res.get("status", "success") if isinstance(res, dict) else "success"
+                    steps_execution[idx]["status"] = status_val
+                    steps_execution[idx]["completed_timestamp"] = workflow.now().isoformat()
+                    completed_steps.append("feedback_metadata_extraction")
                     workflow.logger.info(f"Completed workflow step: '{step_name}' with status: {status_val}")
 
                 else:

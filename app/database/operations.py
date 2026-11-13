@@ -430,6 +430,18 @@ async def _ingest_feedback_submission(
             f"data.completionStatus must be one of {COMPLETION_STATUSES}, got {completion_status!r}; rejecting {ident}."
         )
     language = _optional_text(data.get("language"), "data.language")
+    session_type = data.get("sessionType")
+    if not isinstance(session_type, str) or len(session_type.strip()) == 0:
+        raise ValueError(f"data.sessionType must be a non-empty string; rejecting {ident}.")
+    questionnaire_version = data.get("questionnaireVersion")
+    if not isinstance(questionnaire_version, str) or len(questionnaire_version.strip()) == 0:
+        raise ValueError(f"data.questionnaireVersion must be a non-empty string; rejecting {ident}.")
+    # The bot is informational (Mitra only): kept in meta_data, never matched on.
+    bot_info = {
+        key: value.strip()
+        for key, value in (("bot_id", data.get("botId")), ("bot_name", data.get("botName")))
+        if isinstance(value, str) and len(value.strip()) > 0
+    }
     source_ref = data.get("sourceRef")
     is_gforms = source == SOURCE_GOOGLE_FORMS
     if is_gforms:
@@ -471,7 +483,7 @@ async def _ingest_feedback_submission(
     try:
         return await _write_feedback_submission(
             conn, event_payload, ident, source, source_ref, language, completion_status, messages,
-            submission_date, state, district,
+            submission_date, state, district, session_type.strip(), questionnaire_version.strip(), bot_info,
         )
     except _FeedbackAlreadyStored:
         pass
@@ -501,6 +513,9 @@ async def _write_feedback_submission(
     submission_date: datetime,
     state: Any,
     district: Any,
+    session_type: str,
+    questionnaire_version: str,
+    bot_info: Dict[str, str],
 ) -> Dict[str, Any]:
     """The transactional write of _ingest_feedback_submission (see there); one transaction, all or nothing."""
     submission_id = str(event_payload["submissionId"])
@@ -567,22 +582,33 @@ async def _write_feedback_submission(
         # event) never downgrades it. source/language are refreshed; language is kept when the event has none.
         fs_row = await conn.fetchrow(
             """
-            INSERT INTO feedback_submissions (submission_id, tenant_code, source, language, completion_status, source_ref)
-            VALUES ($1, $2, $3, $4, $5, $7)
+            INSERT INTO feedback_submissions (
+                submission_id, tenant_code, source, session_type, questionnaire_version,
+                language, completion_status, source_ref, meta_data
+            )
+            VALUES ($1, $2, $3, $8, $9, $4, $5, $7, $10::jsonb)
             ON CONFLICT (submission_id, tenant_code) DO UPDATE SET
                 source = EXCLUDED.source,
+                session_type = EXCLUDED.session_type,
+                questionnaire_version = EXCLUDED.questionnaire_version,
                 language = COALESCE(EXCLUDED.language, feedback_submissions.language),
                 completion_status = CASE
                     WHEN feedback_submissions.completion_status = $6 THEN feedback_submissions.completion_status
                     ELSE EXCLUDED.completion_status END,
+                meta_data = COALESCE(feedback_submissions.meta_data, '{}'::jsonb) || COALESCE(EXCLUDED.meta_data, '{}'::jsonb),
                 updated_at = now()
             WHERE feedback_submissions.source IS DISTINCT FROM EXCLUDED.source
+               OR feedback_submissions.session_type IS DISTINCT FROM EXCLUDED.session_type
+               OR feedback_submissions.questionnaire_version IS DISTINCT FROM EXCLUDED.questionnaire_version
                OR COALESCE(EXCLUDED.language, feedback_submissions.language) IS DISTINCT FROM feedback_submissions.language
                OR (feedback_submissions.completion_status <> $6
                    AND feedback_submissions.completion_status IS DISTINCT FROM EXCLUDED.completion_status)
+               OR (COALESCE(feedback_submissions.meta_data, '{}'::jsonb) || COALESCE(EXCLUDED.meta_data, '{}'::jsonb))
+                  IS DISTINCT FROM COALESCE(feedback_submissions.meta_data, '{}'::jsonb)
             RETURNING completion_status, (xmax = 0) AS inserted
             """,
             submission_id, tenant_code, source, language, completion_status, COMPLETION_COMPLETED, source_ref,
+            session_type, questionnaire_version, json.dumps(bot_info) if len(bot_info) > 0 else None,
         )
         if source == SOURCE_GOOGLE_FORMS and (fs_row is None or not fs_row["inserted"]):
             # Google Forms responses are immutable: a payload row that already existed (a concurrent writer
@@ -665,6 +691,16 @@ async def _write_feedback_submission(
                 submission_id, tenant_code, child_seqs, parent_seqs,
             )
             parents_set = len(parent_rows)
+
+        if len(upserted) > 0 or parents_set > 0:
+            # New or edited messages, or a changed parent link (a bot row can become a respondent row): the PII check
+            # of the older text no longer describes the session. Back to "not checked" (NULL) until the extraction
+            # runs again, so an export never trusts a stale flag.
+            await conn.execute(
+                "UPDATE feedback_submissions SET pii_detected = NULL "
+                "WHERE submission_id = $1 AND tenant_code = $2 AND pii_detected IS NOT NULL",
+                submission_id, tenant_code,
+            )
 
         changed = submission_changed or payload_changed or len(upserted) > 0 or parents_set > 0
         if changed and db_sub_status != "pending":

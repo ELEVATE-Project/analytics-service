@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from app.services.feedback_constants import PERSONAS, gforms_config_v1
+from seed_support import GFORMS_PERSONAS, PERSONAS, SESSION_TYPE_TO_PERSONA, gforms_config_v1, mitra_config_v1
 
 try:  # the shared rule lives with the adapter; fall back to an identical local copy until it exists
     from app.api.services.feedback_gforms import normalise_header
@@ -73,13 +73,13 @@ def _read_header(relative):
         return next(csv.reader(f))
 
 
-@pytest.mark.parametrize("persona", list(PERSONAS))
+@pytest.mark.parametrize("persona", list(GFORMS_PERSONAS))
 def test_config_is_json_serialisable_and_round_trips(persona):
     cfg = gforms_config_v1(persona)
     assert json.loads(json.dumps(cfg)) == cfg
 
 
-@pytest.mark.parametrize("persona", list(PERSONAS))
+@pytest.mark.parametrize("persona", list(GFORMS_PERSONAS))
 def test_config_top_level_contract(persona):
     cfg = gforms_config_v1(persona)
     assert cfg["layout"] == "wide"
@@ -105,7 +105,7 @@ def test_each_call_returns_an_independent_copy():
     assert gforms_config_v1("Youth")["forms"]
 
 
-@pytest.mark.parametrize("persona", list(PERSONAS))
+@pytest.mark.parametrize("persona", list(GFORMS_PERSONAS))
 def test_every_question_is_complete(persona):
     for form_key, form in gforms_config_v1(persona)["forms"].items():
         assert isinstance(form_key, str) and form_key
@@ -121,7 +121,7 @@ def test_every_question_is_complete(persona):
             assert q["kind"] in ("metadata", "open")
 
 
-@pytest.mark.parametrize("persona", list(PERSONAS))
+@pytest.mark.parametrize("persona", list(GFORMS_PERSONAS))
 def test_headers_are_already_normalised(persona):
     for q in _questions(persona):
         for h in q["headers"]:
@@ -129,7 +129,7 @@ def test_headers_are_already_normalised(persona):
         assert normalise_header(q["text"]) == q["text"]
 
 
-@pytest.mark.parametrize("persona", list(PERSONAS))
+@pytest.mark.parametrize("persona", list(GFORMS_PERSONAS))
 def test_no_header_maps_to_two_question_keys_within_a_form(persona):
     for form_key, form in gforms_config_v1(persona)["forms"].items():
         seen = {}
@@ -141,7 +141,7 @@ def test_no_header_maps_to_two_question_keys_within_a_form(persona):
         assert len(flat) == len(set(flat)), form_key
 
 
-@pytest.mark.parametrize("persona", list(PERSONAS))
+@pytest.mark.parametrize("persona", list(GFORMS_PERSONAS))
 def test_each_form_has_metadata_and_open_questions(persona):
     for form in gforms_config_v1(persona)["forms"].values():
         kinds = {q["kind"] for q in form["questions"]}
@@ -149,16 +149,16 @@ def test_each_form_has_metadata_and_open_questions(persona):
 
 
 def test_each_persona_has_the_expected_launch_forms():
-    assert {p: list(gforms_config_v1(p)["forms"]) for p in PERSONAS} == {
+    assert {p: list(gforms_config_v1(p)["forms"]) for p in GFORMS_PERSONAS} == {
         "Youth": ["youth_launch"],
         "Parent": ["parents_english_launch"],
         "General Public": ["general_public_english_launch"],
     }
-    assert {p: len(list(_questions(p))) for p in PERSONAS} == {"Youth": 18, "Parent": 15, "General Public": 11}
+    assert {p: len(list(_questions(p))) for p in GFORMS_PERSONAS} == {"Youth": 18, "Parent": 15, "General Public": 11}
 
 
 def test_demographic_questions_are_metadata():
-    for persona in PERSONAS:
+    for persona in GFORMS_PERSONAS:
         for q in _questions(persona):
             if q["question_key"] in ("AGE_IDENTIFICATION", "GENDER_IDENTIFICATION",
                                      "STATE_IDENTIFICATION", "DISTRICT_IDENTIFICATION"):
@@ -168,7 +168,7 @@ def test_demographic_questions_are_metadata():
 def test_persona_first_question_matches_the_mitra_catalog():
     # the Mitra config's synthesised first question must exist in the Google Forms form of the same persona,
     # with the same canonical key (one key = one question across sources)
-    for persona, p in PERSONAS.items():
+    for persona, p in ((n, PERSONAS[n]) for n in GFORMS_PERSONAS):
         assert p["first_question_key"] in {q["question_key"] for q in _questions(persona)}
 
 
@@ -182,7 +182,7 @@ def test_youth_form_has_both_header_wordings():
     ]
 
 
-@pytest.mark.parametrize("persona", list(PERSONAS))
+@pytest.mark.parametrize("persona", list(GFORMS_PERSONAS))
 def test_launch_form_headers_resolve_for_the_matching_persona(persona):
     for relative in LAUNCH_FILES[persona]:
         header = _read_header(relative)
@@ -190,9 +190,9 @@ def test_launch_form_headers_resolve_for_the_matching_persona(persona):
         assert _resolves(persona, header) == [], relative
 
 
-@pytest.mark.parametrize("persona", list(PERSONAS))
+@pytest.mark.parametrize("persona", list(GFORMS_PERSONAS))
 def test_launch_form_headers_do_not_resolve_for_other_personas(persona):
-    others = [p for p in PERSONAS if p != persona]
+    others = [p for p in GFORMS_PERSONAS if p != persona]
     for relative in LAUNCH_FILES[persona]:
         header = _read_header(relative)
         for other in others:
@@ -220,3 +220,52 @@ def test_parents_stray_column_and_email_address_are_ignored_not_unmapped():
     assert _resolves("Parent", ["Timestamp", "Email Address"]) == []
     # a genuinely unknown column is still reported
     assert _resolves("Parent", ["Timestamp", "Favourite colour"]) == ["Favourite colour"]
+
+
+# ---------------------------------------------------------------------------------------------
+# session_type and questionnaire_version
+# ---------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("persona", list(GFORMS_PERSONAS))
+def test_config_carries_the_personas_session_type(persona):
+    cfg = gforms_config_v1(persona)
+    assert cfg["session_type"] == PERSONAS[persona]["session_type"]
+    assert SESSION_TYPE_TO_PERSONA[cfg["session_type"]] == persona
+
+
+def test_session_types_of_the_three_google_form_personas():
+    assert {p: gforms_config_v1(p)["session_type"] for p in GFORMS_PERSONAS} == {
+        "Youth": "Youth_Voice", "Parent": "Parent_Voice", "General Public": "General_Public_Voice",
+    }
+
+
+@pytest.mark.parametrize("persona", list(GFORMS_PERSONAS))
+def test_every_form_has_a_questionnaire_version(persona):
+    for form_key, form in gforms_config_v1(persona)["forms"].items():
+        assert form["questionnaire_version"] == "V1", form_key
+        assert isinstance(form["questionnaire_version"], str) and form["questionnaire_version"].strip()
+
+
+def test_launch_form_versions_are_known_mitra_version_keys():
+    # a form's version label uses the same vocabulary as the persona's Mitra questionnaire_versions
+    for persona in GFORMS_PERSONAS:
+        mitra_keys = {v["key"] for v in mitra_config_v1(persona)["questionnaire_versions"]}
+        for form in gforms_config_v1(persona)["forms"].values():
+            assert form["questionnaire_version"] in mitra_keys
+
+
+def test_educator_has_no_google_form_definition():
+    assert "Educator" in PERSONAS and "Educator" not in GFORMS_PERSONAS
+    assert PERSONAS["Educator"]["gforms_config_id"] is None
+    with pytest.raises(KeyError):
+        gforms_config_v1("Educator")
+
+
+def test_unknown_persona_raises_key_error():
+    with pytest.raises(KeyError):
+        gforms_config_v1("Nobody")
+
+
+def test_google_form_personas_have_a_config_id_and_the_others_do_not():
+    for name, persona in PERSONAS.items():
+        assert (persona["gforms_config_id"] is not None) == (name in GFORMS_PERSONAS), name

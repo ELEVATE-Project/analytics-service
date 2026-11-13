@@ -17,7 +17,7 @@ from app.api.services.feedback_gforms import (
     parse_gforms_csv,
     prepare_gforms_responses,
 )
-from app.services.feedback_constants import PERSONAS
+from seed_support import PERSONAS
 
 FIXTURES = Path(__file__).resolve().parent / "csv_uploads"
 YOUTH = PERSONAS["Youth"]
@@ -48,6 +48,7 @@ FUTURE = q("FUTURE", "When you think about your future, what do you want your li
 
 def make_config():
     return {
+        "session_type": "Youth_Voice",
         "layout": "wide",
         "timestamp_column": "Timestamp",
         "datetime": {"formats": ["%m/%d/%Y %H:%M:%S"], "fallback_timezone": "Asia/Kolkata"},
@@ -57,8 +58,10 @@ def make_config():
         "ignored_column_patterns": ["^Column \\d+$"],
         "language": {"default": "en", "script_detect": {"kn": "[\\u0C80-\\u0CFF]"}},
         "forms": {
-            "general": {"name": "General Public", "questions": [AGE, GENDER, STATE, HOPE, WORRY]},
-            "youth": {"name": "Youth", "questions": [AGE, GENDER, STATE, CLASS, INCOME, FUTURE]},
+            "general": {"name": "General Public", "questionnaire_version": "V1",
+                        "questions": [AGE, GENDER, STATE, HOPE, WORRY]},
+            "youth": {"name": "Youth", "questionnaire_version": "V2",
+                      "questions": [AGE, GENDER, STATE, CLASS, INCOME, FUTURE]},
         },
     }
 
@@ -596,6 +599,41 @@ class TestEvents:
         events, _ = build(self.responses(config), None)
         assert events[0]["data"]["completionStatus"] == "COMPLETED"
         assert events[0]["tags"]["state"] is None
+
+    def test_events_carry_session_type_and_the_forms_questionnaire_version(self, config):
+        events, _ = build(self.responses(config), config)       # the general form is V1
+        assert events[0]["data"]["sessionType"] == "Youth_Voice"
+        assert events[0]["data"]["questionnaireVersion"] == "V1"
+
+    def test_questionnaire_version_follows_the_matched_form(self, config):
+        youth = prepare(read_fixture("feedback_gforms_kannada.csv"), config)[0]
+        assert youth[0]["form_key"] == "youth"
+        events, _ = build(youth, config)
+        assert {e["data"]["questionnaireVersion"] for e in events} == {"V2"}
+        assert {e["data"]["sessionType"] for e in events} == {"Youth_Voice"}
+
+    def test_session_type_comes_from_the_config(self, config):
+        config["session_type"] = "General_Public_Voice"
+        events, _ = build(self.responses(config), config)
+        assert events[0]["data"]["sessionType"] == "General_Public_Voice"
+
+    def test_session_type_and_version_are_none_without_the_config_keyword(self, config):
+        events, _ = build(self.responses(config), None)
+        assert events[0]["data"]["sessionType"] is None
+        assert events[0]["data"]["questionnaireVersion"] is None
+
+    def test_prepared_responses_carry_the_form_key(self, config):
+        responses = self.responses(config)
+        assert {r["form_key"] for r in responses} == {"general"}
+
+    def test_real_gforms_config_stamps_each_launch_form_as_v1(self):
+        from seed_support import gforms_config_v1
+        real = gforms_config_v1("General Public")
+        responses = prepare_gforms_responses(general_frame([ROW]).rename(
+            columns={"What is your gender? ": "What is your gender?"}), real)[0]
+        events, _ = build(responses, real)
+        assert events[0]["data"]["sessionType"] == "General_Public_Voice"
+        assert events[0]["data"]["questionnaireVersion"] == "V1"
 
     def test_location_tags_when_configured(self, config):
         config["location"] = {"state": {"stage": "STATE_IDENTIFICATION",
