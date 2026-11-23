@@ -14,7 +14,7 @@
 --   * feedback_upload      / mitra         adapter conversation_rows: how to read a Mitra raw conversation CSV
 --                                          (one per persona)
 --   * feedback_upload      / google_forms  adapter wide_form: how to read a Google Forms wide CSV (Youth, Parent,
---                                          General Public)
+--                                          General Public, Educator)
 --   * feedback_extraction  / any           the metadata fields and bands of the LLM extraction and the
 --                                          prompt it uses (prompt_name, a row of seed_prompts.sql)
 -- Other kinds of config are added to this file in the same pattern (one CONFIG block each).
@@ -1307,6 +1307,203 @@ SELECT '4bc09524-71e3-4f0e-95b9-9d936e6e8697'::uuid, 1, TRUE, $cfg$
 $cfg$::jsonb, 'seed', 'Initial format'
 WHERE EXISTS (SELECT 1 FROM config WHERE id = '4bc09524-71e3-4f0e-95b9-9d936e6e8697'::uuid)
   AND NOT EXISTS (SELECT 1 FROM config_version WHERE config_id = '4bc09524-71e3-4f0e-95b9-9d936e6e8697'::uuid)
+ON CONFLICT (config_id, version) DO NOTHING;
+
+-- CONFIG feedback_upload google_forms Educator_Voice
+INSERT INTO config (id, config_source, name, config_type, program_id, tenant_code, leader_id, session_type, bot_id, bot_name)
+SELECT 'a3f12b84-5c90-4e31-89d2-7c8190de6210'::uuid, 'google_forms', 'Educator form CSV validator', 'feedback_upload', 'b09ca040-f2cb-4c31-b0a8-07ce0acb69a2'::uuid, 'mitra', NULL, 'Educator_Voice', NULL, NULL
+WHERE EXISTS (SELECT 1 FROM tenant WHERE code = 'mitra')
+  AND EXISTS (SELECT 1 FROM programs WHERE id = 'b09ca040-f2cb-4c31-b0a8-07ce0acb69a2'::uuid)
+ON CONFLICT DO NOTHING;
+
+INSERT INTO config_version (config_id, version, is_active, config, created_by, change_note)
+SELECT 'a3f12b84-5c90-4e31-89d2-7c8190de6210'::uuid, 1, TRUE, $cfg$
+{
+  "session_type": "Educator_Voice",
+  "adapter": "wide_form",
+  "timestamp_column": "Timestamp",
+  "datetime": {
+    "formats": [
+      "%m/%d/%Y %H:%M:%S",
+      "%m/%d/%Y",
+      "%d/%m/%Y"
+    ],
+    "fallback_timezone": "Asia/Kolkata"
+  },
+  "default_completion": "COMPLETED",
+  "ignored_columns": [
+    "Language",
+    "Email Address"
+  ],
+  "ignored_column_patterns": [
+    "^Column \\d+$"
+  ],
+  "language": {
+    "default": "en",
+    "script_detect": {
+      "kn": "[\\u0C80-\\u0CFF]"
+    },
+    "detect_kinds": [
+      "open"
+    ]
+  },
+  "forms": {
+    "educator_launch": {
+      "name": "Educator Google Form Launch",
+      "questions": [
+        {
+          "headers": [
+            "Which state do you stay in?"
+          ],
+          "question_key": "STATE_IDENTIFICATION",
+          "text": "Which state do you stay in?",
+          "kind": "metadata"
+        },
+        {
+          "headers": [
+            "Which district do you stay in?"
+          ],
+          "question_key": "DISTRICT_IDENTIFICATION",
+          "text": "Which district do you stay in?",
+          "kind": "metadata"
+        },
+        {
+          "headers": [
+            "What is your gender?"
+          ],
+          "question_key": "GENDER_IDENTIFICATION",
+          "text": "What is your gender?",
+          "kind": "metadata"
+        },
+        {
+          "headers": [
+            "What type of institution do you teach in?"
+          ],
+          "question_key": "INSTITUTION_TYPE",
+          "text": "What type of institution do you teach in?",
+          "kind": "metadata"
+        },
+        {
+          "headers": [
+            "What age group do you teach?"
+          ],
+          "question_key": "TEACHING_LEVEL",
+          "text": "What age group do you teach?",
+          "kind": "metadata"
+        },
+        {
+          "headers": [
+            "When you think about the students you teach today, what aspirations do you have for their future?"
+          ],
+          "question_key": "ASPIRATIONS_FOR_STUDENTS",
+          "text": "When you think about the students you teach today, what aspirations do you have for their future?",
+          "kind": "open"
+        },
+        {
+          "headers": [
+            "Which are the top 3 skills you think young people need to thrive in the future?"
+          ],
+          "question_key": "TOP_SKILLS",
+          "text": "Which are the top 3 skills you think young people need to thrive in the future?",
+          "kind": "open"
+        },
+        {
+          "headers": [
+            "Do you think our schools, curriculum are able to build these skills in children today?"
+          ],
+          "question_key": "CURRICULUM_SKILLS_ADEQUACY",
+          "text": "Do you think our schools, curriculum are able to build these skills in children today?",
+          "kind": "open"
+        },
+        {
+          "headers": [
+            "What changes would you like to see in schools or colleges to better prepare your children for their future?"
+          ],
+          "question_key": "DESIRED_SYSTEM_CHANGES",
+          "text": "What changes would you like to see in schools or colleges to better prepare your children for their future?",
+          "kind": "open"
+        },
+        {
+          "headers": [
+            "What worries you most about the future of India's youth?"
+          ],
+          "question_key": "BIGGEST_WORRY",
+          "text": "What worries you most about the future of India's youth?",
+          "kind": "open"
+        },
+        {
+          "headers": [
+            "Lastly, what would you need as an educator, to better support your students for their future?"
+          ],
+          "question_key": "EDUCATOR_SUPPORT_NEEDS",
+          "text": "Lastly, what would you need as an educator, to better support your students for their future?",
+          "kind": "open"
+        }
+      ],
+      "questionnaire_version": "V1"
+    }
+  },
+  "max_csv_upload_bytes": 104857600,
+  "ingestion_schema": {
+    "create": {
+      "required": [
+        "submissionId",
+        "submissionType",
+        "sessionId",
+        "tenantCode",
+        "eventType",
+        "eventPublishedAt",
+        "tags.programId",
+        "tags.leaderCategoryId",
+        "data.source",
+        "data.sessionType",
+        "data.questionnaireVersion",
+        "data.language",
+        "data.completionStatus",
+        "data.submissionDate",
+        "data.messages"
+      ],
+      "optional": [
+        "tags.state",
+        "tags.district",
+        "tags.programName",
+        "tags.leaderCategoryName",
+        "tags.source",
+        "data.botId",
+        "data.botName"
+      ]
+    },
+    "update": {
+      "required": [
+        "submissionId",
+        "submissionType",
+        "sessionId",
+        "tenantCode",
+        "eventType",
+        "eventPublishedAt"
+      ],
+      "newValuesNoEmpty": true
+    },
+    "delete": {
+      "required": [
+        "submissionId",
+        "submissionType",
+        "sessionId",
+        "tenantCode",
+        "eventType",
+        "eventPublishedAt"
+      ]
+    }
+  },
+  "process_steps": [
+    {
+      "name": "feedback_metadata_extraction"
+    }
+  ]
+}
+$cfg$::jsonb, 'seed', 'Initial format'
+WHERE EXISTS (SELECT 1 FROM config WHERE id = 'a3f12b84-5c90-4e31-89d2-7c8190de6210'::uuid)
+  AND NOT EXISTS (SELECT 1 FROM config_version WHERE config_id = 'a3f12b84-5c90-4e31-89d2-7c8190de6210'::uuid)
 ON CONFLICT (config_id, version) DO NOTHING;
 
 -- =========================================================================
