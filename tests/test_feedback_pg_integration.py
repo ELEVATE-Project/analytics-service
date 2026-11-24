@@ -127,9 +127,9 @@ async def _add_config(conn, source, session_type, program_id=YOUTH["program_id"]
         "VALUES ($1, $2, 'feedback_upload', $3::uuid, 'mitra', $4, $5)", source, name, program_id, session_type, bot_id)
 
 
-# 4 personas (Youth, Parent, General Public, Educator): 4 Mitra configs + 3 Google Forms configs (no Educator form)
+# 4 personas (Youth, Parent, General Public, Educator): 4 Mitra configs + 4 Google Forms configs
 # + 4 extraction configs, each with its version 1 (seed_config.sql)
-SEED_COUNTS = {"leader_category": 4, "programs": 4, "config": 11, "config_version": 11}
+SEED_COUNTS = {"leader_category": 4, "programs": 4, "config": 12, "config_version": 12}
 
 
 def test_schema_applies_twice_and_seed_counts():
@@ -355,11 +355,11 @@ def test_duplicate_config_rejected_by_source_type_program_and_session_type():
 
 def test_same_program_with_another_source_or_session_type_is_allowed():
     async def body(conn):
-        # Educator has no Google Forms config yet: adding one for the same program (another source) is fine
+        # adding a new source for the same program is fine
         assert await conn.fetchval(
             "SELECT count(*) FROM config WHERE program_id = $1::uuid AND config_type = 'feedback_upload'",
-            EDUCATOR["program_id"]) == 1
-        await _add_config(conn, "google_forms", "Educator_Voice", EDUCATOR["program_id"], name="educator form")
+            EDUCATOR["program_id"]) == 2
+        await _add_config(conn, "paper_form", "Educator_Voice", EDUCATOR["program_id"], name="educator form")
         # another config_type for the same program / source / session_type
         await conn.execute(
             "INSERT INTO config (config_source, name, config_type, program_id, tenant_code, session_type) "

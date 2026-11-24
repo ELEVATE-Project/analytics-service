@@ -30,7 +30,7 @@ SQL = seed_config_sql()
 BLOCKS = seed_config_blocks()
 EXPECTED_BLOCKS = sorted(
     [("feedback_upload", "mitra", st) for st in ("Educator_Voice", "General_Public_Voice", "Parent_Voice", "Youth_Voice")]
-    + [("feedback_upload", "google_forms", st) for st in ("General_Public_Voice", "Parent_Voice", "Youth_Voice")]
+    + [("feedback_upload", "google_forms", st) for st in ("Educator_Voice", "General_Public_Voice", "Parent_Voice", "Youth_Voice")]
     + [("feedback_extraction", "any", st) for st in ("Educator_Voice", "General_Public_Voice", "Parent_Voice", "Youth_Voice")]
 )
 # the documented derivation of an extraction config's id (the header of seed_config.sql): uuid5 of this namespace and
@@ -71,14 +71,14 @@ def test_the_file_starts_with_a_header_comment_that_explains_it():
         assert phrase in header or phrase in SQL[:3500], phrase
 
 
-def test_there_are_exactly_11_config_blocks_and_each_marker_is_regular():
+def test_there_are_exactly_12_config_blocks_and_each_marker_is_regular():
     markers = re.findall(r"^-- CONFIG (\S+) (\S+) (\S+)$", SQL, re.M)
-    assert len(markers) == len(BLOCKS) == 11
+    assert len(markers) == len(BLOCKS) == 12
     assert sorted(markers) == EXPECTED_BLOCKS
-    assert len(set(markers)) == 11
-    # 4 Mitra upload + 3 Google Forms upload + 4 extraction
+    assert len(set(markers)) == 12
+    # 4 Mitra upload + 4 Google Forms upload + 4 extraction
     assert sum(1 for m in markers if m[:2] == ("feedback_upload", "mitra")) == 4
-    assert sum(1 for m in markers if m[:2] == ("feedback_upload", "google_forms")) == 3
+    assert sum(1 for m in markers if m[:2] == ("feedback_upload", "google_forms")) == 4
     assert sum(1 for m in markers if m[:2] == ("feedback_extraction", "any")) == 4
 
 
@@ -93,18 +93,18 @@ def test_four_persona_blocks_each_with_a_leader_category_and_a_program():
 
 def test_every_config_json_is_dollar_quoted_two_space_indented_and_stable():
     raws = re.findall(r"\$cfg\$\n(.*?)\n\$cfg\$::jsonb", SQL, re.DOTALL)
-    assert len(raws) == 11
+    assert len(raws) == 12
     for raw, block in zip(raws, BLOCKS):
         assert json.loads(raw) == block["config"]
         assert json.dumps(json.loads(raw), indent=2, ensure_ascii=False) == raw      # a diff of the file stays readable
         assert raw.startswith("{\n  ")
-    assert SQL.count("$cfg$") == 22
+    assert SQL.count("$cfg$") == 24
 
 
 def test_the_file_has_no_other_dollar_quote_and_only_inserts():
-    assert re.findall(r"\$[A-Za-z_]*\$", SQL) == ["$cfg$"] * 22
+    assert re.findall(r"\$[A-Za-z_]*\$", SQL) == ["$cfg$"] * 24
     statements = _statements()
-    assert len(statements) == 1 + 4 * 2 + 11 * 2             # the tenant, then per persona 2, per config 2
+    assert len(statements) == 1 + 4 * 2 + 12 * 2             # the tenant, then per persona 2, per config 2
     for statement in statements:
         assert statement.startswith("INSERT INTO "), statement[:60]
 
@@ -158,7 +158,7 @@ def test_every_id_is_a_fixed_distinct_uuid_and_the_config_rows_agree_with_their_
         assert block["tenant_code"] == "mitra"
         assert block["created_by"] == "seed" and block["change_note"] != ""
         assert block["config"]["session_type"] == block["session_type"]
-    assert len(ids) == 19 and len(set(ids)) == 19
+    assert len(ids) == 20 and len(set(ids)) == 20
     for value in ids:
         assert str(uuid.UUID(value)) == value
 
@@ -175,7 +175,7 @@ def test_each_config_belongs_to_the_program_of_its_persona_and_is_unique_per_sou
     for block in BLOCKS:
         assert block["program_id"] == program_of[block["session_type"]]
         keys.add((block["config_source"], block["config_type"], block["program_id"], block["session_type"]))
-    assert len(keys) == 11                                    # the partial unique index of schema.sql would accept all
+    assert len(keys) == 12                                    # the partial unique index of schema.sql would accept all
 
 
 def test_mitra_rows_record_the_bot_informationally_and_the_other_sources_have_none():
@@ -186,8 +186,8 @@ def test_mitra_rows_record_the_bot_informationally_and_the_other_sources_have_no
             assert block["bot_id"] is None and block["bot_name"] is None
 
 
-def test_the_educator_has_no_google_forms_config():
-    assert ("feedback_upload", "google_forms", "Educator_Voice") not in {
+def test_the_educator_has_google_forms_config():
+    assert ("feedback_upload", "google_forms", "Educator_Voice") in {
         (b["config_type"], b["config_source"], b["session_type"]) for b in BLOCKS}
 
 

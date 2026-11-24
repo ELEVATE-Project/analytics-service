@@ -426,7 +426,7 @@ def test_google_forms_configs_and_sessions_are_never_touched():
         gforms_cfg = [tuple(r.values()) for r in await conn.fetch(
             "SELECT v.* FROM config c JOIN config_version v ON v.config_id = c.id WHERE c.config_source = 'google_forms' "
             "ORDER BY v.id")]
-        assert len(gforms_cfg) == 3
+        assert len(gforms_cfg) == 4
         res = await set_questionnaire_version("Youth_Voice", "V2", V2_TEXT)
         assert res["restamp"]["sessions"] == 0                       # the form response is not a Mitra session
         assert (await _labels(conn))[g] == "V1"

@@ -568,9 +568,8 @@ def test_gforms_no_config_for_persona_rejected(client, monkeypatch):
     _assert_nothing_stored(stores)
 
 
-def test_gforms_educator_has_no_google_forms_config(client, monkeypatch):
-    # The Educator persona has a Mitra config only; the seed creates no Google Forms row for it.
-    assert PERSONAS["Educator"]["gforms_config_id"] is None
+def test_gforms_educator_when_no_active_config(client, monkeypatch):
+    assert PERSONAS["Educator"]["gforms_config_id"] is not None
     stores = _patch_upload_pipeline(monkeypatch, resolved=_resolved("Educator"), active=None)
     resp = client.post("/v1/upload/", headers=_headers(),
                        data=_form(source="google_forms", leader_category="Educator"), files=_files(_gforms_csv()))
