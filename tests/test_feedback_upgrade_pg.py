@@ -257,7 +257,7 @@ def test_the_seed_creates_its_tenant_and_configs_next_to_the_legacy_rows_and_tou
             await _startup(seed=True)
             await _startup(seed=True)                                   # a restart changes nothing
         assert await conn.fetchval("SELECT count(*) FROM tenant WHERE code = 'mitra'") == 1
-        assert await conn.fetchval("SELECT count(*) FROM config WHERE tenant_code = 'mitra'") == 11
+        assert await conn.fetchval("SELECT count(*) FROM config WHERE tenant_code = 'mitra'") == 12
         assert await conn.fetchval(
             "SELECT string_agg(id::text || name, '|' ORDER BY id) FROM config WHERE tenant_code = $1", TENANT) == legacy_before         # the legacy tenant's rows are as they were
         assert not [r for r in caplog.records if r.getMessage().startswith("Config seed")]

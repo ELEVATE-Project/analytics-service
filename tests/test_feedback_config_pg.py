@@ -300,7 +300,7 @@ def test_migrate_skips_a_config_without_an_active_version():
     async def body(conn):
         await _strip_keys(conn, "process_steps")
         await conn.execute("UPDATE config_version SET is_active = FALSE WHERE config_id = "
-                           "(SELECT id FROM config WHERE session_type = 'Educator_Voice')")
+                           "(SELECT id FROM config WHERE session_type = 'Educator_Voice' AND config_source = 'mitra')")
         result = await migrate_feedback_config()
         assert result["configs"] == SEEDED_CONFIGS - 1 and result["migrated"] == SEEDED_CONFIGS - 1
     _run(body)
@@ -403,8 +403,8 @@ def test_set_rejects_unknown_targets_and_unsetting_a_required_key():
             await set_feedback_config_value("Youth_Voice", "  ", "max_csv_upload_bytes", 5)
         with pytest.raises(ValueError, match="required and cannot be unset"):
             await set_feedback_config_value("Youth_Voice", "mitra", "process_steps", None, unset=True)
-        with pytest.raises(ValueError, match="no google_forms upload config for session_type 'Educator_Voice'"):
-            await set_feedback_config_value("Educator_Voice", "google_forms", "max_csv_upload_bytes", 5)
+        with pytest.raises(ValueError, match="no google_forms upload config for session_type 'Nobody_Voice'"):
+            await set_feedback_config_value("Nobody_Voice", "google_forms", "max_csv_upload_bytes", 5)
         assert await conn.fetchval("SELECT count(*) FROM config_version") == SEEDED_CONFIGS
     _run(body)
 
