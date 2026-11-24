@@ -310,17 +310,19 @@ def test_migrate_dry_run_then_real_then_idempotent(scratch, capsys):
 
     assert cli.main(["migrate", "--dry-run"]) == 0
     dry = _json(capsys)
-    assert (dry["migrated"], dry["dry_run"]) == (7, True) and _active_config()[0] == 1
+    assert (dry["migrated"], dry["dry_run"]) == (SEED_UPLOAD_CONFIG_COUNT, True) and _active_config()[0] == 1
 
     assert cli.main(["migrate"]) == 0
     real = _json(capsys)
-    assert (real["configs"], real["migrated"], real["unchanged"], real["invalid"]) == (7, 7, 0, [])
+    assert (real["configs"], real["migrated"], real["unchanged"], real["invalid"]) == (
+        SEED_UPLOAD_CONFIG_COUNT, SEED_UPLOAD_CONFIG_COUNT, 0, []
+    )
     version, config, created_by = _active_config()
     assert version == 2 and created_by == "test-operator" and config["max_csv_upload_bytes"] == 104857600
 
     assert cli.main(["migrate"]) == 0
     again = _json(capsys)
-    assert (again["migrated"], again["unchanged"]) == (0, 7)
+    assert (again["migrated"], again["unchanged"]) == (0, SEED_UPLOAD_CONFIG_COUNT)
 
 
 @needs_db
