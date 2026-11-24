@@ -317,7 +317,7 @@ def test_wide_form_default_completion_can_only_be_completed():
 def test_the_seeded_blocks_name_their_adapter_and_carry_no_dead_keys():
     from seed_support import seed_config_blocks
     blocks = [b for b in seed_config_blocks() if b["config_type"] == "feedback_upload"]
-    assert len(blocks) == 7
+    assert len(blocks) == 8
     for block in blocks:
         cfg = block["config"]
         expected = {"mitra": "conversation_rows", "google_forms": "wide_form"}[block["config_source"]]

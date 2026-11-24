@@ -80,8 +80,15 @@ def test_config_top_level_contract(persona):
     assert "layout" not in cfg and "id_strategy" not in cfg
     assert cfg["timestamp_column"] == "Timestamp"
     assert cfg["default_completion"] == "COMPLETED"
-    assert cfg["datetime"] == {"formats": ["%m/%d/%Y %H:%M:%S"], "fallback_timezone": "Asia/Kolkata"}
-    assert cfg["ignored_columns"] == ["Email Address"]
+    if persona == "Educator":
+        assert cfg["datetime"] == {
+            "formats": ["%m/%d/%Y %H:%M:%S", "%m/%d/%Y", "%d/%m/%Y"],
+            "fallback_timezone": "Asia/Kolkata",
+        }
+        assert cfg["ignored_columns"] == ["Language", "Email Address"]
+    else:
+        assert cfg["datetime"] == {"formats": ["%m/%d/%Y %H:%M:%S"], "fallback_timezone": "Asia/Kolkata"}
+        assert cfg["ignored_columns"] == ["Email Address"]
     assert cfg["ignored_column_patterns"] == ["^Column \\d+$"]
     # script detection looks at open-question answers only: bilingual forms print choice answers in both languages
     assert cfg["language"] == {"default": "en", "script_detect": {"kn": "[\\u0C80-\\u0CFF]"}, "detect_kinds": ["open"]}
@@ -147,8 +154,11 @@ def test_each_persona_has_the_expected_launch_forms():
         "Youth": ["youth_launch"],
         "Parent": ["parents_english_launch"],
         "General Public": ["general_public_english_launch"],
+        "Educator": ["educator_launch"],
     }
-    assert {p: len(list(_questions(p))) for p in GFORMS_PERSONAS} == {"Youth": 18, "Parent": 15, "General Public": 11}
+    assert {p: len(list(_questions(p))) for p in GFORMS_PERSONAS} == {
+        "Youth": 18, "Parent": 15, "General Public": 11, "Educator": 11,
+    }
 
 
 def test_demographic_questions_are_metadata():
@@ -236,9 +246,10 @@ def test_config_carries_the_personas_session_type(persona):
     assert SESSION_TYPE_TO_PERSONA[cfg["session_type"]] == persona
 
 
-def test_session_types_of_the_three_google_form_personas():
+def test_session_types_of_the_four_google_form_personas():
     assert {p: gforms_config_v1(p)["session_type"] for p in GFORMS_PERSONAS} == {
         "Youth": "Youth_Voice", "Parent": "Parent_Voice", "General Public": "General_Public_Voice",
+        "Educator": "Educator_Voice",
     }
 
 
@@ -257,11 +268,27 @@ def test_launch_form_versions_are_known_mitra_version_keys():
             assert form["questionnaire_version"] in mitra_keys
 
 
-def test_educator_has_no_google_form_definition():
-    assert "Educator" in PERSONAS and "Educator" not in GFORMS_PERSONAS
-    assert PERSONAS["Educator"]["gforms_config_id"] is None
-    with pytest.raises(KeyError):
-        gforms_config_v1("Educator")
+def test_educator_has_google_form_definition():
+    assert "Educator" in PERSONAS and "Educator" in GFORMS_PERSONAS
+    assert PERSONAS["Educator"]["gforms_config_id"] is not None
+    assert gforms_config_v1("Educator")["session_type"] == "Educator_Voice"
+
+
+def test_educator_google_forms_csv_parses_successfully():
+    path = Path("Persona-Wise Consolidated Data - Educator.csv")
+    if not path.exists():
+        return
+    from app.api.services.feedback_gforms import parse_gforms_csv, check_gforms_file, prepare_gforms_responses
+    with open(path, "rb") as f:
+        file_bytes = f.read()
+    cfg = gforms_config_v1("Educator")
+    df = parse_gforms_csv(file_bytes)
+    assert check_gforms_file(df, cfg) == []
+    responses, skipped, stats = prepare_gforms_responses(df, cfg)
+    assert len(responses) == 446
+    assert stats["rows_read"] == 447
+    assert stats["collapsed_duplicates"] == 1
+    assert len(skipped) == 0
 
 
 def test_unknown_persona_raises_key_error():

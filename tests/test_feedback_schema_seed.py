@@ -19,7 +19,7 @@ EXPECTED_SESSION_TYPES = {
     "Youth": "Youth_Voice", "Parent": "Parent_Voice",
     "General Public": "General_Public_Voice", "Educator": "Educator_Voice",
 }
-GFORMS_PERSONAS_EXPECTED = ["Youth", "Parent", "General Public"]
+GFORMS_PERSONAS_EXPECTED = ["Youth", "Parent", "General Public", "Educator"]
 BASELINE = [{"key": "V1", "effective_from": None}]
 
 
@@ -27,14 +27,13 @@ def test_personas_are_the_four_leader_categories():
     assert list(PERSONAS) == EXPECTED_PERSONAS
     assert {name: p["session_type"] for name, p in PERSONAS.items()} == EXPECTED_SESSION_TYPES
     assert [name for name, p in PERSONAS.items() if p["gforms_config_id"] is not None] == GFORMS_PERSONAS_EXPECTED
-    assert PERSONAS["Educator"]["gforms_config_id"] is None
+    assert PERSONAS["Educator"]["gforms_config_id"] is not None
 
 
-def test_educator_has_a_mitra_config_and_no_google_forms_config():
-    assert PERSONAS["Educator"]["config_id"] is not None and PERSONAS["Educator"]["gforms_config_id"] is None
+def test_educator_has_a_mitra_config_and_google_forms_config():
+    assert PERSONAS["Educator"]["config_id"] is not None and PERSONAS["Educator"]["gforms_config_id"] is not None
     assert load_seed_config("feedback_upload", "mitra", "Educator_Voice")["session_type"] == "Educator_Voice"
-    with pytest.raises(KeyError):
-        load_seed_config("feedback_upload", "google_forms", "Educator_Voice")
+    assert load_seed_config("feedback_upload", "google_forms", "Educator_Voice")["session_type"] == "Educator_Voice"
 
 
 def test_educator_ids_are_fixed():
@@ -43,10 +42,11 @@ def test_educator_ids_are_fixed():
     assert educator["leader_category_id"] == "117e0bb9-c0de-414a-a7f0-5ee62e48477e"
     assert educator["program_id"] == "b09ca040-f2cb-4c31-b0a8-07ce0acb69a2"
     assert educator["config_id"] == "4bc09524-71e3-4f0e-95b9-9d936e6e8697"
+    assert educator["gforms_config_id"] == "a3f12b84-5c90-4e31-89d2-7c8190de6210"
     assert educator["session_type"] == "Educator_Voice"
     ids = [v for p in PERSONAS.values() for k, v in p.items()
            if k in ("leader_category_id", "program_id", "config_id", "gforms_config_id") and v is not None]
-    assert len(ids) == len(set(ids)) == 15  # every fixed id is distinct (4*3 + 3 Google Forms)
+    assert len(ids) == len(set(ids)) == 16  # every fixed id is distinct (4*4: 4 personas * (leader + program + 2 upload configs))
 
 
 def test_seeded_mitra_configs_carry_versions_opening_row_and_session_type():
@@ -87,9 +87,9 @@ def test_seeded_gforms_configs_carry_session_type_and_form_versions():
             assert form["questionnaire_version"] == "V1"
 
 
-def test_gforms_config_for_educator_is_not_available():
-    with pytest.raises(KeyError):
-        gforms_config_v1("Educator")
+def test_gforms_config_for_educator_is_available():
+    cfg = gforms_config_v1("Educator")
+    assert cfg["session_type"] == "Educator_Voice"
 
 
 # schema.sql text checks
