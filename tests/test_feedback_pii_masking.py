@@ -224,6 +224,13 @@ def test_extraction_without_pii_key_uses_masking_only():
     assert run.result.pii_detected is False and run.result.pii_types == ()
 
 
+def test_extraction_without_masking_fails_closed_if_pii_key_is_missing():
+    answer_no_pii = json.dumps({"fields": json.loads(_extraction_answer())["fields"]})
+    with pytest.raises(fx.ExtractionOutputError):
+        fx.extract([_row(1, "How old are you?"), _row(2, "more teachers please", parent="p1")],
+                   _config(masking=None), SYSTEM, USER, lambda _: (answer_no_pii, {}), (), masking=None)
+
+
 def test_the_local_check_still_runs_first_so_a_number_never_reaches_the_masking_model_either():
     rows = [_row(1, "Your number?"), _row(2, "9876543210", parent="p1")]
     fakes = Fakes(_masked_all)

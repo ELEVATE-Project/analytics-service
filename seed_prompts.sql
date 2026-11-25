@@ -1326,7 +1326,7 @@ You must completely REPLACE the personal or abusive text with the tag. You must 
 
 Replace only the smallest part (the name, the place, the abusive word), never the whole sentence. One full name is ONE tag.
 
-Text that is already a placeholder such as [number removed], [email removed], [handle removed] or [link removed] stays exactly as it is (and counts as personal data found).
+Text that is already a placeholder such as [number removed], [email removed], [handle removed] or [link removed] stays exactly as it is (the earlier deterministic check already recorded it, so do not report it again).
 
 The word REDACTED (any case, with or without brackets, with or without a number after it) is a placeholder that an earlier step already put in. Leave it exactly as it is and do NOT report it: it is not a new finding, so it adds nothing to pii_found. Judge only the rest of the answer.
 

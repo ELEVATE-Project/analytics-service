@@ -1653,7 +1653,7 @@ def _bare_config(spec: FieldSpec, limits: Limits, placeholders: FrozenSet[str]) 
     return ExtractionConfig("-", "-", (spec,), ("other",), {}, "-", {}, limits, DEFAULT_PII_POLICY, placeholders, {})
 
 
-def parse_model_response(text: Any, config: ExtractionConfig) -> ExtractionResult:
+def parse_model_response(text: Any, config: ExtractionConfig, *, require_pii: bool = True) -> ExtractionResult:
     """
     Strictly validates the model's answer. Accepted shape (markdown fences around it are tolerated):
 
@@ -1675,6 +1675,8 @@ def parse_model_response(text: Any, config: ExtractionConfig) -> ExtractionResul
         raise ExtractionOutputError("model answer is not valid JSON (strict, no duplicate keys)") from exc
     if not isinstance(data, dict):
         raise ExtractionOutputError("model answer must be a JSON object")
+    if require_pii and set(data) != {"fields", "pii"}:
+        raise ExtractionOutputError("model answer must have exactly the keys 'fields' and 'pii'")
     if not (set(data) <= {"fields", "pii"} and "fields" in data):
         raise ExtractionOutputError("model answer must have 'fields' (and optionally 'pii')")
 
@@ -1846,7 +1848,7 @@ def extract(
             raise
         usage = usage if isinstance(usage, dict) else {}
         try:
-            result = parse_model_response(answer, config)
+            result = parse_model_response(answer, config, require_pii=(masking is None))
         except ExtractionOutputError as exc:
             exc.usage = usage
             exc.response = answer
