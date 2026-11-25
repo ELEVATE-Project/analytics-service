@@ -1168,7 +1168,6 @@ def _render_output_format(config: ExtractionConfig) -> str:
     example = {
         "fields": {f.name: {"value": [] if f.multi else None, "raw": None, "confidence": None, "justification": None}
                    for f in config.fields},
-        "pii": {"detected": False, "types": []},
     }
     return json.dumps(example, indent=2) + "\n\n" + JUSTIFICATION_INSTRUCTION
 
@@ -1676,8 +1675,8 @@ def parse_model_response(text: Any, config: ExtractionConfig) -> ExtractionResul
         raise ExtractionOutputError("model answer is not valid JSON (strict, no duplicate keys)") from exc
     if not isinstance(data, dict):
         raise ExtractionOutputError("model answer must be a JSON object")
-    if set(data) != {"fields", "pii"}:
-        raise ExtractionOutputError("model answer must have exactly the keys 'fields' and 'pii'")
+    if not (set(data) <= {"fields", "pii"} and "fields" in data):
+        raise ExtractionOutputError("model answer must have 'fields' (and optionally 'pii')")
 
     fields = data["fields"]
     if not isinstance(fields, dict):
@@ -1693,6 +1692,9 @@ def parse_model_response(text: Any, config: ExtractionConfig) -> ExtractionResul
         if not isinstance(entry, dict):
             raise ExtractionOutputError(f"field {spec.name!r} must be an object")
         results.append(_map_field(spec, entry, config))
+
+    if "pii" not in data:
+        return ExtractionResult(tuple(results), False, ())
 
     pii = data["pii"]
     if not isinstance(pii, dict) or not set(pii) <= {"detected", "types"} or "detected" not in pii:

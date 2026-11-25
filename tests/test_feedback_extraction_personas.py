@@ -277,7 +277,7 @@ def test_persona_prompt_uses_only_known_variables_and_all_the_required_ones(sql,
     _, system, user = _seeded_prompt(sql, PERSONA_PROMPT_NAMES[persona])
     used = set(re.findall(r"\{\{\s*([A-Za-z_]+)\s*\}\}", system + user))
     assert used <= KNOWN_VARIABLES
-    assert {"persona", "fields", "field_names", "pii_types", "output_format", "conversation_id", "conversation"} <= used
+    assert {"persona", "fields", "field_names", "output_format", "conversation_id", "conversation"} <= used
     assert "{{conversation}}" in user and "{{conversation_id}}" in user
 
 
@@ -296,13 +296,8 @@ def test_persona_prompt_keeps_the_safety_clauses_of_the_generic_prompt(sql, pers
     assert 'value" null and "raw" null' in system and 'value" null and "raw" filled' in system
     # the delimited conversation and the data-not-instructions reminder of the user part
     assert user == generic_user
-    # PII semantics: same question, same 'when in doubt' rule, same types variable, same false-means-empty rule
-    pii = system[system.index("## PII check"):system.index("## Output format")]
-    generic_pii = generic_system[generic_system.index("## PII check"):generic_system.index("## Output format")]
-    assert pii.split("Not PII:")[0] == generic_pii.split("Not PII:")[0]
-    assert "When in doubt, set it to true" in pii and "{{pii_types}}" in pii
-    assert 'If "pii.detected" is false, "pii.types" must be an empty list.' in pii
-    assert "Bot lines are never PII." in pii
+    # PII detection lives in the dedicated masking prompt, not in metadata extraction prompts
+    assert "## PII check" not in system and "## PII check" not in generic_system
 
 
 @pytest.mark.parametrize("persona", PERSONA_NAMES)

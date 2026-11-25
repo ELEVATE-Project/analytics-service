@@ -217,6 +217,13 @@ def test_the_flag_stays_false_when_nothing_was_found_anywhere():
     assert run.result.pii_detected is False and run.masking.pii_types == ()
 
 
+def test_extraction_without_pii_key_uses_masking_only():
+    answer_no_pii = json.dumps({"fields": json.loads(_extraction_answer())["fields"]})
+    run = _run_extract(Fakes(_masked_all, answer_no_pii), rows=[
+        _row(1, "How old are you?"), _row(2, "more teachers please", parent="p1")])
+    assert run.result.pii_detected is False and run.result.pii_types == ()
+
+
 def test_the_local_check_still_runs_first_so_a_number_never_reaches_the_masking_model_either():
     rows = [_row(1, "Your number?"), _row(2, "9876543210", parent="p1")]
     fakes = Fakes(_masked_all)
