@@ -1840,6 +1840,10 @@ def extract(
     extraction_conversation = original if config.pii_policy.extraction_text == EXTRACTION_TEXT_ORIGINAL else conversation
     try:
         prompt = render_prompt(system_template, user_template, config, extraction_conversation)
+        if masking is None and "{{pii_types}}" not in system_template:
+            raise ExtractionConfigError(
+                "a fields-only extraction prompt (without {{pii_types}}) requires a masking step"
+            )
         note(STAGE_METADATA_EXTRACTION, "running")
         try:
             answer, usage = call_llm(prompt)

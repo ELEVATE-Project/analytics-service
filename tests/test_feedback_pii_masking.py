@@ -228,7 +228,17 @@ def test_extraction_without_masking_fails_closed_if_pii_key_is_missing():
     answer_no_pii = json.dumps({"fields": json.loads(_extraction_answer())["fields"]})
     with pytest.raises(fx.ExtractionOutputError):
         fx.extract([_row(1, "How old are you?"), _row(2, "more teachers please", parent="p1")],
-                   _config(masking=None), SYSTEM, USER, lambda _: (answer_no_pii, {}), (), masking=None)
+                   _config(masking=None), "{{pii_types}}", USER, lambda _: (answer_no_pii, {}), (), masking=None)
+
+
+def test_fields_only_prompt_without_masking_fails_before_model_call():
+    calls = []
+    answer_with_false_pii = _extraction_answer(pii=False)
+    with pytest.raises(fx.ExtractionConfigError):
+        fx.extract([_row(1, "What is your name?"), _row(2, "Ramesh", parent="p1")],
+                   _config(masking=None), SYSTEM, USER,
+                   lambda p: calls.append(p) or (answer_with_false_pii, {}), (), masking=None)
+    assert calls == []
 
 
 def test_the_local_check_still_runs_first_so_a_number_never_reaches_the_masking_model_either():
@@ -270,7 +280,7 @@ def test_a_failed_extraction_call_after_masking_also_carries_the_masking_usage()
 
 def test_no_masking_step_means_no_masking_call_and_the_old_behaviour():
     fakes = Fakes(_masked_all)
-    run = fx.extract(ROWS, _config(None), SYSTEM, USER, fakes.extraction, ())
+    run = fx.extract(ROWS, _config(None), "system {{pii_types}}", USER, fakes.extraction, ())
     assert fakes.masking_prompts == [] and run.masking is None and "Asha Verma" in fakes.extraction_prompts[0]
 
 

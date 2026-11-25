@@ -258,12 +258,12 @@ def test_an_integer_answer_survives_the_whole_extract_sequence_and_the_pii_backs
         seen.append(prompt)
         return _answer(age=17), {"prompt_tokens": 1, "completion_tokens": 1}
 
-    run = fx.extract(rows, _config(), "S {{fields}}", "U {{conversation}}", call)
+    run = fx.extract(rows, _config(), "S {{fields}} {{pii_types}}", "U {{conversation}}", call)
     assert _field(run.result, "age").value == "17" and run.llm_called and len(seen) == 1
     assert run.result.pii_detected is True                          # the digit run, whatever the model said
     # an error never carries respondent or model text
     with pytest.raises(fx.ExtractionOutputError) as info:
-        fx.extract(rows, _config(), "S", "U", lambda prompt: (f"not json {MARKER}", {}))
+        fx.extract(rows, _config(), "S {{pii_types}}", "U", lambda prompt: (f"not json {MARKER}", {}))
     assert MARKER not in str(info.value)
 
 
@@ -310,7 +310,7 @@ def _prompt_world():
     }
 
     def version(n, active, text):
-        return {"id": f"{text}-v{n}", "version": n, "is_active": active, "system_prompt": f"S {text} v{n}", "user_prompt": f"U {text} v{n}"}
+        return {"id": f"{text}-v{n}", "version": n, "is_active": active, "system_prompt": f"S {text} v{n} {{{{pii_types}}}}", "user_prompt": f"U {text} v{n}"}
 
     versions = {
         ids["Feedback Metadata Extraction"]: [version(1, True, "generic")],
@@ -324,7 +324,7 @@ def _prompt_world():
 def test_a_named_prompt_resolves_to_its_highest_active_version():
     row = asyncio.run(ops.load_prompt_for_config(_prompt_world(), _config(prompt_name="Youth Prompt")))
     assert row["id"] == "youth-v3" and row["version"] == 3 and row["name"] == "Youth Prompt"
-    assert row["system_prompt"] == "S youth v3" and row["user_prompt"] == "U youth v3"
+    assert row["system_prompt"] == "S youth v3 {{pii_types}}" and row["user_prompt"] == "U youth v3"
 
 
 def test_a_config_object_without_a_prompt_name_is_refused_not_answered_with_a_default_prompt():
@@ -418,7 +418,7 @@ def test_extract_submission_sends_the_named_prompt_and_stores_the_version_it_use
         return _answer(age=17), {"prompt_tokens": 3, "completion_tokens": 2}
 
     outcome = asyncio.run(ops.extract_submission(FakeEnginePool(conn), "s1", "mitra", llm_function=llm))
-    assert prompts_sent == ["S youth v3\n\nU youth v3"]
+    assert len(prompts_sent) == 1 and prompts_sent[0].startswith("S youth v3 ") and prompts_sent[0].endswith("\n\nU youth v3")
     assert saved["prompt_version_id"] == "youth-v3" and saved["config_version_id"] == config_version_id
     assert saved["llm_log"]["prompt_version_id"] == "youth-v3"
     assert outcome.prompt_version_id == "youth-v3" and outcome.prompt_name == "Youth Prompt"
@@ -477,7 +477,7 @@ def _outcome(config, answer):
     run = fx.extract(
         [{"sequence": 1, "parent_id": None, "question_key": "Q", "message": "q", "translated_message": None},
          {"sequence": 2, "parent_id": "p", "question_key": "Q", "message": "a", "translated_message": None}],
-        config, "S", "U", lambda prompt: (answer, {"prompt_tokens": 1, "completion_tokens": 1}))
+        config, "S {{pii_types}}", "U", lambda prompt: (answer, {"prompt_tokens": 1, "completion_tokens": 1}))
     return SimpleNamespace(run=run, field_kinds={f.name: f.kind for f in config.fields})
 
 

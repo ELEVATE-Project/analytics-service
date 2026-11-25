@@ -177,7 +177,8 @@ def _masking_step(answer=None, fail=False):
 
 
 def _extract(config, call, masking=None, progress=None):
-    system = user = "{{fields}} {{conversation}}"
+    system = "{{fields}} {{pii_types}} {{conversation}}"
+    user = "{{fields}} {{conversation}}"
     return fx.extract(ROWS, config, system, user, call, (), masking, progress)
 
 

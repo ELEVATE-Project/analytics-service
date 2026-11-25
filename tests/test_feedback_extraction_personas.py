@@ -386,7 +386,7 @@ def test_each_persona_accepts_an_answer_with_every_configured_field_and_rejects_
         config = _config(persona)
         run = fx.extract([{"sequence": 1, "parent_id": None, "question_key": "Q", "message": "Q?", "translated_message": None},
                           {"sequence": 2, "parent_id": "p", "question_key": "Q", "message": "x", "translated_message": None}],
-                         config, "{{persona}} {{fields}} {{output_format}}", "{{conversation}}",
+                         config, "{{persona}} {{fields}} {{pii_types}} {{output_format}}", "{{conversation}}",
                          lambda prompt: (_answer(config, {}), {}))
         assert [f.field_name for f in run.result.fields] == DOTS_FIELDS[persona]
         broken = json.loads(_answer(config, {}))
