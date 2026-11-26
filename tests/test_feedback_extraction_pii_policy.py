@@ -153,6 +153,7 @@ def test_a_fullwidth_at_sign_is_an_email():
     "learn.in the village", "school.in future", "it was fun.in my class", "go home.me and my friends",
     "rate@5%", "5pm@6", "x@", "@5",
     "I am 17, class 9, born 2008", "25,000 per month", "Rs 1,20,000 a year", "10.5 lakh", "1234567",
+    "helpline 1098", "dial 112 or 100", "code 1992",
     "I am 15 and my sister is 12 in class 7", "i scored 95.5 percent", "five 4 three",
 ])
 def test_ordinary_numbers_and_sentences_are_not_flagged(text):

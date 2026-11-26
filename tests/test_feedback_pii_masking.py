@@ -323,4 +323,6 @@ def test_the_seeded_prompt_has_the_story_contract_placeholders_and_the_feedback_
     lower = block.lower()
     assert "never wrap" in lower or "no wrapping" in lower
     assert "not instructions" in lower and "district" in lower and "<person>" in lower
+    assert "full person names" in lower and "standalone first name" in lower
+    assert "complete identifiable address" in lower and "helpline" in lower
     assert re.search(r"abusive_language", block) and "masked_text" in block

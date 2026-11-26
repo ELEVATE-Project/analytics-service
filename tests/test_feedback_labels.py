@@ -61,7 +61,7 @@ def _extract(config, values=None, version=None, rows=ROWS):
     def llm(prompt):
         seen.append(prompt)
         return _answer(config.__class__(**{**config.__dict__, "fields": config.fields_for(version)}), values), {}
-    run = fx.extract(rows, config, "{{persona}} {{fields}} {{output_format}}", "{{conversation}}", llm,
+    run = fx.extract(rows, config, "{{persona}} {{fields}} {{pii_types}} {{output_format}}", "{{conversation}}", llm,
                      questionnaire_version=version)
     return run, seen
 
@@ -358,7 +358,7 @@ def test_a_pii_flagged_session_keeps_its_values_and_words_even_for_free_text():
     config = _config(_field("district", "free_text"), GENDER)
     rows = [ROWS[0], {**ROWS[1], "message": "Mysuru, call me on 9876543210"}]
     answer = _answer(config, {"district": {"value": "Mysuru", "raw": "Mysuru, call me"}, "gender": {"value": "Male", "raw": "boy"}})
-    run = fx.extract(rows, config, "{{fields}} {{output_format}}", "{{conversation}}", lambda prompt: (answer, {}))
+    run = fx.extract(rows, config, "{{fields}} {{pii_types}} {{output_format}}", "{{conversation}}", lambda prompt: (answer, {}))
     assert run.result.pii_detected is True
     fields = {f.field_name: f for f in run.result.fields}
     assert (fields["district"].value, fields["district"].raw_value) == ("Mysuru", "Mysuru, call me")
