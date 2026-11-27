@@ -97,7 +97,7 @@ def test_the_seeded_extraction_configs_all_copy_state_and_district():
     text = (Path(__file__).resolve().parent.parent / "seed_config.sql").read_text(encoding="utf-8")
     blocks = re.findall(r"\$cfg\$\n(.*?)\n\$cfg\$::jsonb", text, re.DOTALL)
     extraction = [json.loads(b) for b in blocks if '"fields"' in b and '"session_type"' in b]
-    assert len(extraction) == 4
+    assert len(extraction) == 5  # 4 personas + Youth_Voice_Cupshup
     for raw in extraction:
         assert raw["copy_to_submission"] == {"state": "state", "district": "district"}
         assert fx.parse_extraction_config(raw).submission_columns == {"state": "state", "district": "district"}

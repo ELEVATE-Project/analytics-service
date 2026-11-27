@@ -18,7 +18,9 @@ import pg_support
 
 from app.database.db import db
 from app.database.feedback_operations import (
+    AmbiguousFeedbackConfigError,
     get_active_feedback_config,
+    get_active_feedback_config_candidates,
     get_feedback_process_steps,
     get_process_steps,
     list_feedback_config,
@@ -198,7 +200,7 @@ def test_the_steps_of_a_persona_come_from_the_config_of_the_same_tenant_even_whe
     """
     async def body(conn):
         foreign_steps = [{"name": "feedback_metadata_extraction", "columns": ["only-other"]}]
-        foreign_config = dict(await get_active_feedback_config(YOUTH["program_id"], "mitra", tenant_code="mitra"))["config"]
+        foreign_config = dict(await get_active_feedback_config(YOUTH["program_id"], "mitra", tenant_code="mitra", session_type="Youth_Voice"))["config"]
         foreign_config["process_steps"] = foreign_steps
         await pg_support.insert_foreign_config(
             conn, tenant_code="other", program_id=YOUTH["program_id"], source="mitra", session_type="Youth_Voice",
@@ -217,11 +219,16 @@ def test_the_steps_of_a_persona_come_from_the_config_of_the_same_tenant_even_whe
 
 def test_active_config_lookup_can_be_narrowed_by_tenant_and_session_type():
     async def body(conn):
-        base = await get_active_feedback_config(YOUTH["program_id"], "mitra")
+        # the Youth program runs two mitra personas (Youth_Voice, Youth_Voice_Cupshup): unnarrowed is ambiguous
+        with pytest.raises(AmbiguousFeedbackConfigError, match="Youth_Voice, Youth_Voice_Cupshup"):
+            await get_active_feedback_config(YOUTH["program_id"], "mitra")
+        candidates = await get_active_feedback_config_candidates(YOUTH["program_id"], "mitra", tenant_code="mitra")
+        assert [c["session_type"] for c in candidates] == ["Youth_Voice", "Youth_Voice_Cupshup"]
+        base = await get_active_feedback_config(YOUTH["program_id"], "mitra", session_type="Youth_Voice")
         assert base["session_type"] == "Youth_Voice"
         assert await get_active_feedback_config(YOUTH["program_id"], "mitra", tenant_code="mitra",
                                                 session_type="Youth_Voice") == base
-        assert await get_active_feedback_config(YOUTH["program_id"], "mitra", tenant_code="other") is None
+        assert await get_active_feedback_config(YOUTH["program_id"], "mitra", tenant_code="other", session_type="Youth_Voice") is None
         assert await get_active_feedback_config(YOUTH["program_id"], "mitra", session_type="Parent_Voice") is None
         assert (await get_active_feedback_config(YOUTH["program_id"], "google_forms",
                                                  session_type="Youth_Voice"))["config"]["process_steps"] == STEPS
@@ -333,7 +340,7 @@ def test_set_writes_a_new_version_with_the_value_and_keeps_the_rest():
         assert v2["change_note"] == "smaller files"
         assert {k: v for k, v in v1["config"].items() if k != "max_csv_upload_bytes"} == \
                {k: v for k, v in v2["config"].items() if k != "max_csv_upload_bytes"}
-        active = await get_active_feedback_config(YOUTH["program_id"], "mitra")
+        active = await get_active_feedback_config(YOUTH["program_id"], "mitra", session_type="Youth_Voice")
         assert active["version"] == 2 and active["config"]["max_csv_upload_bytes"] == 50_000_000
         # the other source and the other personas are untouched
         assert [v["version"] for v in await _versions(conn, "Youth_Voice", "google_forms")] == [1]

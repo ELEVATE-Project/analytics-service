@@ -166,7 +166,7 @@ async def _startup(seed=False):
     """
     The real startup path of every process: schema.sql, the seeds, the health check. These tests are about upgrading
     the data of the previous release, so by default the config seed is left out (seed_config.sql creates the 'mitra'
-    tenant and its 11 configs, which would sit next to the legacy rows being counted); `seed=True` runs it as well.
+    tenant and its 13 configs, which would sit next to the legacy rows being counted); `seed=True` runs it as well.
     """
     pool = await asyncpg.create_pool(DSN, min_size=1, max_size=2)
     db.pool = pool
@@ -257,7 +257,7 @@ def test_the_seed_creates_its_tenant_and_configs_next_to_the_legacy_rows_and_tou
             await _startup(seed=True)
             await _startup(seed=True)                                   # a restart changes nothing
         assert await conn.fetchval("SELECT count(*) FROM tenant WHERE code = 'mitra'") == 1
-        assert await conn.fetchval("SELECT count(*) FROM config WHERE tenant_code = 'mitra'") == 11
+        assert await conn.fetchval("SELECT count(*) FROM config WHERE tenant_code = 'mitra'") == 13
         assert await conn.fetchval(
             "SELECT string_agg(id::text || name, '|' ORDER BY id) FROM config WHERE tenant_code = $1", TENANT) == legacy_before         # the legacy tenant's rows are as they were
         assert not [r for r in caplog.records if r.getMessage().startswith("Config seed")]

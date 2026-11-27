@@ -17,7 +17,7 @@ import io
 import logging
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -122,6 +122,16 @@ def _bot_id_header(config: Dict[str, Any]) -> str:
     of its bot id inside the persona, so a file without it can not be stamped.
     """
     return resolve_column_map(config)["bot_id"]
+
+
+def session_types_in_file(df: pd.DataFrame, config: Dict[str, Any]) -> Set[str]:
+    """The distinct non-blank (stripped) values of the file's session_type column as `config`'s column_map names
+    it; empty when the file has no such column. Used only to pick between several configs of one program (the values
+    are compared with config names, never echoed)."""
+    col = _column_lookup(df).get(required_column_headers(config)["session_type"].lower())
+    if col is None:
+        return set()
+    return {v for v in df[col].astype(str).str.strip().unique().tolist() if v != ""}
 
 
 def check_feedback_file(df: pd.DataFrame, config: Dict[str, Any], expected_session_type: str) -> List[str]:

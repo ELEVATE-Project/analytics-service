@@ -12,7 +12,10 @@
 -- Today: the 1M Voice feedback settings of tenant 'mitra', for the four personas (Youth, Parent,
 -- General Public, Educator):
 --   * feedback_upload      / mitra         adapter conversation_rows: how to read a Mitra raw conversation CSV
---                                          (one per persona)
+--                                          (one per persona; the Youth program also runs Youth_Voice_Cupshup, a
+--                                          second Youth bot with the Youth_Voice settings: an upload to a program
+--                                          with several mitra configs picks the one whose session_type the file
+--                                          carries)
 --   * feedback_upload      / google_forms  adapter wide_form: how to read a Google Forms wide CSV (Youth, Parent,
 --                                          General Public)
 --   * feedback_extraction  / any           the metadata fields and bands of the LLM extraction and the
@@ -234,6 +237,140 @@ SELECT '864bd1a7-3f34-473e-8578-65c801908657'::uuid, 1, TRUE, $cfg$
 $cfg$::jsonb, 'seed', 'Initial format'
 WHERE EXISTS (SELECT 1 FROM config WHERE id = '864bd1a7-3f34-473e-8578-65c801908657'::uuid)
   AND NOT EXISTS (SELECT 1 FROM config_version WHERE config_id = '864bd1a7-3f34-473e-8578-65c801908657'::uuid)
+ON CONFLICT (config_id, version) DO NOTHING;
+
+-- CONFIG feedback_upload mitra Youth_Voice_Cupshup
+INSERT INTO config (id, config_source, name, config_type, program_id, tenant_code, leader_id, session_type, bot_id, bot_name)
+SELECT '9d4df67f-d0ff-408e-97dc-62b98fa603bb'::uuid, 'mitra', 'Youth Cupshup bot CSV validator', 'feedback_upload', 'dcd67b14-f0ac-4e71-87fd-fa818c8f2d6a'::uuid, 'mitra', NULL, 'Youth_Voice_Cupshup', '205', 'Youth_Voice_Cupshup'
+WHERE EXISTS (SELECT 1 FROM tenant WHERE code = 'mitra')
+  AND EXISTS (SELECT 1 FROM programs WHERE id = 'dcd67b14-f0ac-4e71-87fd-fa818c8f2d6a'::uuid)
+ON CONFLICT DO NOTHING;
+
+INSERT INTO config_version (config_id, version, is_active, config, created_by, change_note)
+SELECT '9d4df67f-d0ff-408e-97dc-62b98fa603bb'::uuid, 1, TRUE, $cfg$
+{
+  "session_type": "Youth_Voice_Cupshup",
+  "adapter": "conversation_rows",
+  "column_map": {
+    "session_type": "session_type",
+    "session_status": "session_status",
+    "session": "session",
+    "submission_id": "submission_id",
+    "language": "language",
+    "sequence": "sequence",
+    "message": "message",
+    "created_at": "created_at",
+    "stage": "stage",
+    "sender_id": "sender_id",
+    "bot_id": "bot_id",
+    "bot_name": "bot_name",
+    "translated_message": "translated_message",
+    "conversation_row_id": "conversation_row_id",
+    "receiver_id": "receiver_id",
+    "updated_at": "updated_at"
+  },
+  "opening_row": {
+    "mode": "auto"
+  },
+  "questionnaire_versions": [
+    {
+      "key": "V1",
+      "effective_from": null
+    }
+  ],
+  "bot_sender_ids": [
+    "1"
+  ],
+  "message_map": {
+    "bot": {
+      "message": "translated_message",
+      "translated_message": "message"
+    },
+    "respondent": {
+      "message": "message",
+      "translated_message": "translated_message"
+    }
+  },
+  "sequence_offset": 1,
+  "completion_map": {
+    "COMPLETED": "COMPLETED",
+    "IN_PROGRESS": "IN_PROGRESS"
+  },
+  "closing_keys": [
+    "THANK_YOU",
+    "THANKYOU",
+    "CLOSING"
+  ],
+  "datetime": {
+    "fallback_timezone": "Asia/Kolkata"
+  },
+  "questions": [
+    {
+      "key": "AGE_IDENTIFICATION",
+      "text": "Can you please tell me your age?"
+    }
+  ],
+  "max_csv_upload_bytes": 104857600,
+  "ingestion_schema": {
+    "create": {
+      "required": [
+        "submissionId",
+        "submissionType",
+        "sessionId",
+        "tenantCode",
+        "eventType",
+        "eventPublishedAt",
+        "tags.programId",
+        "tags.leaderCategoryId",
+        "data.source",
+        "data.sessionType",
+        "data.questionnaireVersion",
+        "data.language",
+        "data.completionStatus",
+        "data.submissionDate",
+        "data.messages"
+      ],
+      "optional": [
+        "tags.state",
+        "tags.district",
+        "tags.programName",
+        "tags.leaderCategoryName",
+        "tags.source",
+        "data.botId",
+        "data.botName"
+      ]
+    },
+    "update": {
+      "required": [
+        "submissionId",
+        "submissionType",
+        "sessionId",
+        "tenantCode",
+        "eventType",
+        "eventPublishedAt"
+      ],
+      "newValuesNoEmpty": true
+    },
+    "delete": {
+      "required": [
+        "submissionId",
+        "submissionType",
+        "sessionId",
+        "tenantCode",
+        "eventType",
+        "eventPublishedAt"
+      ]
+    }
+  },
+  "process_steps": [
+    {
+      "name": "feedback_metadata_extraction"
+    }
+  ]
+}
+$cfg$::jsonb, 'seed', 'Initial format'
+WHERE EXISTS (SELECT 1 FROM config WHERE id = '9d4df67f-d0ff-408e-97dc-62b98fa603bb'::uuid)
+  AND NOT EXISTS (SELECT 1 FROM config_version WHERE config_id = '9d4df67f-d0ff-408e-97dc-62b98fa603bb'::uuid)
 ON CONFLICT (config_id, version) DO NOTHING;
 
 -- CONFIG feedback_upload google_forms Youth_Voice
@@ -1865,6 +2002,560 @@ SELECT '09e1cd04-4605-54e5-a535-8e21218bb05c'::uuid, 1, TRUE, $cfg$
 $cfg$::jsonb, 'seed', 'Initial extraction config: the DOTS metadata columns of the persona with the data team''s finalised category lists and the persona''s own prompt'
 WHERE EXISTS (SELECT 1 FROM config WHERE id = '09e1cd04-4605-54e5-a535-8e21218bb05c'::uuid)
   AND NOT EXISTS (SELECT 1 FROM config_version WHERE config_id = '09e1cd04-4605-54e5-a535-8e21218bb05c'::uuid)
+ON CONFLICT (config_id, version) DO NOTHING;
+
+-- CONFIG feedback_extraction any Youth_Voice_Cupshup
+INSERT INTO config (id, config_source, name, config_type, program_id, tenant_code, leader_id, session_type, bot_id, bot_name)
+SELECT 'c648bac2-cbb3-527a-9dfc-ce85c5edaad8'::uuid, 'any', 'Youth Cupshup metadata extraction', 'feedback_extraction', 'dcd67b14-f0ac-4e71-87fd-fa818c8f2d6a'::uuid, 'mitra', NULL, 'Youth_Voice_Cupshup', NULL, NULL
+WHERE EXISTS (SELECT 1 FROM tenant WHERE code = 'mitra')
+  AND EXISTS (SELECT 1 FROM programs WHERE id = 'dcd67b14-f0ac-4e71-87fd-fa818c8f2d6a'::uuid)
+ON CONFLICT DO NOTHING;
+
+INSERT INTO config_version (config_id, version, is_active, config, created_by, change_note)
+SELECT 'c648bac2-cbb3-527a-9dfc-ce85c5edaad8'::uuid, 1, TRUE, $cfg$
+{
+  "schema_version": 1,
+  "persona": "Youth",
+  "session_type": "Youth_Voice_Cupshup",
+  "source_note": "Fields are the DOTS metadata columns of the persona. The category lists are the data team's finalised lists (1MV dashboard requirements sheet) in the engine's normalised spellings; Not answered and N/A are written by the engine and are not listed. Fields with `versions` exist in those questionnaire versions only (N/A otherwise); a field with `applies_when` is N/A unless the earlier field holds one of the listed values; `multi` fields may hold several categories. Sensitive fields are filled only when the respondent states them explicitly.",
+  "prompt_name": "Feedback Metadata Extraction - Youth",
+  "fields": [
+    {
+      "name": "gender",
+      "kind": "category",
+      "description": "The gender of the respondent, as answered to the bot's gender question.",
+      "categories": [
+        "Male",
+        "Female",
+        "Others",
+        "Prefer not to say",
+        "Invalid response",
+        "Unsure / don't know"
+      ],
+      "guidance": {
+        "Male": "boy, man, male",
+        "Female": "girl, woman, female",
+        "Others": "a valid gender that is not male or female, for example non-binary, transgender, 'something else'",
+        "Prefer not to say": "the respondent explicitly says they do not want to share it (a skipped question or no answer is null, not this)",
+        "Invalid response": "a given answer that is gibberish or has nothing to do with the question",
+        "Unsure / don't know": "the respondent says they are unsure of their gender identity or do not know which option to choose"
+      }
+    },
+    {
+      "name": "age",
+      "kind": "integer",
+      "description": "The age of the respondent in years, as a number (the Youth bot is for 12 to 25, but older respondents answer it). Use the number the respondent states (decimals such as 15.5 are valid; 'around 16' is 16); do not compute an age from a class, a birth year or a date of birth. A stated range that lies inside one band is a number inside it; a range that spans two or more bands is Unclear.",
+      "categories": [
+        "Prefer not to say",
+        "Unclear",
+        "Invalid response"
+      ],
+      "guidance": {
+        "Prefer not to say": "the respondent explicitly says they do not want to share it (a skipped question or no answer is null, not this)",
+        "Unclear": "a range that spans two or more bands, or a vague answer such as 'thirty something'",
+        "Invalid response": "a given answer that is gibberish or has nothing to do with the question"
+      },
+      "min": 0,
+      "max": 120,
+      "bands": [
+        {
+          "label": "< 12",
+          "min": null,
+          "max": 12
+        },
+        {
+          "label": "≥ 12 and < 16",
+          "min": 12,
+          "max": 16
+        },
+        {
+          "label": "≥ 16 and < 22",
+          "min": 16,
+          "max": 22
+        },
+        {
+          "label": "≥ 22 and < 26",
+          "min": 22,
+          "max": 26
+        },
+        {
+          "label": "≥ 26 and < 30",
+          "min": 26,
+          "max": 30
+        },
+        {
+          "label": "≥ 30 and < 35",
+          "min": 30,
+          "max": 35
+        },
+        {
+          "label": "≥ 35 and < 40",
+          "min": 35,
+          "max": 40
+        },
+        {
+          "label": "≥ 40 and < 45",
+          "min": 40,
+          "max": 45
+        },
+        {
+          "label": "≥ 45 and < 50",
+          "min": 45,
+          "max": 50
+        },
+        {
+          "label": "≥ 50 and < 55",
+          "min": 50,
+          "max": 55
+        },
+        {
+          "label": "≥ 55 and < 60",
+          "min": 55,
+          "max": 60
+        },
+        {
+          "label": "≥ 60",
+          "min": 60,
+          "max": null
+        }
+      ]
+    },
+    {
+      "name": "state",
+      "kind": "category",
+      "description": "The Indian state or union territory the respondent lives in, as answered to the bot's state question. Map spelling variants, abbreviations and older names to the official name. 'Delhi/NCR' or 'NCR' is decided with the place the respondent names: Noida, Greater Noida and Ghaziabad give Uttar Pradesh, Gurugram (Gurgaon) and Faridabad give Haryana, a Delhi place (or no place at all) gives Delhi. When the respondent names no state (or only a direction, a region or a city) but names a district or a city that belongs to exactly one state, answer with that state and say in the justification that it was derived; a name used in several states, with no state given, is Unmapped. A direction ('North India') or a place that is not one state or union territory is Unmapped. A place outside India makes the state 'Outside India' (and the district too).",
+      "categories": [
+        "Andhra Pradesh",
+        "Arunachal Pradesh",
+        "Assam",
+        "Bihar",
+        "Chhattisgarh",
+        "Goa",
+        "Gujarat",
+        "Haryana",
+        "Himachal Pradesh",
+        "Jharkhand",
+        "Karnataka",
+        "Kerala",
+        "Madhya Pradesh",
+        "Maharashtra",
+        "Manipur",
+        "Meghalaya",
+        "Mizoram",
+        "Nagaland",
+        "Odisha",
+        "Punjab",
+        "Rajasthan",
+        "Sikkim",
+        "Tamil Nadu",
+        "Telangana",
+        "Tripura",
+        "Uttar Pradesh",
+        "Uttarakhand",
+        "West Bengal",
+        "Andaman and Nicobar Islands",
+        "Chandigarh",
+        "Dadra and Nagar Haveli and Daman and Diu",
+        "Delhi",
+        "Jammu and Kashmir",
+        "Ladakh",
+        "Lakshadweep",
+        "Puducherry",
+        "Prefer not to say",
+        "Unmapped",
+        "Invalid response",
+        "Outside India"
+      ],
+      "guidance": {
+        "Delhi": "Delhi, New Delhi, NCT of Delhi; 'Delhi/NCR' or 'NCR' when the district is a Delhi district or none is given",
+        "Prefer not to say": "the respondent explicitly says they do not want to share it (a skipped question or no answer is null, not this)",
+        "Unmapped": "a place that does not identify one state / district: a direction, a region, a city, or a district name used in several states when no state is known",
+        "Invalid response": "names that sound like gibberish, or an answer that has nothing to do with the question",
+        "Outside India": "a place that is not in India"
+      },
+      "aliases": {
+        "Delhi": [
+          "New Delhi",
+          "NCT",
+          "NCT of Delhi",
+          "National Capital Territory of Delhi",
+          "Delhi NCT",
+          "Delhi NCR",
+          "Delhi/NCR",
+          "NCR",
+          "Dilli"
+        ],
+        "Odisha": [
+          "Orissa"
+        ],
+        "Puducherry": [
+          "Pondicherry",
+          "Pondy"
+        ],
+        "Uttarakhand": [
+          "Uttaranchal"
+        ],
+        "Telangana": [
+          "Telengana"
+        ],
+        "Tamil Nadu": [
+          "Tamilnadu",
+          "TN"
+        ],
+        "Uttar Pradesh": [
+          "UP",
+          "U.P."
+        ],
+        "Madhya Pradesh": [
+          "MP",
+          "M.P."
+        ],
+        "West Bengal": [
+          "WB",
+          "Bengal"
+        ],
+        "Jammu and Kashmir": [
+          "J&K",
+          "J and K",
+          "Jammu & Kashmir",
+          "Kashmir"
+        ],
+        "Andaman and Nicobar Islands": [
+          "Andaman",
+          "Nicobar",
+          "A&N Islands",
+          "Andaman & Nicobar Islands"
+        ],
+        "Dadra and Nagar Haveli and Daman and Diu": [
+          "Dadra and Nagar Haveli",
+          "Daman and Diu",
+          "Daman",
+          "Diu",
+          "Silvassa",
+          "Dadra & Nagar Haveli",
+          "Daman & Diu"
+        ]
+      }
+    },
+    {
+      "name": "district",
+      "kind": "free_text",
+      "description": "The district the respondent lives in (free text). Return the commonly used official spelling of the district name (for example 'Bengaluru Urban', 'Mysuru'). If the bot asked the respondent to choose between districts, use the one they chose. Do not guess a district the respondent did not name. A city that is not itself a district name is answered with the district it belongs to when you are sure (Noida is in Gautam Buddha Nagar), otherwise Unmapped. A place outside India is 'Outside India', also when the state is. When there is no district to return, answer with one of the special answers.",
+      "categories": [
+        "Prefer not to say",
+        "Unmapped",
+        "Invalid response",
+        "Outside India"
+      ],
+      "guidance": {
+        "Prefer not to say": "the respondent explicitly says they do not want to share it (a skipped question or no answer is null, not this)",
+        "Unmapped": "a place that does not identify one state / district: a direction, a region, a city, or a district name used in several states when no state is known",
+        "Invalid response": "names that sound like gibberish, or an answer that has nothing to do with the question",
+        "Outside India": "a place that is not in India"
+      }
+    },
+    {
+      "name": "current_activity_status",
+      "kind": "category",
+      "description": "What the respondent is doing right now (studying, working, self-employed, looking for work, something else), as answered to the bot's current-activity question. A respondent in two statuses (a student who works part time) gets both.",
+      "categories": [
+        "Studying",
+        "Working",
+        "Self-employed",
+        "Looking for work/unemployed",
+        "Not currently studying",
+        "Others",
+        "Prefer not to say",
+        "Invalid response"
+      ],
+      "guidance": {
+        "Studying": "in school, college or any course, or saying they go to a named school or college",
+        "Working": "employed by someone: public or private sector work, a job",
+        "Self-employed": "runs their own business or works for themselves (runs a cafe, a shop)",
+        "Looking for work/unemployed": "has no work and is looking for work",
+        "Not currently studying": "has dropped out, discontinued education, or is not enrolled in an educational institution",
+        "Others": "a valid status that is none of these, for example preparing for an exam, or caring for family and not looking for a job",
+        "Prefer not to say": "the respondent explicitly says they do not want to share it (a skipped question or no answer is null, not this)",
+        "Invalid response": "a given answer that is gibberish or has nothing to do with the question"
+      },
+      "multi": true
+    },
+    {
+      "name": "education_level",
+      "kind": "category",
+      "description": "The level of education the respondent is in, asked only of those who study. If the respondent says they dropped out, use the last COMPLETED level (someone who dropped out of a BA completed grade 12: Grade 11 to 12). A level below grade 6 is Others.",
+      "categories": [
+        "Grade 6 to 10",
+        "Grade 11 to 12",
+        "Skill programs",
+        "Pursuing undergraduate and postgraduate",
+        "Others",
+        "Prefer not to say",
+        "Invalid response"
+      ],
+      "guidance": {
+        "Grade 6 to 10": "school classes 6 to 10",
+        "Grade 11 to 12": "school classes 11 and 12",
+        "Skill programs": "ITI, polytechnic, vocational programmes",
+        "Pursuing undergraduate and postgraduate": "a bachelor's or master's course",
+        "Others": "a valid course that is not listed, such as a doctoral programme or a certificate course; also a level below grade 6",
+        "Prefer not to say": "the respondent explicitly says they do not want to share it (a skipped question or no answer is null, not this)",
+        "Invalid response": "a given answer that is gibberish or has nothing to do with the question"
+      },
+      "applies_when": {
+        "field": "current_activity_status",
+        "in": [
+          "Studying"
+        ]
+      }
+    },
+    {
+      "name": "course_details",
+      "kind": "category",
+      "description": "The stream or programme the respondent studies, matching education_level: a stream for Grade 11 to 12 (Science or Commerce; any other stream such as Arts or Humanities is Others), a trade for Skill programs, a degree for Pursuing undergraduate and postgraduate. Use only the values that belong to the respondent's education level; a valid course that is not listed is Others.",
+      "categories": [
+        "Science",
+        "Commerce",
+        "Electrical or electronics",
+        "Mechanical or manufacturing",
+        "Automobile or transport",
+        "Civil or construction",
+        "Computer or IT",
+        "Health",
+        "Beauty",
+        "Hospitality",
+        "Arts (BA or MA)",
+        "Science (B.Sc or M.Sc)",
+        "Commerce (B.Com or M.Com)",
+        "Technology (B.Tech or M.Tech)",
+        "Business administration (BBA or MBA)",
+        "Computer applications (BCA or MCA)",
+        "Medicine (MBBS or MD)",
+        "Law (LLB or LLM)",
+        "Others",
+        "Prefer not to say",
+        "Invalid response"
+      ],
+      "guidance": {
+        "Science": "the science stream of grades 11 and 12",
+        "Commerce": "the commerce stream of grades 11 and 12",
+        "Health": "health-related skill programmes (nursing assistant, lab technician, ...)",
+        "Arts (BA or MA)": "BA, MA or another arts / humanities degree",
+        "Technology (B.Tech or M.Tech)": "B.Tech, M.Tech, BE, ME",
+        "Medicine (MBBS or MD)": "MBBS, MD and similar medical degrees",
+        "Others": "a valid stream, trade or degree that is not listed (for example Arts or Humanities in grades 11-12, nursing, pharmacy, BDS, B.Ed)",
+        "Prefer not to say": "the respondent explicitly says they do not want to share it (a skipped question or no answer is null, not this)",
+        "Invalid response": "a given answer that is gibberish or has nothing to do with the question"
+      },
+      "applies_when": {
+        "field": "education_level",
+        "in": [
+          "Grade 11 to 12",
+          "Skill programs",
+          "Pursuing undergraduate and postgraduate"
+        ]
+      }
+    },
+    {
+      "name": "institution_type",
+      "kind": "category",
+      "description": "The type of school or institution the respondent studies in or studied in, as answered to the bot's institution question. An international school or a board, home schooling and open schooling are Others. If the answer is about a college (the question is about schools), it is Invalid response.",
+      "categories": [
+        "Government",
+        "Private",
+        "Government-aided",
+        "Others",
+        "Not sure",
+        "Prefer not to say",
+        "Invalid response"
+      ],
+      "guidance": {
+        "Government": "government, govt or public (state-run school or institution)",
+        "Private": "private school or institution",
+        "Others": "any institution beyond the listed ones: home schooling, international, open schooling",
+        "Not sure": "the respondent says they are not sure of the institution type or do not know",
+        "Prefer not to say": "the respondent explicitly says they do not want to share it (a skipped question or no answer is null, not this)",
+        "Invalid response": "a given answer that is gibberish or has nothing to do with the question, or an answer about a college (the question is about schools)",
+        "Government-aided": "an aided school or institution (privately run, funded by the government)"
+      }
+    },
+    {
+      "name": "monthly_household_income",
+      "kind": "category",
+      "description": "The household income per MONTH, as a band, for every questionnaire version. The older questionnaire asked for the income per YEAR and the newer one per MONTH. When the amount is per year (the respondent says annual, yearly, per year, a lakh a year, or the bot asked for the yearly income and the respondent gives a bare amount), divide it by 12 first, then pick the band; when it is per month, use it as is.",
+      "categories": [
+        "Zero income / no income",
+        "< ₹25,000",
+        "≥ ₹25,000 and < ₹66,000",
+        "≥ ₹66,000 and < ₹83,000",
+        "≥ ₹83,000",
+        "Don't know",
+        "Prefer not to say",
+        "Invalid response",
+        "Unclear"
+      ],
+      "guidance": {
+        "Zero income / no income": "the household has no income",
+        "Don't know": "the respondent says they are unsure or do not know the household income",
+        "Prefer not to say": "the respondent explicitly says they do not want to share it (a skipped question or no answer is null, not this)",
+        "Invalid response": "a given answer that is gibberish or has nothing to do with the question",
+        "Unclear": "a range that spans two or more bands, or an amount whose period (month or year) cannot be told",
+        "< ₹25,000": "a monthly amount above zero and below 25,000",
+        "≥ ₹25,000 and < ₹66,000": "a monthly amount from 25,000 up to but not including 66,000; 'around 25,000' belongs here",
+        "≥ ₹66,000 and < ₹83,000": "a monthly amount from 66,000 up to but not including 83,000",
+        "≥ ₹83,000": "a monthly amount of 83,000 or more"
+      }
+    },
+    {
+      "name": "disability",
+      "kind": "category",
+      "description": "Whether the respondent has a disability, as answered to the bot's disability question (or stated explicitly anywhere else in the conversation). If the respondent names a disability instead of answering yes or no, it is Yes.",
+      "categories": [
+        "Yes",
+        "No",
+        "Prefer not to say",
+        "Invalid response"
+      ],
+      "guidance": {
+        "Yes": "the respondent says that they have a disability (or, for a parent, that the child has one), including when they state it while answering another question",
+        "No": "the respondent says there is none",
+        "Prefer not to say": "the respondent explicitly says they do not want to share it (a skipped question or no answer is null, not this)",
+        "Invalid response": "a given answer that is gibberish or has nothing to do with the question"
+      }
+    },
+    {
+      "name": "disability_type",
+      "kind": "category",
+      "description": "The kind of disability the respondent has, only when disability is Yes. When there are several kinds, list each one.",
+      "categories": [
+        "Physical disability",
+        "Intellectual disability",
+        "Others",
+        "Prefer not to say",
+        "Invalid response"
+      ],
+      "guidance": {
+        "Physical disability": "any locomotor, visual or hearing disability, and speech impairments",
+        "Intellectual disability": "any cognitive impairment, specific learning disability, autism spectrum disorder or psychological disability",
+        "Others": "a valid disability that fits neither",
+        "Prefer not to say": "the respondent explicitly says they do not want to share it (a skipped question or no answer is null, not this)",
+        "Invalid response": "a given answer that is gibberish or has nothing to do with the question"
+      },
+      "multi": true,
+      "applies_when": {
+        "field": "disability",
+        "in": [
+          "Yes"
+        ]
+      }
+    }
+  ],
+  "pii": {
+    "masking_prompt_name": "Feedback PII and Abusive-Language Detection",
+    "types": [
+      {
+        "name": "name",
+        "description": "a personal name of the respondent or of anyone they mention (family, teacher, friend)"
+      },
+      {
+        "name": "phone",
+        "description": "a phone number"
+      },
+      {
+        "name": "email",
+        "description": "an email address or a social media handle"
+      },
+      {
+        "name": "address",
+        "description": "a home address, street, house number, or a village/locality small enough to identify a person"
+      },
+      {
+        "name": "school_name",
+        "description": "the name of a specific school, college, institution or workplace"
+      },
+      {
+        "name": "id_number",
+        "description": "an identity or document number (Aadhaar, PAN, roll number, admission number)"
+      },
+      {
+        "name": "other",
+        "description": "any other detail that could identify a person"
+      }
+    ],
+    "min_digit_run": 8,
+    "min_digit_run_short_groups": 10,
+    "url_tlds": [
+      "com",
+      "in",
+      "org",
+      "net",
+      "co",
+      "io",
+      "me",
+      "edu",
+      "gov",
+      "app",
+      "link",
+      "ly",
+      "tv",
+      "info"
+    ],
+    "extraction_text": "original"
+  },
+  "limits": {
+    "max_respondent_message_chars": 20000,
+    "max_bot_message_chars": 4000,
+    "max_conversation_chars": 200000,
+    "max_value_chars": 120,
+    "max_raw_chars": 500
+  },
+  "placeholders": [
+    "n/a",
+    "na",
+    "n.a",
+    "nil",
+    "null",
+    "none",
+    "nan",
+    "undefined",
+    "unknown",
+    "not known",
+    "not provided",
+    "not specified",
+    "not applicable",
+    "not available",
+    "not mentioned",
+    "not given",
+    "not answered",
+    "no answer",
+    "no district",
+    "nothing",
+    "not sure",
+    "dont know",
+    "don't know",
+    "do not know",
+    "skip",
+    "skipped",
+    "नहीं पता",
+    "पता नहीं",
+    "लागू नहीं",
+    "idk",
+    "i dont know",
+    "i don't know",
+    "i do not know",
+    "no idea"
+  ],
+  "llm": {
+    "max_tokens": 10000
+  },
+  "copy_to_submission": {
+    "state": "state",
+    "district": "district"
+  }
+}
+$cfg$::jsonb, 'seed', 'Initial extraction config: the DOTS metadata columns of the persona with the data team''s finalised category lists and the persona''s own prompt'
+WHERE EXISTS (SELECT 1 FROM config WHERE id = 'c648bac2-cbb3-527a-9dfc-ce85c5edaad8'::uuid)
+  AND NOT EXISTS (SELECT 1 FROM config_version WHERE config_id = 'c648bac2-cbb3-527a-9dfc-ce85c5edaad8'::uuid)
 ON CONFLICT (config_id, version) DO NOTHING;
 
 -- CONFIG feedback_extraction any Parent_Voice

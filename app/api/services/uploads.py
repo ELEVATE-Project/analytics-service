@@ -43,6 +43,7 @@ from app.api.exceptions import (
     AmbiguousFeedbackTarget,
     DuplicateFile,
     FeedbackProgramNotFound,
+    FileTooLarge,
     InvalidCsvColumns,
     InvalidFeedbackFile,
     RecordNotFound,
@@ -817,6 +818,7 @@ async def load_feedback_target(
     leader_category: str,
     tenant_code: str,
     source: str,
+    session_type: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Resolves what a feedback upload targets, ONCE per upload: the program + persona (by name and tenant) and the
@@ -826,7 +828,11 @@ async def load_feedback_target(
     by a default). Never fabricates a program/leader.
     The config is the program's own; when the program has none, the tenant's program-less default for the source
     (the one rule of feedback_operations.get_active_feedback_config; never another program's).
-    Returns {"resolved", "active", "adapter", "max_csv_upload_bytes"}; raises FeedbackProgramNotFound / InvalidFeedbackFile.
+    `session_type` (a stored record's) narrows the lookup to that persona. Without it, a program with several
+    conversation_rows configs for the source yields them all as "candidates" ("active" None) and the parsed file
+    picks one (select_feedback_config); several configs that a file can not tell apart stay AmbiguousFeedbackTarget.
+    Returns {"resolved", "active", "candidates", "adapter", "max_csv_upload_bytes"}; raises FeedbackProgramNotFound /
+    InvalidFeedbackFile / AmbiguousFeedbackTarget.
     """
     problem = source_label_problem(source)
     if problem is not None:
@@ -847,42 +853,94 @@ async def load_feedback_target(
         raise FeedbackProgramNotFound(
             f"Program {program_name!r} with leader category {leader_category!r} does not exist for tenant {tenant_code!r}."
         )
+    leader_name = resolved["leader"]["name"]
     try:
+        narrowed = {} if session_type is None else {"session_type": session_type}
         active = await feedback_operations.get_active_feedback_config(
+            resolved["program"]["id"], source, tenant_code=tenant_code, **narrowed
+        )
+        candidates = [] if active is None else [active]
+    except AmbiguousFeedbackConfigError:
+        # One program, several personas over the same source (for example Youth_Voice and Youth_Voice_Cupshup):
+        # the file's own session_type column picks the config once it is parsed (select_feedback_config).
+        candidates = await feedback_operations.get_active_feedback_config_candidates(
             resolved["program"]["id"], source, tenant_code=tenant_code
         )
-    except AmbiguousFeedbackConfigError:
+    if len(candidates) == 0:
+        raise InvalidFeedbackFile(
+            [f"No upload config for source {source!r} is set up for {leader_name}: "
+             "no config for this program and no program-less default"]
+        )
+    adapters = [_validated_adapter(c, source, leader_name) for c in candidates]
+    if len(candidates) > 1 and set(adapters) != {ADAPTER_CONVERSATION_ROWS}:
+        # only a conversation_rows file carries a session_type column to pick the config by
         logger.warning("Ambiguous feedback upload config for tenant %s, source %s: more than one config matches",
                        tenant_code, source)
         raise AmbiguousFeedbackTarget(
             f"More than one upload config of source {source!r} matches this program (it has several session types, "
-            "or no config of its own and several program-less defaults); "
-            "an operator must disambiguate the configuration before this upload can be accepted."
+            "or no config of its own and several program-less defaults) and they can not be told apart by the "
+            "file's session_type; an operator must disambiguate the configuration before this upload can be accepted."
         )
-    if active is None:
-        raise InvalidFeedbackFile(
-            [f"No upload config for source {source!r} is set up for {resolved['leader']['name']}: "
-             "no config for this program and no program-less default"]
-        )
+    return {
+        "resolved": resolved,
+        # None until select_feedback_config picked one of several candidates by the file's session_type
+        "active": candidates[0] if len(candidates) == 1 else None,
+        "candidates": candidates,
+        "adapter": adapters[0],
+        # several candidates: the largest cap bounds the read; select_feedback_config applies the chosen one's own cap
+        "max_csv_upload_bytes": max(c["config"][CONFIG_KEY_MAX_CSV_UPLOAD_BYTES] for c in candidates),
+    }
+
+
+def _validated_adapter(active: Dict[str, Any], source: str, leader_name: str) -> str:
+    """The adapter of one active upload config after its settings are validated; raises InvalidFeedbackFile."""
     try:
         validate_feedback_config_keys(active["config"])
         adapter = validate_adapter_config(active["config"])
     except ValueError as exc:
-        raise InvalidFeedbackFile([f"The {source} upload config of {resolved['leader']['name']} is invalid: {exc}"])
+        raise InvalidFeedbackFile([f"The {source} upload config of {leader_name} is invalid: {exc}"])
     # The file check reads the config ROW's session_type, the event builder reads the config JSON's: when they
     # disagree (a manual edit) every session would be accepted by the check and then skipped to the DLQ. Refuse the
     # upload here instead (no value is echoed).
     if active["config"].get("session_type") != active["session_type"]:
         raise InvalidFeedbackFile([
-            f"The {source} upload config of {resolved['leader']['name']} is invalid: its 'session_type' setting is "
+            f"The {source} upload config of {leader_name} is invalid: its 'session_type' setting is "
             "missing or differs from the session_type the config is registered under"
         ])
-    return {
-        "resolved": resolved,
-        "active": active,
-        "adapter": adapter,
-        "max_csv_upload_bytes": active["config"][CONFIG_KEY_MAX_CSV_UPLOAD_BYTES],
-    }
+    return adapter
+
+
+def select_feedback_config(target: Dict[str, Any], df: pd.DataFrame, file_size: int) -> Dict[str, Any]:
+    """
+    The target with ONE active config. A target with a single candidate is returned as is. With several candidates
+    (one program, several conversation_rows personas over the same source) the config is the one whose session_type
+    the file carries; the file check (check_feedback_file) then reports any row of another session_type, as for a
+    single config. The chosen config's own max_csv_upload_bytes is applied here (the read was bounded by the largest).
+    Only the configs' session_type names are echoed, never a value of the file. Raises InvalidFeedbackFile /
+    FileTooLarge.
+    """
+    if target.get("active") is not None:
+        return target
+    candidates = target["candidates"]
+    leader_name = target["resolved"]["leader"]["name"]
+    known = ", ".join(c["session_type"] for c in candidates)
+    matches = [c for c in candidates
+               if c["session_type"] in feedback_uploads.session_types_in_file(df, c["config"])]
+    if len(matches) == 0:
+        raise InvalidFeedbackFile([
+            f"The file's session_type matches none of the upload configs of {leader_name} for this source; "
+            f"expected one of: {known}"
+        ])
+    if len(matches) > 1:
+        raise InvalidFeedbackFile([
+            f"The file holds rows of several session types ({', '.join(c['session_type'] for c in matches)}); "
+            "upload one session_type per file"
+        ])
+    active = matches[0]
+    cap = active["config"][CONFIG_KEY_MAX_CSV_UPLOAD_BYTES]
+    if file_size > cap:
+        raise FileTooLarge("Uploaded file is too large")
+    return {**target, "active": active, "max_csv_upload_bytes": cap}
 
 
 async def _resolve_feedback_context(
@@ -907,6 +965,7 @@ async def _resolve_feedback_context(
     """
     if target is None:
         target = await load_feedback_target(program_name, leader_category, tenant_code, source)
+    target = select_feedback_config(target, df, 0)  # a no-op once the caller selected it (and applied its cap)
     resolved = target["resolved"]
     active = target["active"]
     adapter = target["adapter"]
@@ -1299,8 +1358,10 @@ async def _process_feedback_inline(
             raise InvalidFeedbackFile(["tenant_code is missing from the upload record"])
         if source is None:
             raise InvalidFeedbackFile(["source is missing from the upload record"])
+        # the persona the upload picked (by the file's session_type) is the one re-resolved
         target = await load_feedback_target(
-            record.get("program_name"), record.get("leader_category"), tenant_code, source
+            record.get("program_name"), record.get("leader_category"), tenant_code, source,
+            session_type=record_meta.get("session_type"),
         )
     except InvalidFeedbackFile as exc:
         logger.warning("Feedback record %s failed config resolution/file checks: %s", record_id, exc.errors)
@@ -1501,6 +1562,7 @@ async def handle_upload(
             df = await asyncio.to_thread(_parse_feedback_file, file_bytes, target["adapter"])
         except ValueError as exc:
             raise InvalidFeedbackFile([f"Failed to parse CSV: {exc}"])
+        target = select_feedback_config(target, df, file_size)
         ctx = await _resolve_feedback_context(
             df, program_name, leader_category, tenant_code, source, check_file=True, target=target,
         )

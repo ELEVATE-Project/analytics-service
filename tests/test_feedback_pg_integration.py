@@ -441,7 +441,7 @@ def test_get_active_feedback_config_finds_each_persona_by_program_and_source():
     async def body(conn):
         with _lookups_use(conn):
             for persona, p in PERSONAS.items():
-                mitra = await feedback_ops.get_active_feedback_config(p["program_id"], "mitra")
+                mitra = await feedback_ops.get_active_feedback_config(p["program_id"], "mitra", session_type=p["session_type"])
                 assert mitra["config_id"] == p["config_id"]
                 assert mitra["session_type"] == p["session_type"]
                 assert (mitra["version"], mitra["config"]) == (1, mitra_config_v1(persona))
@@ -456,7 +456,7 @@ def test_get_active_feedback_config_finds_each_persona_by_program_and_source():
                 else:
                     assert persona == "Educator" and gforms is None
             # Mitra and Google Forms of one program are told apart by source only; ids come back as str
-            youth_mitra = await feedback_ops.get_active_feedback_config(YOUTH["program_id"], "mitra")
+            youth_mitra = await feedback_ops.get_active_feedback_config(YOUTH["program_id"], "mitra", session_type="Youth_Voice")
             youth_gforms = await feedback_ops.get_active_feedback_config(YOUTH["program_id"], "google_forms")
             assert youth_mitra["config_id"] != youth_gforms["config_id"]
             assert isinstance(youth_mitra["config_version_id"], str)
@@ -470,11 +470,11 @@ def test_get_active_feedback_config_returns_only_the_active_version():
     async def body(conn):
         with _lookups_use(conn):
             await conn.execute("UPDATE config_version SET is_active = FALSE WHERE config_id = $1::uuid", YOUTH["config_id"])
-            assert await feedback_ops.get_active_feedback_config(YOUTH["program_id"], "mitra") is None  # none active
+            assert await feedback_ops.get_active_feedback_config(YOUTH["program_id"], "mitra", session_type="Youth_Voice") is None  # none active
             await conn.execute(
                 "INSERT INTO config_version (config_id, version, is_active, config) VALUES ($1::uuid, 2, TRUE, $2::jsonb)",
                 YOUTH["config_id"], json.dumps({"marker": "v2"}))
-            active = await feedback_ops.get_active_feedback_config(YOUTH["program_id"], "mitra")
+            active = await feedback_ops.get_active_feedback_config(YOUTH["program_id"], "mitra", session_type="Youth_Voice")
             assert (active["version"], active["config"], active["session_type"]) == (2, {"marker": "v2"}, "Youth_Voice")
             # the Google Forms config of the same program is untouched
             gforms = await feedback_ops.get_active_feedback_config(YOUTH["program_id"], "google_forms")
@@ -487,9 +487,9 @@ def test_get_active_feedback_config_ignores_the_bot_id_of_the_config():
         with _lookups_use(conn):
             # the bot the config was written for is informational: changing or clearing it changes nothing
             await conn.execute("UPDATE config SET bot_id = '999' WHERE id = $1::uuid", YOUTH["config_id"])
-            assert (await feedback_ops.get_active_feedback_config(YOUTH["program_id"], "mitra"))["config_id"] == YOUTH["config_id"]
+            assert (await feedback_ops.get_active_feedback_config(YOUTH["program_id"], "mitra", session_type="Youth_Voice"))["config_id"] == YOUTH["config_id"]
             await conn.execute("UPDATE config SET bot_id = NULL, bot_name = NULL WHERE id = $1::uuid", YOUTH["config_id"])
-            assert (await feedback_ops.get_active_feedback_config(YOUTH["program_id"], "mitra"))["config_id"] == YOUTH["config_id"]
+            assert (await feedback_ops.get_active_feedback_config(YOUTH["program_id"], "mitra", session_type="Youth_Voice"))["config_id"] == YOUTH["config_id"]
     run_db(body)
 
 

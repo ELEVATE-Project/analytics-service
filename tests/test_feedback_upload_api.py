@@ -26,10 +26,11 @@ from app.api.exceptions import register_exception_handlers
 from app.api.router import api_router
 import app.api.services.uploads as uploads_service_module
 import app.database.feedback_operations as feedback_ops
+from app.database.feedback_operations import AmbiguousFeedbackConfigError
 import app.database.operations as operations_module
 from app.config import settings
 from app.services.feedback_adapter_config import COLUMN_ROLES_REQUIRED
-from seed_support import FEEDBACK_PROGRAM_NAME, PERSONAS, gforms_config_v1, mitra_config_v1
+from seed_support import FEEDBACK_PROGRAM_NAME, PERSONAS, gforms_config_v1, load_seed_config, mitra_config_v1
 from tests.conftest import FakeConn, install_fake_db, settings_override
 from feedback_test_windows import config_with_v2
 
@@ -1204,14 +1205,14 @@ def test_real_db_lookups_by_name_and_tenant(monkeypatch):
             assert await feedback_ops.get_program_and_leader(FEEDBACK_PROGRAM_NAME, "Youth", "missing-tenant") is None
 
             for persona, p in PERSONAS.items():
-                active = await feedback_ops.get_active_feedback_config(p["program_id"], "mitra")
+                active = await feedback_ops.get_active_feedback_config(p["program_id"], "mitra", session_type=p["session_type"])
                 assert active["config_id"] == p["config_id"] and active["version"] == 1
                 assert active["session_type"] == p["session_type"]
                 assert active["config"] == mitra_config_v1(persona)  # JSONB came back as a dict
-                same = await feedback_ops.get_active_feedback_config(p["program_id"], "mitra", tenant_code="mitra")
+                same = await feedback_ops.get_active_feedback_config(p["program_id"], "mitra", tenant_code="mitra", session_type=p["session_type"])
                 assert same == active
                 # the tenant narrows the lookup: another tenant's code finds nothing
-                assert await feedback_ops.get_active_feedback_config(p["program_id"], "mitra", tenant_code="other") is None
+                assert await feedback_ops.get_active_feedback_config(p["program_id"], "mitra", tenant_code="other", session_type=p["session_type"]) is None
             # the lookup is by program + source: an unknown program or source finds nothing
             assert await feedback_ops.get_active_feedback_config(str(uuid.uuid4()), "mitra") is None
             assert await feedback_ops.get_active_feedback_config(YOUTH["program_id"], "whatsapp") is None
@@ -1222,12 +1223,12 @@ def test_real_db_lookups_by_name_and_tenant(monkeypatch):
                 await conn.execute(
                     "INSERT INTO config_version (config_id, version, is_active, config) VALUES ($1::uuid, 2, TRUE, $2::jsonb)",
                     YOUTH["config_id"], json.dumps({"marker": "v2"}))
-            active = await feedback_ops.get_active_feedback_config(YOUTH["program_id"], "mitra")
+            active = await feedback_ops.get_active_feedback_config(YOUTH["program_id"], "mitra", session_type="Youth_Voice")
             assert active["version"] == 2 and active["config"] == {"marker": "v2"}
             assert active["session_type"] == "Youth_Voice"
             async with pool.acquire() as conn:
                 await conn.execute("UPDATE config_version SET is_active = FALSE WHERE config_id = $1::uuid", YOUTH["config_id"])
-            assert await feedback_ops.get_active_feedback_config(YOUTH["program_id"], "mitra") is None
+            assert await feedback_ops.get_active_feedback_config(YOUTH["program_id"], "mitra", session_type="Youth_Voice") is None
         finally:
             # these lookups need committed rows (feedback_ops uses its own connections), so undo what the test added
             async with pool.acquire() as conn:
@@ -1257,7 +1258,7 @@ def test_real_db_active_config_is_found_per_source(monkeypatch):
                 await seed_config(conn)
 
             for persona, p in PERSONAS.items():
-                mitra = await feedback_ops.get_active_feedback_config(p["program_id"], "mitra")
+                mitra = await feedback_ops.get_active_feedback_config(p["program_id"], "mitra", session_type=p["session_type"])
                 assert mitra["config_id"] == p["config_id"] and mitra["session_type"] == p["session_type"]
                 gforms = await feedback_ops.get_active_feedback_config(p["program_id"], "google_forms")
                 if p["gforms_config_id"] is None:
@@ -1285,11 +1286,97 @@ def test_feedback_ambiguous_program_or_config_is_409_without_config_content(clie
     leaked = "SECRET-CANDIDATE-LIST id=deadbeef session_type=Youth_Voice,Teacher_Voice"
     boom = AsyncMock(side_effect=AmbiguousFeedbackConfigError(f"2 configs match ({leaked})"))
     monkeypatch.setattr(feedback_ops, "get_program_and_leader" if where == "program" else "get_active_feedback_config", boom)
+    # the configs left are of different adapters: the file's session_type can not pick one, so it stays a 409
+    form = {**GFORMS_ACTIVE_CONFIG, "session_type": "Teacher_Voice",
+            "config": {**gforms_config_v1("Youth"), "session_type": "Teacher_Voice"}}
+    monkeypatch.setattr(feedback_ops, "get_active_feedback_config_candidates",
+                        AsyncMock(return_value=[ACTIVE_CONFIG, form]))
     resp = client.post("/v1/upload/", headers=_headers(), data=_form(), files=_files())
     assert resp.status_code == 409
     assert "SECRET-CANDIDATE" not in resp.text and "deadbeef" not in resp.text and "Teacher_Voice" not in resp.text
     assert "operator" in resp.json()["detail"]
     _assert_nothing_stored(stores)
+
+
+# ---- one program, several conversation_rows personas over one source: the file's session_type picks the config ----
+
+CUPSHUP_TYPE = "Youth_Voice_Cupshup"
+CUPSHUP_CONFIG = {
+    "config_id": "9d4df67f-d0ff-408e-97dc-62b98fa603bb",
+    "config_version_id": "33333333-3333-3333-3333-333333333333",
+    "version": 1,
+    "session_type": CUPSHUP_TYPE,
+    "config": load_seed_config("feedback_upload", "mitra", CUPSHUP_TYPE),
+}
+CUPSHUP_FILE = _csv(_session("c" * 32, "2001", bot="205", session_type=CUPSHUP_TYPE)
+                    + _session("d" * 32, "2002", bot="205", session_type=CUPSHUP_TYPE))
+
+
+def _patch_two_personas(monkeypatch, candidates=None) -> Stores:
+    stores = _patch_upload_pipeline(monkeypatch)
+    stores.config.side_effect = AmbiguousFeedbackConfigError("2 configs")
+    candidates_mock = AsyncMock(return_value=candidates if candidates is not None
+                                else [_active("Youth", baseline=True), CUPSHUP_CONFIG])
+    monkeypatch.setattr(feedback_ops, "get_active_feedback_config_candidates", candidates_mock)
+    stores.candidates = candidates_mock
+    return stores
+
+
+def test_the_seeded_cupshup_config_is_the_youth_config_under_its_own_session_type():
+    youth, cupshup = mitra_config_v1("Youth"), load_seed_config("feedback_upload", "mitra", CUPSHUP_TYPE)
+    assert cupshup["session_type"] == CUPSHUP_TYPE
+    assert {**cupshup, "session_type": "Youth_Voice"} == youth
+    extraction = load_seed_config("feedback_extraction", "any", CUPSHUP_TYPE)
+    assert {**extraction, "session_type": "Youth_Voice"} == load_seed_config("feedback_extraction", "any", "Youth_Voice")
+
+
+@pytest.mark.parametrize("content,session_type,config_version_id", [
+    (CUPSHUP_FILE, CUPSHUP_TYPE, CUPSHUP_CONFIG["config_version_id"]),
+    (GOOD_FILE, "Youth_Voice", "11111111-1111-1111-1111-111111111111"),
+])
+def test_two_personas_on_one_program_the_file_session_type_picks_the_config(client, monkeypatch, content,
+                                                                            session_type, config_version_id):
+    stores = _patch_two_personas(monkeypatch)
+    resp = client.post("/v1/upload/", headers=_headers(), data=_form(), files=_files(content))
+    assert resp.status_code == 200, resp.text
+    stores.candidates.assert_awaited_once_with(PROGRAM["id"], "mitra", tenant_code="mitra")
+    meta = stores.insert.await_args.kwargs["meta_data"]
+    assert meta["session_type"] == session_type          # the background run re-resolves exactly this persona
+    assert meta["config_version_id"] == config_version_id
+    assert meta["persona"] == "Youth"
+
+
+def test_two_personas_a_file_of_neither_session_type_is_rejected_whole(client, monkeypatch):
+    stores = _patch_two_personas(monkeypatch)
+    content = _csv(_session("e" * 32, "3001", session_type="Parent_Voice"))
+    resp = client.post("/v1/upload/", headers=_headers(), data=_form(), files=_files(content))
+    assert resp.status_code == 400, resp.text
+    text = resp.text
+    assert "matches none of the upload configs" in text and "Youth_Voice, Youth_Voice_Cupshup" in text
+    assert "Parent_Voice" not in text                    # a value of the file is never echoed
+    _assert_nothing_stored(stores)
+
+
+def test_two_personas_a_file_mixing_both_session_types_is_rejected_whole(client, monkeypatch):
+    stores = _patch_two_personas(monkeypatch)
+    content = _csv(_session("f" * 32, "4001") + _session("g" * 32, "4002", bot="205", session_type=CUPSHUP_TYPE))
+    resp = client.post("/v1/upload/", headers=_headers(), data=_form(), files=_files(content))
+    assert resp.status_code == 400, resp.text
+    assert "several session types" in resp.text and "one session_type per file" in resp.text
+    _assert_nothing_stored(stores)
+
+
+def test_two_personas_the_read_is_bounded_by_the_largest_cap_and_the_chosen_cap_applies(client, monkeypatch):
+    small = {**CUPSHUP_CONFIG, "config": {**CUPSHUP_CONFIG["config"], "max_csv_upload_bytes": len(CUPSHUP_FILE) - 1}}
+    stores = _patch_two_personas(monkeypatch, candidates=[_active("Youth", baseline=True), small])
+    resp = client.post("/v1/upload/", headers=_headers(), data=_form(), files=_files(CUPSHUP_FILE))
+    assert resp.status_code == 413
+    assert resp.json() == {"detail": "Uploaded file is too large"}
+    _assert_nothing_stored(stores)
+    # the same file is accepted for the persona whose (larger) cap it fits
+    big = {**CUPSHUP_CONFIG, "config": {**CUPSHUP_CONFIG["config"], "max_csv_upload_bytes": len(CUPSHUP_FILE)}}
+    _patch_two_personas(monkeypatch, candidates=[_active("Youth", baseline=True), big])
+    assert client.post("/v1/upload/", headers=_headers(), data=_form(), files=_files(CUPSHUP_FILE)).status_code == 200
 
 
 def test_feedback_config_lookup_is_narrowed_by_tenant(client, monkeypatch):

@@ -311,7 +311,10 @@ async def get_active_feedback_config(
             f"more than one active {config_source} {CONFIG_TYPE_FEEDBACK_UPLOAD} config exists {level} "
             f"({', '.join(sorted(r['session_type'] for r in rows))}); pass session_type to pick one"
         )
-    row = rows[0]
+    return _active_config_dict(rows[0])
+
+
+def _active_config_dict(row: Mapping[str, Any]) -> Dict[str, Any]:
     return {
         "config_id": str(row["config_id"]),
         "config_version_id": str(row["config_version_id"]),
@@ -320,6 +323,50 @@ async def get_active_feedback_config(
         "program_id": None if row["program_id"] is None else str(row["program_id"]),
         "config": _as_dict(row["config"]),
     }
+
+
+async def get_active_feedback_config_candidates(
+    program_id: str,
+    config_source: str,
+    *,
+    tenant_code: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Every ACTIVE feedback_upload config at the WINNING level of THE RULE (see get_active_feedback_config) for
+    `program_id` and `config_source`: the program's own configs when it has any, else the tenant's program-less
+    defaults for the source. One entry per session_type (the unique index allows one config per tenant, source,
+    type, program and session_type), ordered by session_type. An empty list when there is none.
+
+    Used when get_active_feedback_config is ambiguous because one program runs several personas over the same
+    source (for example Youth_Voice and Youth_Voice_Cupshup): the upload then picks the config by the session_type
+    the file itself carries (uploads.select_feedback_config).
+    """
+    if not db.pool:
+        await db.connect()
+
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT c.id AS config_id, c.session_type, c.program_id, v.id AS config_version_id, v.version, v.config
+            FROM config c
+            JOIN config_version v ON v.config_id = c.id AND v.is_active
+            WHERE c.config_source = $1
+              AND c.config_type = $2
+              AND ($4::text IS NULL OR c.tenant_code = $4)
+              AND (c.program_id = $3::uuid
+                   OR (c.program_id IS NULL
+                       AND c.tenant_code = (SELECT p.tenant_code FROM programs p WHERE p.id = $3::uuid)))
+            ORDER BY (c.program_id IS NOT NULL) DESC, c.session_type, c.id
+            """,
+            config_source,
+            CONFIG_TYPE_FEEDBACK_UPLOAD,
+            program_id,
+            tenant_code,
+        )
+    if len(rows) == 0:
+        return []
+    own_level = rows[0]["program_id"] is not None
+    return [_active_config_dict(r) for r in rows if (r["program_id"] is not None) == own_level]
 
 
 async def _persona_process_steps(conn, source: str, session_type: str, tenant_code: str, program_id) -> List[Dict[str, Any]]:

@@ -6,6 +6,7 @@ on a real Postgres are in tests/test_feedback_config_fallback_pg.py; here the Py
 (which rows of the one query are accepted, what is raised, what the upload says when nothing is found).
 """
 import asyncio
+import copy
 
 import pytest
 
@@ -15,7 +16,7 @@ from app.api.exceptions import AmbiguousFeedbackTarget, InvalidFeedbackFile
 from app.database.feedback_operations import AmbiguousFeedbackConfigError, get_active_feedback_config
 from tests.conftest import FakeConn, FakePool
 from app.database.db import db
-from seed_support import mitra_config_v1
+from seed_support import gforms_config_v1, mitra_config_v1
 
 PROGRAM = "11111111-1111-4111-8111-111111111111"
 
@@ -90,9 +91,19 @@ def test_the_upload_target_says_there_is_no_config_for_the_program_and_no_defaul
 
 
 def test_the_upload_target_is_a_409_on_ambiguity(monkeypatch):
+    # several configs that the file can not tell apart (only conversation_rows files carry a session_type column)
     async def ambiguous(*args, **kwargs):
         raise AmbiguousFeedbackConfigError("2 configs")
     _target_with(monkeypatch, ambiguous)
+    rows = copy.deepcopy(mitra_config_v1("Parent"))
+    form = copy.deepcopy(gforms_config_v1("Parent"))
+    form["session_type"] = "Other_Voice"
+    monkeypatch.setattr(feedback_ops, "get_active_feedback_config_candidates", _async_value([
+        {"config_id": "a", "config_version_id": "va", "version": 1, "session_type": "Parent_Voice",
+         "program_id": PROGRAM, "config": rows},
+        {"config_id": "b", "config_version_id": "vb", "version": 1, "session_type": "Other_Voice",
+         "program_id": PROGRAM, "config": form},
+    ]))
     with pytest.raises(AmbiguousFeedbackTarget):
         asyncio.run(uploads_service.load_feedback_target("Beta", "Parent", "mitra", "mitra"))
 
@@ -105,3 +116,34 @@ def test_the_upload_target_accepts_the_program_less_default_it_is_given(monkeypa
     target = asyncio.run(uploads_service.load_feedback_target("Beta", "Parent", "mitra", "mitra"))
     assert target["active"] is default and target["resolved"]["program"]["id"] == PROGRAM
     assert target["max_csv_upload_bytes"] == config["max_csv_upload_bytes"]
+
+
+# ---- get_active_feedback_config_candidates: every config of the WINNING level (one program, several personas) ----
+
+def _candidates(rows, **kwargs):
+    conn = FakeConn()
+    conn.fetch.return_value = rows
+
+    async def call():
+        db.pool = FakePool(conn)
+        try:
+            return await feedback_ops.get_active_feedback_config_candidates(PROGRAM, "mitra", **kwargs)
+        finally:
+            db.pool = None
+    return asyncio.run(call()), conn
+
+
+def test_the_candidates_are_the_programs_own_configs_and_never_its_defaults():
+    rows = [_row("Youth_Voice", PROGRAM), _row("Youth_Voice_Cupshup", PROGRAM), _row("Parent_Voice", None)]
+    result, conn = _candidates(rows, tenant_code="mitra")
+    assert [c["session_type"] for c in result] == ["Youth_Voice", "Youth_Voice_Cupshup"]
+    assert all(c["program_id"] == PROGRAM for c in result)
+    sql, *params = conn.fetch.call_args.args
+    assert "LIMIT" not in sql and "ORDER BY (c.program_id IS NOT NULL) DESC" in sql
+    assert params == ["mitra", "feedback_upload", PROGRAM, "mitra"]
+
+
+def test_the_candidates_are_the_defaults_when_the_program_has_none_and_empty_when_nothing_matches():
+    result, _ = _candidates([_row("Parent_Voice", None), _row("Youth_Voice", None)])
+    assert [(c["session_type"], c["program_id"]) for c in result] == [("Parent_Voice", None), ("Youth_Voice", None)]
+    assert _candidates([])[0] == []

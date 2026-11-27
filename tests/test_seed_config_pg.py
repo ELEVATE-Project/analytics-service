@@ -1,6 +1,6 @@
 """
 Real-Postgres tests of seed_config.sql executed the way app/database/db.py executes it: the seed creates the 4 leader
-categories, 4 programs, 11 configs and their 11 active version-1 rows; running it again changes nothing; it writes
+categories, 4 programs, 13 configs and their 13 active version-1 rows; running it again changes nothing; it writes
 the 'mitra' tenant first when the database has none (an existing tenant is never touched); it never overwrites or resurrects what a user changed (a new
 config_version, a deactivated version 1, renamed rows, a config an operator created under another id); an already
 seeded database is a no-op; the documented "new config_version" recipe keeps one active version per config; and
@@ -27,7 +27,8 @@ pytestmark = pytest.mark.skipif(
 BLOCKS = seed_config_blocks()
 YOUTH = PERSONAS["Youth"]
 PARENT = PERSONAS["Parent"]
-COUNTS = {"leader_category": 4, "programs": 4, "config": 11, "config_version": 11}
+# 4 personas; 13 configs = 5 mitra (the 4 personas + Youth_Voice_Cupshup) + 3 google_forms + 5 extraction
+COUNTS = {"leader_category": 4, "programs": 4, "config": 13, "config_version": 13}
 
 
 def _run(body, tenant=True):
@@ -72,13 +73,13 @@ async def _versions(conn, config_id):
 
 # ------------------------------------------------------------------------------------------------ what it writes
 
-def test_the_seed_writes_4_categories_4_programs_11_configs_and_11_active_version_1_rows():
+def test_the_seed_writes_4_categories_4_programs_13_configs_and_13_active_version_1_rows():
     async def body(conn):
         await seed_config(conn)
         assert await _counts(conn) == COUNTS
         rows = await conn.fetch("SELECT config_id::text, version, is_active, created_by FROM config_version")
         assert {(r["version"], r["is_active"], r["created_by"]) for r in rows} == {(1, True, "seed")}
-        assert len({r["config_id"] for r in rows}) == 11
+        assert len({r["config_id"] for r in rows}) == 13
         assert await conn.fetchval("SELECT count(*) FROM tenant") == 1                 # the tenant was there: not duplicated
     _run(body)
 
@@ -282,7 +283,7 @@ def test_the_documented_recipe_writes_a_new_active_version_and_the_seed_keeps_it
         versions = await _versions(conn, cid)
         assert [(v[0], v[1], v[3]) for v in versions] == [(1, False, "seed"), (2, True, "ops")]
         assert versions[1][2] == new
-        assert await conn.fetchval("SELECT count(*) FROM config_version WHERE is_active") == 11     # one active per config
+        assert await conn.fetchval("SELECT count(*) FROM config_version WHERE is_active") == 13     # one active per config
         assert await conn.fetchval(
             "SELECT count(*) FROM (SELECT config_id FROM config_version WHERE is_active GROUP BY 1 HAVING count(*) > 1) t") == 0
     _run(body)
