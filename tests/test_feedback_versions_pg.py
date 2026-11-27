@@ -543,7 +543,8 @@ def test_list_reports_versions_config_version_and_session_counts_for_all_four_pe
         await _add(conn, "Youth", "V1", _at(2026, 11, 5, 9, 0, 0), source="google_forms")  # forms are not counted
 
         listed = await list_questionnaire_versions()
-        assert list(listed) == list(ST_ALL)                  # sorted by session_type, every seeded mitra persona
+        # ordered by tenant, program name, session_type: '1 MV Campaign' (Youth_Voice_Cupshup) sorts before '1M Voice'
+        assert list(listed) == ["Youth_Voice_Cupshup"] + [st for st in ST_ALL if st != "Youth_Voice_Cupshup"]
         assert listed["Youth_Voice"]["config_version"] == 3
         assert _keys(listed["Youth_Voice"]["versions"]) == BASE + [("V2", V2_TEXT), ("V3", V3_TEXT)]
         assert listed["Youth_Voice"]["sessions"] == {"V9": 4}

@@ -28,7 +28,7 @@ from app.database.feedback_extraction_operations import (
     extract_submission,
 )
 from app.database.operations import insert_or_update_submission
-from seed_support import FEEDBACK_PROGRAM_NAME, PERSONAS, SEED_EXTRACTION_CONFIG_COUNT, SEEDED_SESSION_TYPE_TO_PERSONA, SEEDED_SESSION_TYPES, extraction_config_id, extraction_config_v1, gforms_config_v1, mitra_config_v1, seed_config
+from seed_support import FEEDBACK_PROGRAM_NAME, PERSONAS, SEED_EXTRACTION_CONFIG_COUNT, SEEDED_PROGRAM_OF, SEEDED_SESSION_TYPE_TO_PERSONA, SEEDED_SESSION_TYPES, extraction_config_id, extraction_config_v1, gforms_config_v1, mitra_config_v1, seed_config
 from app.services import feedback_extraction as fx
 from app.temporal.feedback_extraction_activity import feedback_metadata_extraction_activity
 
@@ -189,7 +189,7 @@ def test_seed_writes_one_active_extraction_config_per_persona_and_never_overwrit
             assert r["bot_id"] is None
             persona = SEEDED_SESSION_TYPE_TO_PERSONA[r["session_type"]]
             assert str(r["id"]) == extraction_config_id(r["session_type"])
-            assert str(r["program_id"]) == PERSONAS[persona]["program_id"]
+            assert str(r["program_id"]) == SEEDED_PROGRAM_OF[r["session_type"]]   # Cupshup: its 1 MV Campaign program
             parsed = fx.parse_extraction_config(json.loads(r["cfg"]))
             assert parsed.session_type == r["session_type"]
         # an operator edit (new active version) survives a re-seed; nothing is duplicated

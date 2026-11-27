@@ -12,10 +12,9 @@
 -- Today: the 1M Voice feedback settings of tenant 'mitra', for the four personas (Youth, Parent,
 -- General Public, Educator):
 --   * feedback_upload      / mitra         adapter conversation_rows: how to read a Mitra raw conversation CSV
---                                          (one per persona; the Youth program also runs Youth_Voice_Cupshup, a
---                                          second Youth bot with the Youth_Voice settings: an upload to a program
---                                          with several mitra configs picks the one whose session_type the file
---                                          carries)
+--                                          (one per persona; plus Youth_Voice_Cupshup, a second Youth bot with
+--                                          the Youth_Voice settings, under its own program '1 MV Campaign' of the
+--                                          Youth leader category: a `-- PROGRAM` block)
 --   * feedback_upload      / google_forms  adapter wide_form: how to read a Google Forms wide CSV (Youth, Parent,
 --                                          General Public)
 --   * feedback_extraction  / any           the metadata fields and bands of the LLM extraction and the
@@ -38,7 +37,8 @@
 -- database start with the change, edit the JSON of the block below. Only the JSON inside the
 -- dollar-quoted literal of a block is config content; each block starts with the marker line
 -- `-- CONFIG <config_type> <config_source> <session_type>` (tests/seed_support.py reads the file through
--- these markers, so keep the layout of a block as it is).
+-- these markers, so keep the layout of a block as it is). A `-- PROGRAM <persona name> <session_type>` block adds
+-- one more program to an existing persona's leader category, for a session_type that runs as its own program.
 -- =========================================================================
 -- =========================================================================
 -- 0. The tenant (created here when this database does not have it yet; an existing tenant is never touched.
@@ -99,6 +99,15 @@ INSERT INTO programs (id, leaders_id, name, tenant_code)
 SELECT 'b09ca040-f2cb-4c31-b0a8-07ce0acb69a2'::uuid, '117e0bb9-c0de-414a-a7f0-5ee62e48477e'::uuid, '1M Voice', 'mitra'
 WHERE EXISTS (SELECT 1 FROM tenant WHERE code = 'mitra')
   AND EXISTS (SELECT 1 FROM leader_category WHERE id = '117e0bb9-c0de-414a-a7f0-5ee62e48477e'::uuid)
+ON CONFLICT (id) DO NOTHING;
+
+-- PROGRAM Youth Youth_Voice_Cupshup
+-- A second program of the Youth leader category: the 1 MV Campaign, run by the Youth_Voice_Cupshup bot (the
+-- Youth_Voice settings under their own session_type). Its configs below belong to this program, not to 1M Voice.
+INSERT INTO programs (id, leaders_id, name, tenant_code)
+SELECT 'bd1b3106-e04d-47bc-b337-a409766772fb'::uuid, '5f3d1f0f-f472-47af-8c55-66e10aa48c43'::uuid, '1 MV Campaign', 'mitra'
+WHERE EXISTS (SELECT 1 FROM tenant WHERE code = 'mitra')
+  AND EXISTS (SELECT 1 FROM leader_category WHERE id = '5f3d1f0f-f472-47af-8c55-66e10aa48c43'::uuid)
 ON CONFLICT (id) DO NOTHING;
 
 -- =========================================================================
@@ -241,9 +250,9 @@ ON CONFLICT (config_id, version) DO NOTHING;
 
 -- CONFIG feedback_upload mitra Youth_Voice_Cupshup
 INSERT INTO config (id, config_source, name, config_type, program_id, tenant_code, leader_id, session_type, bot_id, bot_name)
-SELECT '9d4df67f-d0ff-408e-97dc-62b98fa603bb'::uuid, 'mitra', 'Youth Cupshup bot CSV validator', 'feedback_upload', 'dcd67b14-f0ac-4e71-87fd-fa818c8f2d6a'::uuid, 'mitra', NULL, 'Youth_Voice_Cupshup', '205', 'Youth_Voice_Cupshup'
+SELECT '9d4df67f-d0ff-408e-97dc-62b98fa603bb'::uuid, 'mitra', 'Youth Cupshup bot CSV validator', 'feedback_upload', 'bd1b3106-e04d-47bc-b337-a409766772fb'::uuid, 'mitra', NULL, 'Youth_Voice_Cupshup', '205', 'Youth_Voice_Cupshup'
 WHERE EXISTS (SELECT 1 FROM tenant WHERE code = 'mitra')
-  AND EXISTS (SELECT 1 FROM programs WHERE id = 'dcd67b14-f0ac-4e71-87fd-fa818c8f2d6a'::uuid)
+  AND EXISTS (SELECT 1 FROM programs WHERE id = 'bd1b3106-e04d-47bc-b337-a409766772fb'::uuid)
 ON CONFLICT DO NOTHING;
 
 INSERT INTO config_version (config_id, version, is_active, config, created_by, change_note)
@@ -2006,9 +2015,9 @@ ON CONFLICT (config_id, version) DO NOTHING;
 
 -- CONFIG feedback_extraction any Youth_Voice_Cupshup
 INSERT INTO config (id, config_source, name, config_type, program_id, tenant_code, leader_id, session_type, bot_id, bot_name)
-SELECT 'c648bac2-cbb3-527a-9dfc-ce85c5edaad8'::uuid, 'any', 'Youth Cupshup metadata extraction', 'feedback_extraction', 'dcd67b14-f0ac-4e71-87fd-fa818c8f2d6a'::uuid, 'mitra', NULL, 'Youth_Voice_Cupshup', NULL, NULL
+SELECT 'c648bac2-cbb3-527a-9dfc-ce85c5edaad8'::uuid, 'any', 'Youth Cupshup metadata extraction', 'feedback_extraction', 'bd1b3106-e04d-47bc-b337-a409766772fb'::uuid, 'mitra', NULL, 'Youth_Voice_Cupshup', NULL, NULL
 WHERE EXISTS (SELECT 1 FROM tenant WHERE code = 'mitra')
-  AND EXISTS (SELECT 1 FROM programs WHERE id = 'dcd67b14-f0ac-4e71-87fd-fa818c8f2d6a'::uuid)
+  AND EXISTS (SELECT 1 FROM programs WHERE id = 'bd1b3106-e04d-47bc-b337-a409766772fb'::uuid)
 ON CONFLICT DO NOTHING;
 
 INSERT INTO config_version (config_id, version, is_active, config, created_by, change_note)

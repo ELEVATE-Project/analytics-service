@@ -20,7 +20,8 @@ from app.services import feedback_extraction as fx
 from app.services.feedback_constants import feedback_config_key_defaults
 from app.services.feedback_versions import parse_versions
 from seed_support import (
-    EXTRA_SESSION_TYPES,
+    EXTRA_PROGRAMS,
+    SEEDED_PROGRAM_OF,
     PERSONAS,
     SEED_CONFIG_FILE,
     seed_config_blocks,
@@ -88,7 +89,8 @@ def test_there_are_exactly_13_config_blocks_and_each_marker_is_regular():
 def test_four_persona_blocks_each_with_a_leader_category_and_a_program():
     markers = re.findall(r"^-- PERSONA (.+) (\S+)$", SQL, re.M)
     assert [m[0] for m in markers] == ["Youth", "Parent", "General Public", "Educator"]
-    assert SQL.count("INSERT INTO leader_category") == 4 and SQL.count("INSERT INTO programs") == 4
+    # 4 persona programs + 1 `-- PROGRAM` block (1 MV Campaign, Youth leader category)
+    assert SQL.count("INSERT INTO leader_category") == 4 and SQL.count("INSERT INTO programs") == 5
     assert {name: p["session_type"] for name, p in PERSONAS.items()} == dict(markers)
     for p in PERSONAS.values():
         assert p["program_name"] == "1M Voice"
@@ -107,7 +109,8 @@ def test_every_config_json_is_dollar_quoted_two_space_indented_and_stable():
 def test_the_file_has_no_other_dollar_quote_and_only_inserts():
     assert re.findall(r"\$[A-Za-z_]*\$", SQL) == ["$cfg$"] * (2 * CONFIG_BLOCK_COUNT)
     statements = _statements()
-    assert len(statements) == 1 + 4 * 2 + CONFIG_BLOCK_COUNT * 2   # the tenant, then per persona 2, per config 2
+    # the tenant, then per persona 2, per extra program 1, per config 2
+    assert len(statements) == 1 + 4 * 2 + len(EXTRA_PROGRAMS) + CONFIG_BLOCK_COUNT * 2
     for statement in statements:
         assert statement.startswith("INSERT INTO "), statement[:60]
 
@@ -153,6 +156,7 @@ def test_the_seed_depends_on_no_other_seed_and_creates_only_the_mitra_tenant():
 
 def test_every_id_is_a_fixed_distinct_uuid_and_the_config_rows_agree_with_their_markers():
     ids = [p[k] for p in PERSONAS.values() for k in ("leader_category_id", "program_id")]
+    ids += [p["program_id"] for p in EXTRA_PROGRAMS.values()]
     for block in BLOCKS:
         ids.append(block["id"])
         assert block["version_config_id"] == block["id"]
@@ -161,7 +165,8 @@ def test_every_id_is_a_fixed_distinct_uuid_and_the_config_rows_agree_with_their_
         assert block["tenant_code"] == "mitra"
         assert block["created_by"] == "seed" and block["change_note"] != ""
         assert block["config"]["session_type"] == block["session_type"]
-    assert len(ids) == 8 + CONFIG_BLOCK_COUNT and len(set(ids)) == 8 + CONFIG_BLOCK_COUNT
+    n = 8 + len(EXTRA_PROGRAMS) + CONFIG_BLOCK_COUNT
+    assert len(ids) == n and len(set(ids)) == n
     for value in ids:
         assert str(uuid.UUID(value)) == value
 
@@ -173,11 +178,9 @@ def test_extraction_config_ids_are_uuid5_of_the_config_type_and_the_session_type
 
 
 def test_each_config_belongs_to_the_program_of_its_persona_and_is_unique_per_source_type_program_session_type():
-    program_of = {p["session_type"]: p["program_id"] for p in PERSONAS.values()}
-    program_of.update({st: PERSONAS[persona]["program_id"] for st, persona in EXTRA_SESSION_TYPES.items()})
     keys = set()
     for block in BLOCKS:
-        assert block["program_id"] == program_of[block["session_type"]]
+        assert block["program_id"] == SEEDED_PROGRAM_OF[block["session_type"]]
         keys.add((block["config_source"], block["config_type"], block["program_id"], block["session_type"]))
     assert len(keys) == CONFIG_BLOCK_COUNT                    # the partial unique index of schema.sql would accept all
 
@@ -243,3 +246,18 @@ def test_every_extraction_config_is_accepted_by_the_extraction_parser(block):
     # CHANGED: the seeded configs set llm.max_tokens (see tests/test_feedback_seed_llm.py)
     assert block["config"]["llm"] == {"max_tokens": 10000} and block["config"]["pii"]["types"][-1]["name"] == "other"
     assert block["change_note"].startswith("Initial extraction config")
+
+
+def test_youth_voice_cupshup_is_its_own_program_1_mv_campaign_of_the_youth_leader_category():
+    assert list(EXTRA_PROGRAMS) == ["Youth_Voice_Cupshup"]
+    campaign = EXTRA_PROGRAMS["Youth_Voice_Cupshup"]
+    assert (campaign["persona"], campaign["program_name"], campaign["tenant_code"]) == ("Youth", "1 MV Campaign", "mitra")
+    assert campaign["leader_category_id"] == PERSONAS["Youth"]["leader_category_id"]
+    assert campaign["program_id"] != PERSONAS["Youth"]["program_id"]
+    # both of its configs belong to the campaign, and the 1M Voice Youth program keeps exactly one mitra config
+    cupshup = [b for b in BLOCKS if b["session_type"] == "Youth_Voice_Cupshup"]
+    assert sorted((b["config_type"], b["config_source"]) for b in cupshup) == [
+        ("feedback_extraction", "any"), ("feedback_upload", "mitra")]
+    assert all(b["program_id"] == campaign["program_id"] for b in cupshup)
+    assert [b["session_type"] for b in BLOCKS if (b["config_source"], b["program_id"]) ==
+            ("mitra", PERSONAS["Youth"]["program_id"])] == ["Youth_Voice"]

@@ -21,6 +21,8 @@ this module:
 The file format it parses (kept regular on purpose; tests/test_seed_config.py checks it):
 
     -- PERSONA <persona name> <session_type>        followed by the leader_category and programs INSERTs
+    -- PROGRAM <persona name> <session_type>        followed by ONE programs INSERT: another program of that
+                                                    persona's leader category, for that session_type
     -- CONFIG <config_type> <config_source> <session_type>
     INSERT INTO config ... SELECT '<id>'::uuid, '<source>', '<name>', '<type>', '<program id>'::uuid, ...
     INSERT INTO config_version ... SELECT '<id>'::uuid, 1, TRUE, $cfg$ <json> $cfg$::jsonb, 'seed', '<note>'
@@ -46,7 +48,8 @@ _STR_OR_NULL = r"(?:'((?:[^']|'')*)'|NULL)"
 
 _PERSONA_MARKER = re.compile(r"^-- PERSONA (.+) (\S+)$", re.MULTILINE)
 _CONFIG_MARKER = re.compile(r"^-- CONFIG (\S+) (\S+) (\S+)$", re.MULTILINE)
-_BLOCK_END = re.compile(r"^-- (?:PERSONA|CONFIG) |^-- =====", re.MULTILINE)
+_PROGRAM_MARKER = re.compile(r"^-- PROGRAM (.+) (\S+)$", re.MULTILINE)
+_BLOCK_END = re.compile(r"^-- (?:PERSONA|CONFIG|PROGRAM) |^-- =====", re.MULTILINE)
 _LEADER_ROW = re.compile(
     rf"INSERT INTO leader_category .*?SELECT '({_UUID})'::uuid, {_STR}, {_STR}\n", re.DOTALL)
 _PROGRAM_ROW = re.compile(
@@ -97,6 +100,18 @@ def _parse() -> Dict[str, Any]:
         }
         if program.group(2) != leader.group(1):
             raise ValueError(f"seed_config.sql: program of {m.group(1)!r} does not point at its leader category")
+    programs: Dict[str, Dict[str, Any]] = {}
+    for m, body in _blocks_of(_PROGRAM_MARKER, text):
+        program = _PROGRAM_ROW.search(body)
+        persona = personas.get(m.group(1))
+        if program is None or persona is None:
+            raise ValueError(f"seed_config.sql: PROGRAM block {m.group(0)!r} lacks a programs row or names no persona")
+        if program.group(2) != persona["leader_category_id"]:
+            raise ValueError(f"seed_config.sql: PROGRAM block {m.group(0)!r} is not of its persona's leader category")
+        programs[m.group(2)] = {
+            "persona": m.group(1), "session_type": m.group(2), "leader_category_id": program.group(2),
+            "program_id": program.group(1), "program_name": _unq(program.group(3)), "tenant_code": _unq(program.group(4)),
+        }
     blocks: List[Dict[str, Any]] = []
     for m, body in _blocks_of(_CONFIG_MARKER, text):
         row = _CONFIG_ROW.search(body)
@@ -111,7 +126,7 @@ def _parse() -> Dict[str, Any]:
             "version_config_id": version.group(1), "config": json.loads(version.group(2)),
             "created_by": _unq(version.group(3)), "change_note": _unq(version.group(4)),
         })
-    return {"personas": personas, "blocks": blocks}
+    return {"personas": personas, "programs": programs, "blocks": blocks}
 
 
 _PARSED = _parse()
@@ -162,9 +177,15 @@ def _build_personas() -> Dict[str, Dict[str, Any]]:
 
 PERSONAS: Dict[str, Dict[str, Any]] = _build_personas()
 SESSION_TYPE_TO_PERSONA: Dict[str, str] = {p["session_type"]: name for name, p in PERSONAS.items()}
-# session types seeded under ANOTHER persona's program (a mitra upload + an extraction config, no PERSONA block of
-# their own): session_type -> persona. Youth_Voice_Cupshup is a second Youth bot of 1M Voice with the Youth settings.
-EXTRA_SESSION_TYPES: Dict[str, str] = {"Youth_Voice_Cupshup": "Youth"}
+# the `-- PROGRAM` blocks: session_type -> {"persona", "session_type", "leader_category_id", "program_id",
+# "program_name", "tenant_code"}. A session_type that runs as its own program of an existing persona's leader
+# category (a mitra upload + an extraction config of that program, no PERSONA block of its own); today
+# Youth_Voice_Cupshup, the Youth settings under the program '1 MV Campaign'.
+EXTRA_PROGRAMS: Dict[str, Dict[str, Any]] = copy.deepcopy(_PARSED["programs"])
+EXTRA_SESSION_TYPES: Dict[str, str] = {st: p["persona"] for st, p in EXTRA_PROGRAMS.items()}
+# every seeded session_type -> the id of the program its configs belong to
+SEEDED_PROGRAM_OF: Dict[str, str] = {**{p["session_type"]: p["program_id"] for p in PERSONAS.values()},
+                                     **{st: p["program_id"] for st, p in EXTRA_PROGRAMS.items()}}
 # every session_type that has a seeded mitra upload config and an extraction config, -> its persona
 SEEDED_SESSION_TYPE_TO_PERSONA: Dict[str, str] = {**SESSION_TYPE_TO_PERSONA, **EXTRA_SESSION_TYPES}
 SEEDED_SESSION_TYPES = tuple(sorted(SEEDED_SESSION_TYPE_TO_PERSONA))

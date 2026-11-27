@@ -18,7 +18,6 @@ import pg_support
 
 from app.database.db import db
 from app.database.feedback_operations import (
-    AmbiguousFeedbackConfigError,
     get_active_feedback_config,
     get_active_feedback_config_candidates,
     get_feedback_process_steps,
@@ -35,7 +34,7 @@ from app.services.feedback_constants import (
     DEFAULT_MAX_CSV_UPLOAD_BYTES,
     REQUIRED_FEEDBACK_CONFIG_KEYS,
 )
-from seed_support import PERSONAS, SEED_UPLOAD_CONFIG_COUNT
+from seed_support import EXTRA_PROGRAMS, PERSONAS, SEED_UPLOAD_CONFIG_COUNT
 
 DSN = pg_support.SERVER_URL
 pytestmark = pytest.mark.skipif(
@@ -219,13 +218,13 @@ def test_the_steps_of_a_persona_come_from_the_config_of_the_same_tenant_even_whe
 
 def test_active_config_lookup_can_be_narrowed_by_tenant_and_session_type():
     async def body(conn):
-        # the Youth program runs two mitra personas (Youth_Voice, Youth_Voice_Cupshup): unnarrowed is ambiguous
-        with pytest.raises(AmbiguousFeedbackConfigError, match="Youth_Voice, Youth_Voice_Cupshup"):
-            await get_active_feedback_config(YOUTH["program_id"], "mitra")
-        candidates = await get_active_feedback_config_candidates(YOUTH["program_id"], "mitra", tenant_code="mitra")
-        assert [c["session_type"] for c in candidates] == ["Youth_Voice", "Youth_Voice_Cupshup"]
-        base = await get_active_feedback_config(YOUTH["program_id"], "mitra", session_type="Youth_Voice")
+        # each program has one mitra persona: 1M Voice Youth -> Youth_Voice, 1 MV Campaign -> Youth_Voice_Cupshup
+        base = await get_active_feedback_config(YOUTH["program_id"], "mitra")
         assert base["session_type"] == "Youth_Voice"
+        candidates = await get_active_feedback_config_candidates(YOUTH["program_id"], "mitra", tenant_code="mitra")
+        assert [c["session_type"] for c in candidates] == ["Youth_Voice"]
+        campaign = await get_active_feedback_config(EXTRA_PROGRAMS["Youth_Voice_Cupshup"]["program_id"], "mitra")
+        assert campaign["session_type"] == "Youth_Voice_Cupshup"
         assert await get_active_feedback_config(YOUTH["program_id"], "mitra", tenant_code="mitra",
                                                 session_type="Youth_Voice") == base
         assert await get_active_feedback_config(YOUTH["program_id"], "mitra", tenant_code="other", session_type="Youth_Voice") is None

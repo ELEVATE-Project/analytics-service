@@ -27,8 +27,9 @@ pytestmark = pytest.mark.skipif(
 BLOCKS = seed_config_blocks()
 YOUTH = PERSONAS["Youth"]
 PARENT = PERSONAS["Parent"]
-# 4 personas; 13 configs = 5 mitra (the 4 personas + Youth_Voice_Cupshup) + 3 google_forms + 5 extraction
-COUNTS = {"leader_category": 4, "programs": 4, "config": 13, "config_version": 13}
+# 4 personas; 5 programs = the 4 personas' + 1 MV Campaign (Youth); 13 configs = 5 mitra (the 4 personas +
+# Youth_Voice_Cupshup) + 3 google_forms + 5 extraction
+COUNTS = {"leader_category": 4, "programs": 5, "config": 13, "config_version": 13}
 
 
 def _run(body, tenant=True):
@@ -73,7 +74,7 @@ async def _versions(conn, config_id):
 
 # ------------------------------------------------------------------------------------------------ what it writes
 
-def test_the_seed_writes_4_categories_4_programs_13_configs_and_13_active_version_1_rows():
+def test_the_seed_writes_4_categories_5_programs_13_configs_and_13_active_version_1_rows():
     async def body(conn):
         await seed_config(conn)
         assert await _counts(conn) == COUNTS
