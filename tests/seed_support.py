@@ -162,6 +162,12 @@ def _build_personas() -> Dict[str, Dict[str, Any]]:
 
 PERSONAS: Dict[str, Dict[str, Any]] = _build_personas()
 SESSION_TYPE_TO_PERSONA: Dict[str, str] = {p["session_type"]: name for name, p in PERSONAS.items()}
+# session types seeded under ANOTHER persona's program (a mitra upload + an extraction config, no PERSONA block of
+# their own): session_type -> persona. Youth_Voice_Cupshup is a second Youth bot of 1M Voice with the Youth settings.
+EXTRA_SESSION_TYPES: Dict[str, str] = {"Youth_Voice_Cupshup": "Youth"}
+# every session_type that has a seeded mitra upload config and an extraction config, -> its persona
+SEEDED_SESSION_TYPE_TO_PERSONA: Dict[str, str] = {**SESSION_TYPE_TO_PERSONA, **EXTRA_SESSION_TYPES}
+SEEDED_SESSION_TYPES = tuple(sorted(SEEDED_SESSION_TYPE_TO_PERSONA))
 GFORMS_PERSONAS = tuple(name for name, p in PERSONAS.items() if p["gforms_config_id"] is not None)
 FEEDBACK_PROGRAM_NAME = next(iter(PERSONAS.values()))["program_name"]
 # counts DERIVED from the parsed seed (no test that is not about the seed content repeats a number of the file)

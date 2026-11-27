@@ -28,7 +28,7 @@ from app.database.feedback_extraction_operations import (
     extract_submission,
 )
 from app.database.operations import insert_or_update_submission
-from seed_support import FEEDBACK_PROGRAM_NAME, PERSONAS, SEED_EXTRACTION_CONFIG_COUNT, extraction_config_id, extraction_config_v1, gforms_config_v1, mitra_config_v1, seed_config
+from seed_support import FEEDBACK_PROGRAM_NAME, PERSONAS, SEED_EXTRACTION_CONFIG_COUNT, SEEDED_SESSION_TYPE_TO_PERSONA, SEEDED_SESSION_TYPES, extraction_config_id, extraction_config_v1, gforms_config_v1, mitra_config_v1, seed_config
 from app.services import feedback_extraction as fx
 from app.temporal.feedback_extraction_activity import feedback_metadata_extraction_activity
 
@@ -182,12 +182,12 @@ def test_seed_writes_one_active_extraction_config_per_persona_and_never_overwrit
         rows = await conn.fetch(
             "SELECT c.*, cv.version, cv.is_active, cv.config AS cfg FROM config c JOIN config_version cv ON cv.config_id = c.id "
             "WHERE c.config_type = 'feedback_extraction' ORDER BY c.session_type")
-        assert [r["session_type"] for r in rows] == [
-            "Educator_Voice", "General_Public_Voice", "Parent_Voice", "Youth_Voice"]
+        assert [r["session_type"] for r in rows] == list(SEEDED_SESSION_TYPES) == [
+            "Educator_Voice", "General_Public_Voice", "Parent_Voice", "Youth_Voice", "Youth_Voice_Cupshup"]
         for r in rows:
             assert r["config_source"] == "any" and r["version"] == 1 and r["is_active"] is True
             assert r["bot_id"] is None
-            persona = {p["session_type"]: n for n, p in PERSONAS.items()}[r["session_type"]]
+            persona = SEEDED_SESSION_TYPE_TO_PERSONA[r["session_type"]]
             assert str(r["id"]) == extraction_config_id(r["session_type"])
             assert str(r["program_id"]) == PERSONAS[persona]["program_id"]
             parsed = fx.parse_extraction_config(json.loads(r["cfg"]))

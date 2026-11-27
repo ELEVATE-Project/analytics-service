@@ -19,7 +19,8 @@ import app.services.llm as llm_module
 from app.config import settings
 from app.database.db import SEED_PROMPTS_FILE
 from app.database.operations import insert_or_update_submission
-from seed_support import FEEDBACK_PROGRAM_NAME, PERSONAS, extraction_config_id, extraction_config_v1, seed_config
+from seed_support import (FEEDBACK_PROGRAM_NAME, PERSONAS, SEEDED_SESSION_TYPES, extraction_config_id, extraction_config_v1,
+                          load_seed_config, seed_config)
 
 _TOOL = Path(__file__).resolve().parent.parent / "tools" / "run_feedback_extraction.py"
 _spec = importlib.util.spec_from_file_location("run_feedback_extraction_cli", _TOOL)
@@ -295,7 +296,7 @@ def test_show_config_prints_the_active_versions_for_every_persona_or_one(seeded,
     code, out, err = _call(capsys, ["show-config"])
     assert code == 0 and err == ""
     shown = json.loads(out)
-    expected = {p["session_type"]: extraction_config_v1(name) for name, p in PERSONAS.items()}
+    expected = {st: load_seed_config("feedback_extraction", "any", st) for st in SEEDED_SESSION_TYPES}
     assert [c["session_type"] for c in shown] == sorted(expected)
     assert all(c["config_source"] == "any" and c["version"] == 1 for c in shown)
     for entry in shown:

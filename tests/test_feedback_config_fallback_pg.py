@@ -34,7 +34,7 @@ from app.database.feedback_operations import (
 )
 from app.kafka.consumer import IngestionConsumer
 from app.services.feedback_constants import FEEDBACK_METADATA_EXTRACTION_STEP
-from seed_support import PERSONAS, extraction_config_v1
+from seed_support import PERSONAS, extraction_config_v1, gforms_config_v1
 
 DSN = pg_support.SERVER_URL
 pytestmark = pytest.mark.skipif(
@@ -241,14 +241,31 @@ def test_the_upload_target_resolves_the_default_for_a_program_without_a_config_a
     _run(body)
 
 
-def test_the_upload_target_is_a_409_when_the_winning_level_is_ambiguous():
+def test_two_conversation_rows_defaults_are_candidates_the_file_picks_from():
     async def body(conn):
         w = await _world(conn)
         await _add_default(conn, "mitra", 5_555, session_type="Youth_Voice")        # two defaults, persona not named
+        target = await upload_service.load_feedback_target("Beta", "Parent", "mitra", SOURCE)
+        assert target["active"] is None                                            # picked once the file is parsed
+        assert [c["session_type"] for c in target["candidates"]] == ["Parent_Voice", "Youth_Voice"]
+        assert all(c["program_id"] is None for c in target["candidates"])          # the defaults, never Alpha's own
+        assert target["max_csv_upload_bytes"] == 5_555                             # the largest cap bounds the read
+        # a stored record names its persona: exactly that default
+        named = await upload_service.load_feedback_target("Beta", "Parent", "mitra", SOURCE, session_type="Youth_Voice")
+        assert named["active"]["session_type"] == "Youth_Voice" and named["max_csv_upload_bytes"] == 5_555
+        # the program with a config of its own is not affected by the defaults
+        assert (await upload_service.load_feedback_target("Alpha", "Parent", "mitra", SOURCE))["max_csv_upload_bytes"] == OWN_CAP
+    _run(body)
+
+
+def test_the_upload_target_is_a_409_when_the_winning_level_can_not_be_told_apart_by_the_file():
+    async def body(conn):
+        await _world(conn)
+        # a wide_form default beside the conversation_rows one: only conversation_rows files carry a session_type
+        await _add_default(conn, "mitra", 5_555, session_type="Youth_Voice",
+                           config={**gforms_config_v1("Youth"), "max_csv_upload_bytes": 5_555})
         with pytest.raises(upload_service.AmbiguousFeedbackTarget):
             await upload_service.load_feedback_target("Beta", "Parent", "mitra", SOURCE)
-        # the program with a config of its own is not affected by the ambiguity of the default
-        assert (await upload_service.load_feedback_target("Alpha", "Parent", "mitra", SOURCE))["max_csv_upload_bytes"] == OWN_CAP
     _run(body)
 
 

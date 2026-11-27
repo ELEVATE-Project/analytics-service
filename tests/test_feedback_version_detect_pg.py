@@ -112,7 +112,8 @@ def test_detect_with_no_sessions_or_one_version_of_questions_proposes_nothing():
         same = (await detect_questionnaire_versions("Youth_Voice", min_sessions=5))["Youth_Voice"]
         assert same["sessions"] == 30 and same["proposal"] is None and same["new_questions"] == []
         everyone = await detect_questionnaire_versions()
-        assert set(everyone) == {"Educator_Voice", "General_Public_Voice", "Parent_Voice", "Youth_Voice"}
+        assert set(everyone) == {"Educator_Voice", "General_Public_Voice", "Parent_Voice", "Youth_Voice",
+                                 "Youth_Voice_Cupshup"}
         assert await detect_questionnaire_versions("Nobody_Voice") == {}
     _run(body)
 

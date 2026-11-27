@@ -39,7 +39,7 @@ needs_db = pytest.mark.skipif(
 V2_TEXT = "2026-11-03T18:23:03+05:30"
 V2_UTC = datetime(2026, 11, 3, 12, 53, 3, tzinfo=timezone.utc)
 V3_TEXT = "2026-12-01T10:30:00+05:30"
-ST_ALL = ["Educator_Voice", "General_Public_Voice", "Parent_Voice", "Youth_Voice"]
+ST_ALL = ["Educator_Voice", "General_Public_Voice", "Parent_Voice", "Youth_Voice", "Youth_Voice_Cupshup"]
 
 
 # ====================================================================================== no database

@@ -22,7 +22,8 @@ import pg_support
 
 import app.database.feedback_operations as feedback_ops
 from app.database.db import db
-from seed_support import FEEDBACK_PROGRAM_NAME, PERSONAS, SEED_CONFIG_COUNT, gforms_config_v1, mitra_config_v1, seed_config
+from seed_support import (EXTRA_SESSION_TYPES, FEEDBACK_PROGRAM_NAME, PERSONAS, SEED_CONFIG_COUNT, gforms_config_v1,
+                          mitra_config_v1, seed_config, seed_config_blocks)
 
 DSN = pg_support.SERVER_URL
 
@@ -127,9 +128,9 @@ async def _add_config(conn, source, session_type, program_id=YOUTH["program_id"]
         "VALUES ($1, $2, 'feedback_upload', $3::uuid, 'mitra', $4, $5)", source, name, program_id, session_type, bot_id)
 
 
-# 4 personas (Youth, Parent, General Public, Educator): 4 Mitra configs + 3 Google Forms configs (no Educator form)
-# + 4 extraction configs, each with its version 1 (seed_config.sql)
-SEED_COUNTS = {"leader_category": 4, "programs": 4, "config": 11, "config_version": 11}
+# 4 personas (Youth, Parent, General Public, Educator): 5 Mitra configs (the 4 personas + Youth_Voice_Cupshup under the
+# Youth program) + 3 Google Forms configs (no Educator form) + 5 extraction configs, each with its version 1
+SEED_COUNTS = {"leader_category": 4, "programs": 4, "config": 13, "config_version": 13}
 
 
 def test_schema_applies_twice_and_seed_counts():
@@ -194,13 +195,21 @@ def test_seeded_rows_match_the_contract():
     run_db(body)
 
 
+def _bot_of(session_type):
+    """The bot id recorded (informationally) on the seeded mitra config row of `session_type`."""
+    return next(b["bot_id"] for b in seed_config_blocks()
+                if (b["config_type"], b["config_source"], b["session_type"]) == ("feedback_upload", "mitra", session_type))
+
+
 def test_google_forms_and_mitra_configs_of_one_program_coexist():
     async def body(conn):
         for name, p in PERSONAS.items():
             rows = await conn.fetch(
                 "SELECT config_source, session_type, bot_id FROM config WHERE program_id = $1::uuid "
-                "AND config_type = 'feedback_upload' ORDER BY config_source", p["program_id"])
+                "AND config_type = 'feedback_upload' ORDER BY config_source, session_type", p["program_id"])
             expected = [("mitra", p["session_type"], p["bot_id"])]
+            # the session types seeded under this persona's program (Youth: Youth_Voice_Cupshup, bot 205)
+            expected += [("mitra", st, _bot_of(st)) for st, persona in sorted(EXTRA_SESSION_TYPES.items()) if persona == name]
             if name in GFORMS_PERSONA_NAMES:
                 expected.insert(0, ("google_forms", p["session_type"], None))
             assert [(r["config_source"], r["session_type"], r["bot_id"]) for r in rows] == expected

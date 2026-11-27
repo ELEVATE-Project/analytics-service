@@ -32,7 +32,7 @@ pytestmark = pytest.mark.skipif(
     DSN is None or DSN == "", reason="FEEDBACK_TEST_DATABASE_URL not set (real Postgres required)")
 
 YOUTH, PARENT, GENERAL, EDUCATOR = (PERSONAS[n] for n in ("Youth", "Parent", "General Public", "Educator"))
-ST_ALL = ("Educator_Voice", "General_Public_Voice", "Parent_Voice", "Youth_Voice")
+ST_ALL = ("Educator_Voice", "General_Public_Voice", "Parent_Voice", "Youth_Voice", "Youth_Voice_Cupshup")
 
 V2_TEXT = "2026-11-03T18:23:03+05:30"      # = 2026-11-03 12:53:03 UTC
 V3_TEXT = "2026-12-01T10:30:00+05:30"      # = 2026-12-01 05:00:00 UTC
@@ -543,7 +543,7 @@ def test_list_reports_versions_config_version_and_session_counts_for_all_four_pe
         await _add(conn, "Youth", "V1", _at(2026, 11, 5, 9, 0, 0), source="google_forms")  # forms are not counted
 
         listed = await list_questionnaire_versions()
-        assert list(listed) == list(ST_ALL)                  # sorted by session_type, all four
+        assert list(listed) == list(ST_ALL)                  # sorted by session_type, every seeded mitra persona
         assert listed["Youth_Voice"]["config_version"] == 3
         assert _keys(listed["Youth_Voice"]["versions"]) == BASE + [("V2", V2_TEXT), ("V3", V3_TEXT)]
         assert listed["Youth_Voice"]["sessions"] == {"V9": 4}

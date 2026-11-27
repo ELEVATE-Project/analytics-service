@@ -170,7 +170,7 @@ def test_seed_holds_only_the_baseline_and_the_recorded_windows_match_the_constan
         rows = await conn.fetch(
             "SELECT c.session_type, v.version, v.config FROM config c JOIN config_version v ON v.config_id = c.id "
             "WHERE c.config_source = 'mitra' AND v.is_active")
-        assert len(rows) == 4
+        assert len(rows) == 5  # the 4 personas + Youth_Voice_Cupshup
         for r in rows:
             assert r["version"] == 1
             assert json.loads(r["config"])["questionnaire_versions"] == [{"key": "V1", "effective_from": None}]
@@ -196,6 +196,7 @@ def test_dry_run_reports_the_counts_and_changes_nothing():
             "Parent_Voice": {"sessions": 3, "changed": 2, "versions": {"V1": 1, "V2": 2}},
             "Educator_Voice": {"sessions": 2, "changed": 1, "versions": {"V1": 2}},
             "General_Public_Voice": {"sessions": 0, "changed": 0, "versions": {}},  # configured, no session
+            "Youth_Voice_Cupshup": {"sessions": 0, "changed": 0, "versions": {}},
         }
         assert await _stamps(conn) == before  # labels and updated_at untouched
         assert (await _versions(conn))[ids["y_early_wrong"]] == "V2"
@@ -209,7 +210,7 @@ def test_real_run_relabels_exactly_the_sessions_whose_window_differs():
         res = await restamp_questionnaire_versions()
         assert res["dry_run"] is False and res["changed"] == len(WRONG)
         assert {st: v["changed"] for st, v in res["session_types"].items()} == {
-            "Youth_Voice": 2, "Parent_Voice": 2, "Educator_Voice": 1, "General_Public_Voice": 0}
+            "Youth_Voice": 2, "Parent_Voice": 2, "Educator_Voice": 1, "General_Public_Voice": 0, "Youth_Voice_Cupshup": 0}
         after = await _stamps(conn)
         assert {name: after[sid][0] for name, sid in ids.items()} == EXPECTED_AFTER
         for name, sid in ids.items():
@@ -279,7 +280,8 @@ def test_no_sessions_gives_zero_counts_per_configured_persona():
     async def body(conn):
         res = await restamp_questionnaire_versions()
         assert res["changed"] == 0
-        assert set(res["session_types"]) == {"Youth_Voice", "Parent_Voice", "General_Public_Voice", "Educator_Voice"}
+        assert set(res["session_types"]) == {"Youth_Voice", "Parent_Voice", "General_Public_Voice", "Educator_Voice",
+                                             "Youth_Voice_Cupshup"}
         assert all(_counts(v) == {"sessions": 0, "changed": 0, "versions": {}} for v in res["session_types"].values())
     _run(body)
 

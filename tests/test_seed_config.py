@@ -20,6 +20,7 @@ from app.services import feedback_extraction as fx
 from app.services.feedback_constants import feedback_config_key_defaults
 from app.services.feedback_versions import parse_versions
 from seed_support import (
+    EXTRA_SESSION_TYPES,
     PERSONAS,
     SEED_CONFIG_FILE,
     seed_config_blocks,
@@ -28,9 +29,6 @@ from seed_support import (
 
 SQL = seed_config_sql()
 BLOCKS = seed_config_blocks()
-# session types that run under ANOTHER persona's program (no PERSONA block of their own): session_type -> persona.
-# Youth_Voice_Cupshup is a second Youth bot of 1M Voice; its upload picks its config by the file's session_type.
-EXTRA_SESSION_TYPES = {"Youth_Voice_Cupshup": "Youth"}
 MITRA_SESSION_TYPES = ("Educator_Voice", "General_Public_Voice", "Parent_Voice", "Youth_Voice", "Youth_Voice_Cupshup")
 EXPECTED_BLOCKS = sorted(
     [("feedback_upload", "mitra", st) for st in MITRA_SESSION_TYPES]
