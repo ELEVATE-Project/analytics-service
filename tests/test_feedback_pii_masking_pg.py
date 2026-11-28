@@ -88,6 +88,11 @@ async def _set_config(conn, masking):
     raw["pii"] = {"extraction_text": "masked"} if masking is None else {"masking_prompt_name": masking, "extraction_text": "masked"}
     await conn.execute("UPDATE config_version SET config = $2::jsonb WHERE config_id = $1::uuid",
                        extraction_config_id("Youth_Voice"), json.dumps(raw))
+    if masking is None:
+        await conn.execute(
+            "UPDATE prompt_version SET system_prompt = system_prompt || E'\n{{pii_types}}' "
+            "WHERE prompt_id = (SELECT id FROM prompts WHERE name = 'Feedback Metadata Extraction') "
+            "AND system_prompt NOT LIKE '%{{pii_types}}%'")
 
 
 class Fake:

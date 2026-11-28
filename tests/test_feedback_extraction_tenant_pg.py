@@ -57,6 +57,10 @@ def _run(body):
             await conn.execute("DELETE FROM config_version")
             await conn.execute("DELETE FROM config")
             await conn.execute(SEED_PROMPTS_FILE.read_text(encoding="utf-8"))
+            await conn.execute(
+                "UPDATE prompt_version SET system_prompt = system_prompt || E'\n{{pii_types}}' "
+                "WHERE prompt_id = (SELECT id FROM prompts WHERE name = 'Feedback Metadata Extraction') "
+                "AND system_prompt NOT LIKE '%{{pii_types}}%'")
             await seed_config(conn)
             pool = await asyncpg.create_pool(DSN, min_size=2, max_size=6)
             db.pool = pool
