@@ -40,6 +40,10 @@ async def _use_config(conn, sid, version):
            "prompt_name": "Feedback Metadata Extraction", "fields": FIELDS}
     await conn.execute("UPDATE config_version SET config = $2::jsonb WHERE config_id = $1::uuid",
                        extraction_config_id("Youth_Voice"), json.dumps(raw))
+    await conn.execute(
+        "UPDATE prompt_version SET system_prompt = system_prompt || E'\n{{pii_types}}' "
+        "WHERE prompt_id = (SELECT id FROM prompts WHERE name = 'Feedback Metadata Extraction') "
+        "AND system_prompt NOT LIKE '%{{pii_types}}%'")
     await conn.execute("UPDATE feedback_submissions SET questionnaire_version = $2 WHERE submission_id = $1", sid, version)
 
 

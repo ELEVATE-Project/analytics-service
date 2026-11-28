@@ -1168,7 +1168,6 @@ def _render_output_format(config: ExtractionConfig) -> str:
     example = {
         "fields": {f.name: {"value": [] if f.multi else None, "raw": None, "confidence": None, "justification": None}
                    for f in config.fields},
-        "pii": {"detected": False, "types": []},
     }
     return json.dumps(example, indent=2) + "\n\n" + JUSTIFICATION_INSTRUCTION
 
@@ -1654,7 +1653,7 @@ def _bare_config(spec: FieldSpec, limits: Limits, placeholders: FrozenSet[str]) 
     return ExtractionConfig("-", "-", (spec,), ("other",), {}, "-", {}, limits, DEFAULT_PII_POLICY, placeholders, {})
 
 
-def parse_model_response(text: Any, config: ExtractionConfig) -> ExtractionResult:
+def parse_model_response(text: Any, config: ExtractionConfig, *, require_pii: bool = True) -> ExtractionResult:
     """
     Strictly validates the model's answer. Accepted shape (markdown fences around it are tolerated):
 
@@ -1676,8 +1675,10 @@ def parse_model_response(text: Any, config: ExtractionConfig) -> ExtractionResul
         raise ExtractionOutputError("model answer is not valid JSON (strict, no duplicate keys)") from exc
     if not isinstance(data, dict):
         raise ExtractionOutputError("model answer must be a JSON object")
-    if set(data) != {"fields", "pii"}:
+    if require_pii and set(data) != {"fields", "pii"}:
         raise ExtractionOutputError("model answer must have exactly the keys 'fields' and 'pii'")
+    if not (set(data) <= {"fields", "pii"} and "fields" in data):
+        raise ExtractionOutputError("model answer must have 'fields' (and optionally 'pii')")
 
     fields = data["fields"]
     if not isinstance(fields, dict):
@@ -1693,6 +1694,9 @@ def parse_model_response(text: Any, config: ExtractionConfig) -> ExtractionResul
         if not isinstance(entry, dict):
             raise ExtractionOutputError(f"field {spec.name!r} must be an object")
         results.append(_map_field(spec, entry, config))
+
+    if "pii" not in data:
+        return ExtractionResult(tuple(results), False, ())
 
     pii = data["pii"]
     if not isinstance(pii, dict) or not set(pii) <= {"detected", "types"} or "detected" not in pii:
@@ -1836,6 +1840,10 @@ def extract(
     extraction_conversation = original if config.pii_policy.extraction_text == EXTRACTION_TEXT_ORIGINAL else conversation
     try:
         prompt = render_prompt(system_template, user_template, config, extraction_conversation)
+        if masking is None and "{{pii_types}}" not in system_template:
+            raise ExtractionConfigError(
+                "a fields-only extraction prompt (without {{pii_types}}) requires a masking step"
+            )
         note(STAGE_METADATA_EXTRACTION, "running")
         try:
             answer, usage = call_llm(prompt)
@@ -1844,7 +1852,7 @@ def extract(
             raise
         usage = usage if isinstance(usage, dict) else {}
         try:
-            result = parse_model_response(answer, config)
+            result = parse_model_response(answer, config, require_pii=(masking is None))
         except ExtractionOutputError as exc:
             exc.usage = usage
             exc.response = answer

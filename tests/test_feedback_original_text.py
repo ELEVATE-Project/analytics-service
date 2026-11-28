@@ -73,7 +73,7 @@ class Calls:
 def _run(config, calls=None):
     calls = calls or Calls()
     step = pm.MaskingStep("keys {columns}", "Analyse the following answers:\n{{text}}", calls.masking_call) if config.pii_policy.masking_prompt_name else None
-    run = fx.extract(ROWS, config, "{{fields}}", "{{conversation}}", calls.extraction_call, (), step)
+    run = fx.extract(ROWS, config, "{{fields}} {{pii_types}}", "{{conversation}}", calls.extraction_call, (), step)
     return run, calls
 
 

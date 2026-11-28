@@ -104,6 +104,10 @@ def _reset(legacy):
         await conn.execute(SEED_PROMPTS_FILE.read_text(encoding="utf-8"))
         await seed_config(conn)
         if legacy:
+            await conn.execute(
+                "UPDATE prompt_version SET system_prompt = system_prompt || E'\n{{pii_types}}' "
+                "WHERE prompt_id = (SELECT id FROM prompts WHERE name = 'Feedback Metadata Extraction') "
+                "AND system_prompt NOT LIKE '%{{pii_types}}%'")
             for persona_name, persona in PERSONAS.items():
                 await conn.execute("UPDATE config_version SET config = $2::jsonb WHERE config_id = $1::uuid",
                                    extraction_config_id(persona["session_type"]), json.dumps(_four_field_raw(persona_name)))

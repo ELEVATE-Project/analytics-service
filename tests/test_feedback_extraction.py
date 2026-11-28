@@ -130,7 +130,7 @@ def test_seed_prompt_only_uses_variables_the_renderer_knows():
     used = set(re.findall(r"\{\{\s*([A-Za-z_]+)\s*\}\}", block))
     known = {"persona", "fields", "field_names", "pii_types", "output_format", "conversation_id", "conversation"}
     assert used <= known
-    assert {"conversation", "conversation_id", "fields", "pii_types", "output_format"} <= used
+    assert {"conversation", "conversation_id", "fields", "output_format"} <= used
     assert "ignore" in block.lower() and "DATA" in block   # the injection rule is part of the prompt
 
 
@@ -298,7 +298,7 @@ def test_prompt_contains_every_field_band_guidance_pii_type_and_the_conversation
     assert "Youth" in prompt and "state, district, gender, school_type" in prompt
     assert conversation.text in prompt
     assert prompt.count(conversation.conversation_id) == 3   # system + begin + end
-    assert '"pii"' in prompt and '"confidence"' in prompt
+    assert '"fields"' in prompt and '"confidence"' in prompt
 
 
 def test_prompt_variable_values_are_not_rescanned_so_respondent_text_cannot_inject_a_variable():
@@ -421,7 +421,6 @@ def _mutated(mutate):
 
 @pytest.mark.parametrize("mutate", [
     lambda d: d.update(extra=1),                                              # unknown top-level key
-    lambda d: d.pop("pii"),
     lambda d: d["fields"].update(age={"value": "12", "raw": "12"}),            # unknown field
     lambda d: d["fields"].pop("gender"),                                       # missing field
     lambda d: d["fields"]["state"].update(extra="x"),                          # unknown key in a field
